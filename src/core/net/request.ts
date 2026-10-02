@@ -36,6 +36,8 @@ export interface NetResult {
   /** 응답한 앱이 본 출발지 IP 와 X-Forwarded-For */
   seenSource?: string;
   forwardedFor?: string;
+  /** HTTP 응답 코드 (응답을 받았을 때) */
+  httpStatus?: number;
   /** 실패의 종류 — 도구마다 다른 문구(wget 등)를 만들 때 쓴다 */
   failure?: { kind: "dns" | "refused" | "timeout" | "http" | "nohttp"; host: string; ip?: string };
 }
@@ -79,7 +81,7 @@ export function parseTarget(target: string): { host: string; port: number; path:
   const m = /^(?:(https?):\/\/)?([a-zA-Z0-9.-]+)(?::(\d+))?(\/[^\s]*)?$/.exec(target.trim());
   if (!m) return undefined;
   const https = m[1] === "https";
-  return { host: m[2]!.toLowerCase(), port: m[3] ? Number(m[3]) : https ? 443 : 80, path: m[4] ?? "/", https };
+  return { host: m[2]!.toLowerCase(), port: m[3] ? Number(m[3]) : https ? 443 : 80, path: (m[4] ?? "/").split(/[?#]/)[0] || "/", https };
 }
 
 /** 요청 한 번 동안 바뀌지 않는 것 (출력 문구용) */
@@ -135,6 +137,26 @@ export function simulateFromPod(c: Cluster, from: Pod, tool: Tool, target: strin
 }
 
 function send(c: Cluster, src: Source, req: Req, ip: string, port: number, steps: NetStep[]): NetResult {
+  // 노드 IP 로: 그 노드까지 가서 그 노드의 KUBE-NODEPORTS 가 처리한다 (ping 이면 노드가 답한다)
+  const toNode = !src.outside ? c.api.peekList("Node").find((n) => n.status.addresses.some((a) => a.type === "InternalIP" && a.address === ip)) : undefined;
+  if (toNode) {
+    const nn = toNode.metadata.name;
+    steps.push({ kind: "route", actor: src.pod ?? src.node, text: `${ip} 는 노드 ${nn} 의 주소 → ${nn === src.node ? "자기 노드" : "노드 네트워크로 그 노드까지"}`, at: { node: nn } });
+    if (!c.nodePowered(nn)) {
+      steps.push({ kind: "fail", actor: src.pod ?? src.node, text: `${nn} 가 꺼져 있어 답이 없음` });
+      return timedOut(req, steps, ip);
+    }
+    if (req.tool === "ping") {
+      steps.push({ kind: "response", actor: nn, text: `노드 ${nn} 가 ICMP echo 에 답함`, at: { node: nn } });
+      return { ok: true, steps, output: pingOut(req.host, ip, 3, 63) };
+    }
+    const np = c.kubeProxies.get(nn)?.currentRules.find((r) => r.nodePort === port);
+    if (!np) {
+      steps.push({ kind: "fail", actor: nn, text: `${nn}:${port} 에서 듣는 것도, KUBE-NODEPORTS 규칙도 없음 → 연결 거부`, at: { node: nn } });
+      return refused(req, steps, ip, 1);
+    }
+    return viaService(c, { ...src, node: nn, outside: "nodeport" }, np, req, steps);
+  }
   const proxy = c.kubeProxies.get(src.node);
   const rules = proxy?.currentRules ?? [];
   const rule = rules.find((r) => (r.clusterIP === ip || r.lbIP === ip) && (req.tool === "ping" || r.port === port));
@@ -158,19 +180,21 @@ function send(c: Cluster, src: Source, req: Req, ip: string, port: number, steps
     steps.push({ kind: "fail", actor: src.pod ?? src.node, text: "응답 없음 → 연결 시간 초과" });
     return timedOut(req, steps, ip);
   }
-  if (rule) return viaService(c, rule.lbIP === ip && !src.outside ? { ...src, outside: "lb" } : src, rule, req, steps);
+  // Pod 에서 LoadBalancer IP 로 온 것: KUBE-EXT 의 "pod traffic" 규칙이 바로 KUBE-SVC 로 보낸다 (Local 이어도 모든 엔드포인트, SNAT 없음)
+  if (rule) return viaService(c, src, rule, req, steps, rule.lbIP === ip && !src.outside ? "pod-to-lb" : undefined);
   return deliverToIp(c, src, req, ip, port, steps);
 }
 
-function viaService(c: Cluster, src: Source, rule: SvcRule, req: Req, steps: NetStep[]): NetResult {
+function viaService(c: Cluster, src: Source, rule: SvcRule, req: Req, steps: NetStep[], how?: "pod-to-lb"): NetResult {
   const where = `iptables@${src.node}`;
   const local = !!src.outside && rule.externalTrafficPolicy === "Local";
   const pool: SepRule[] = local ? rule.seps.filter((s) => s.nodeName === src.node) : rule.seps;
   if (!rule.seps.length) {
+    const target = src.outside === "lb" || how ? `LoadBalancer IP ${rule.lbIP}:${rule.port} → filter 테이블 KUBE-EXTERNAL-SERVICES` : src.outside === "nodeport" ? `NodePort ${rule.nodePort} → filter 테이블 KUBE-EXTERNAL-SERVICES` : `${rule.clusterIP}:${rule.port} → filter 테이블 KUBE-SERVICES`;
     steps.push({
       kind: "dnat",
       actor: where,
-      text: `${rule.clusterIP}:${rule.port} → filter 테이블 KUBE-SERVICES 의 "${rule.ns}/${rule.name} has no endpoints" REJECT 규칙 (ready 인 Pod 가 하나도 없음)`,
+      text: `${target} 의 "${rule.ns}/${rule.name} has no endpoints" REJECT 규칙 (ready 인 Pod 가 하나도 없음)`,
       at: { service: rule.name, node: src.node },
     });
     steps.push({ kind: "fail", actor: src.pod ?? src.node, text: "ICMP port-unreachable 을 받음 → 연결 거부" });
@@ -189,7 +213,14 @@ function viaService(c: Cluster, src: Source, rule: SvcRule, req: Req, steps: Net
   const n = pool.length;
   const sep = pool[c.netRng.int(n)]!;
   const odds = n === 1 ? "하나뿐" : `${n}개 중 하나를 고름 (확률 1/${n})`;
-  const entry = src.outside === "lb" ? `LoadBalancer IP ${rule.lbIP}:${rule.port} → KUBE-EXT → ` : src.outside === "nodeport" ? `KUBE-NODEPORTS ${rule.nodePort} → KUBE-EXT → ` : `${rule.clusterIP}:${rule.port} 가 KUBE-SERVICES → `;
+  const entry =
+    src.outside === "lb"
+      ? `LoadBalancer IP ${rule.lbIP}:${rule.port} → KUBE-EXT → `
+      : src.outside === "nodeport"
+        ? `KUBE-NODEPORTS ${rule.nodePort} → KUBE-EXT → `
+        : how === "pod-to-lb"
+          ? `LoadBalancer IP ${rule.lbIP}:${rule.port} → KUBE-EXT 의 "pod traffic" 규칙 (클러스터 안에서 온 것은 externalTrafficPolicy 와 상관없이) → `
+          : `${rule.clusterIP}:${rule.port} 가 KUBE-SERVICES → `;
   const nodeIp = c.api.get("Node", src.node)?.status.addresses.find((a) => a.type === "InternalIP")?.address ?? src.node;
   let next = src;
   let snat = "";
@@ -260,6 +291,7 @@ function deliverToIp(c: Cluster, src: Source, req: Req, ip: string, port: number
     return {
       ok: false,
       steps,
+      httpStatus: 503,
       failure: { kind: "http", host: req.host, ip },
       output: `<html><body>503 Service Unavailable</body></html>\n${seen}`,
       servedBy: pod.metadata.name,
@@ -274,7 +306,7 @@ function deliverToIp(c: Cluster, src: Source, req: Req, ip: string, port: number
     at: { pod: pod.metadata.name },
   });
   const body = spec.role === "echo" ? `Hostname: ${pod.metadata.name}\nIP: ${ip}\nRemoteAddr: ${src.ip}:${40000 + c.netRng.int(20000)}\nGET ${req.path} HTTP/1.1\nHost: ${req.httpHost}${src.xff ? `\nX-Forwarded-For: ${src.xff}` : ""}` : spec.body;
-  return { ok: true, steps, output: `${body}\n${seen}`, servedBy: pod.metadata.name, seenSource: src.ip, forwardedFor: src.xff };
+  return { ok: true, steps, httpStatus: 200, output: `${body}\n${seen}`, servedBy: pod.metadata.name, seenSource: src.ip, forwardedFor: src.xff };
 }
 
 /** ingress-nginx 컨트롤러 Pod: Host·경로로 Ingress 규칙을 찾아 그 Service 의 엔드포인트(Pod IP)로 직접 새 연결 */
@@ -285,7 +317,7 @@ function viaIngressNginx(c: Cluster, pod: Pod, src: Source, req: Req, steps: Net
   const name = pod.metadata.name;
   if (!m) {
     steps.push({ kind: "response", actor: name, text: `Host ${req.httpHost} · 경로 ${req.path} 에 맞는 Ingress 규칙이 없음 → ingress-nginx 의 기본 백엔드가 404`, at: { pod: name } });
-    return { ok: false, steps, failure: { kind: "http", host: req.host }, output: "<html><head><title>404 Not Found</title></head><body><center><h1>404 Not Found</h1></center><hr><center>nginx</center></body></html>", servedBy: name };
+    return { ok: false, steps, httpStatus: 404, failure: { kind: "http", host: req.host }, output: "<html><head><title>404 Not Found</title></head><body><center><h1>404 Not Found</h1></center><hr><center>nginx</center></body></html>", servedBy: name };
   }
   const svc = c.api.get("Service", m.backend.service.name, ns);
   const eps = svc ? readyEndpoints(c, ns, svc, m.backend.service.port.number) : [];
@@ -294,6 +326,7 @@ function viaIngressNginx(c: Cluster, pod: Pod, src: Source, req: Req, steps: Net
     return {
       ok: false,
       steps,
+      httpStatus: 503,
       failure: { kind: "http", host: req.host },
       output: "<html><head><title>503 Service Temporarily Unavailable</title></head><body><center><h1>503 Service Temporarily Unavailable</h1></center><hr><center>nginx</center></body></html>",
       servedBy: name,
@@ -320,7 +353,7 @@ function viaTailscaleProxy(c: Cluster, pod: Pod, src: Source, req: Req, steps: N
   const name = pod.metadata.name;
   if (!be || !svc?.spec.clusterIP) {
     steps.push({ kind: "response", actor: name, text: `Ingress 의 backend Service ${be?.service.name ?? "(없음)"} 를 찾지 못함 → 502`, at: { pod: name } });
-    return { ok: false, steps, failure: { kind: "http", host: req.host }, output: "<html><body>502 Bad Gateway</body></html>", servedBy: name };
+    return { ok: false, steps, httpStatus: 502, failure: { kind: "http", host: req.host }, output: "<html><body>502 Bad Gateway</body></html>", servedBy: name };
   }
   const xff = src.xff ? `${src.xff}, ${src.ip}` : src.ip;
   steps.push({
@@ -412,6 +445,10 @@ function viaFunnel(c: Cluster, req: Req, clientIp: string, steps: NetStep[]): Ne
     return { ok: false, steps, failure: { kind: "dns", host: req.host }, output: `curl: (6) Could not resolve host: ${req.host}` };
   }
   steps.push({ kind: "dns", actor: "공인 DNS", text: `${req.host} → Tailscale Funnel 중계 서버의 공인 IP (funnel 켜짐)`, at: { outside: true } });
+  if (![443, 8443, 10000].includes(req.port)) {
+    steps.push({ kind: "fail", actor: "tailscale-funnel", text: `Funnel 은 HTTPS 포트 443·8443·10000 만 받음 — ${req.port} 로는 들어갈 수 없다 (https:// 로)`, at: { outside: true } });
+    return refused(req, steps, req.host, 30);
+  }
   const proxy = c.api
     .peekList("Pod", ing.metadata.namespace ?? "default")
     .find((p) => p.metadata.labels["tailscale.com/parent-resource"] === ing.metadata.name && p.metadata.deletionTimestamp === undefined && p.status.podIP && p.spec.nodeName);

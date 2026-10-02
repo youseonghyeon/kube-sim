@@ -978,6 +978,13 @@ function firstOperand(tool: string, args: string[]): string | undefined {
   return undefined;
 }
 
+/** kubectl 없이 친 "curl …" 의 대상 URL (값을 받는 옵션은 건너뛴다). curl 로 시작하지 않으면 undefined */
+export function curlTarget(line: string): string | undefined {
+  const args = tokenize(line.trim());
+  if (args[0] !== "curl") return undefined;
+  return firstOperand("curl", args.slice(1)) ?? "";
+}
+
 /** busybox wget 의 문구 */
 function wgetOutput(r: NetResult): string {
   const f = r.failure;
@@ -989,8 +996,11 @@ function wgetOutput(r: NetResult): string {
       return `wget: can't connect to remote host (${f.ip ?? f.host}): Connection refused`;
     case "timeout":
       return "wget: download timed out";
-    case "http":
-      return "wget: server returned error: HTTP/1.1 503 Service Unavailable";
+    case "http": {
+      const reason: Record<number, string> = { 404: "Not Found", 502: "Bad Gateway", 503: "Service Unavailable" };
+      const code = r.httpStatus ?? 503;
+      return `wget: server returned error: HTTP/1.1 ${code} ${reason[code] ?? ""}`.trimEnd();
+    }
     case "nohttp":
       return "wget: error getting response: Connection reset by peer";
   }

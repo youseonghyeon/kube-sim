@@ -40,7 +40,9 @@
 - kube-proxy: 바깥(LB IP·NodePort) → KUBE-EXT. Cluster 면 KUBE-MARK-MASQ(SNAT) 후 모든 엔드포인트, Local 이면 KUBE-SVL(이 노드의 엔드포인트만, 없으면 DROP).
 - 요청은 `Source.ip`(받는 쪽이 볼 출발지)와 `xff` 를 들고 다닌다. SNAT 에서 노드 IP 로, 프록시(ingress-nginx·Tailscale)는 새 연결이라 자기 Pod IP 가 되고 원래 출발지를 X-Forwarded-For 에 붙인다. 앱 응답에 "앱이 본 출발지" 를 함께 보여 준다.
 - ingress-nginx 는 Ingress 규칙(Host 일치 → Exact → 가장 긴 Prefix → defaultBackend)으로 Service 의 ready 엔드포인트를 골라 Pod 로 직접 보낸다(ClusterIP 를 거치지 않음). Tailscale 프록시는 backend Service 의 ClusterIP 로 보낸다(프록시 노드의 kube-proxy 규칙을 탐).
-- 바깥 DNS: Ingress 규칙의 host 는 그 Ingress 의 ADDRESS 로 풀린다고 가정. `*.ts.net` 은 funnel 이 켜진 tailscale Ingress 만 공인 인터넷에서 풀린다.
+- 바깥 DNS: Ingress 규칙의 host 는 그 Ingress 의 ADDRESS 로 풀린다고 가정. `*.ts.net` 은 funnel 이 켜진 tailscale Ingress 만 공인 인터넷에서 풀린다(funnel 은 443·8443·10000 만).
+- ingress-nginx 는 Host 마다 server 블록: Host 가 맞는 규칙들 안에서만 경로를 고르고, 없으면 그 Ingress 의 defaultBackend, 그것도 없으면 404. Pod 에서 LoadBalancer IP 로 보낸 것은 KUBE-EXT 의 "pod traffic" 규칙으로 Local 과 상관없이 모든 엔드포인트로.
+- 축소판: Cluster 정책의 SNAT 출발지를 노드 InternalIP 로 보여 준다. 실제(k3s flannel VXLAN)에서는 MASQUERADE 가 나가는 인터페이스 주소를 써서 flannel.1·cni0 주소(10.42.x.0 대)로 보일 수 있다(확인 안 함 — 추정).
 
 ## 3-1. 노드 장애 (1단계, `controllers/nodelifecycle.ts`)
 - kubelet 은 `kube-node-lease` 의 Lease 를 10초마다 갱신(배경 타이머). Lease 는 Node 가 주인 → Node 를 지우면 GC.

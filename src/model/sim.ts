@@ -2,7 +2,7 @@
 // 순수 로직은 defSync.ts(동기화) · simClock.ts(시계) 에 있고, 여기는 신호와 rAF 만 다룬다.
 import { effect, signal } from "@preact/signals";
 import type { DeploymentManifest } from "../core/cluster";
-import { runKubectl, type KubectlResult } from "../core/kubectl";
+import { curlTarget, runKubectl, type KubectlResult } from "../core/kubectl";
 import type { NetResult } from "../core/net/request";
 import { DefSync } from "./defSync";
 import { exampleById, type TryAction } from "./examples";
@@ -119,18 +119,18 @@ class SimController {
   kubectl(command: string): KubectlResult {
     let result: KubectlResult;
     // kubectl 없이 curl 로 시작하면 클러스터 밖(인터넷 클라이언트)에서 보낸다
-    const ext = /^curl\s+(?:-\S+\s+)*(\S+)/.exec(command.trim());
+    const ext = curlTarget(command);
     try {
-      if (ext) {
-        const r = this.cluster.requestExternal(ext[1]!);
+      if (ext !== undefined) {
+        const r = this.cluster.requestExternal(ext);
         result = { ok: r.ok, output: r.output, mutated: true, net: r };
       } else result = runKubectl(this.cluster, command);
     } catch (e) {
       result = { ok: false, output: `내부 오류: ${e instanceof Error ? e.message : String(e)}`, mutated: false };
     }
-    const entry: KubectlEntry = { id: ++this.entrySeq, t: this.cluster.now, command: ext ? `(클러스터 밖에서) ${command.trim()}` : command.trim(), result };
+    const entry: KubectlEntry = { id: ++this.entrySeq, t: this.cluster.now, command: ext !== undefined ? `(클러스터 밖에서) ${command.trim()}` : command.trim(), result };
     kubectlHistory.value = [...kubectlHistory.peek(), entry].slice(-200);
-    if (result.net) lastRequest.value = ext ? { id: entry.id, fromOutside: "internet", net: result.net } : { id: entry.id, fromPod: /exec\s+(\S+)/.exec(command)?.[1], net: result.net };
+    if (result.net) lastRequest.value = ext !== undefined ? { id: entry.id, fromOutside: "internet", net: result.net } : { id: entry.id, fromPod: /exec\s+(\S+)/.exec(command)?.[1], net: result.net };
     if (result.mutated) this.bump();
     return result;
   }

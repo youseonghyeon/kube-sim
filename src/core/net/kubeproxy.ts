@@ -96,11 +96,14 @@ export class KubeProxy {
 
   /** `iptables-save | grep KUBE` 모양: ready 엔드포인트가 없는 Service 의 REJECT 는 filter 테이블, 나머지(DNAT)는 nat 테이블 */
   iptablesSave(): string {
-    const filter: string[] = ["*filter", ":KUBE-SERVICES - [0:0]"];
+    const filter: string[] = ["*filter", ":KUBE-SERVICES - [0:0]", ":KUBE-EXTERNAL-SERVICES - [0:0]"];
     for (const r of this.rules) {
       if (r.seps.length) continue;
       const svc = `${r.ns}/${r.name}${r.portName ? `:${r.portName}` : ""}`;
       filter.push(`-A KUBE-SERVICES -d ${r.clusterIP}/32 -p tcp -m comment --comment "${svc} has no endpoints" -m tcp --dport ${r.port} -j REJECT --reject-with icmp-port-unreachable`);
+      // 바깥으로 열린 주소(LoadBalancer IP·NodePort)도 같은 이유로 거절
+      if (r.lbIP) filter.push(`-A KUBE-EXTERNAL-SERVICES -d ${r.lbIP}/32 -p tcp -m comment --comment "${svc} has no endpoints" -m tcp --dport ${r.port} -j REJECT --reject-with icmp-port-unreachable`);
+      if (r.nodePort) filter.push(`-A KUBE-EXTERNAL-SERVICES -p tcp -m comment --comment "${svc} has no endpoints" -m addrtype --dst-type LOCAL -m tcp --dport ${r.nodePort} -j REJECT --reject-with icmp-port-unreachable`);
     }
     filter.push("COMMIT");
     const lines: string[] = ["*nat", ":KUBE-SERVICES - [0:0]", ":KUBE-NODEPORTS - [0:0]", ":KUBE-MARK-MASQ - [0:0]"];
@@ -119,6 +122,8 @@ export class KubeProxy {
         if (r.nodePort) lines.push(`-A KUBE-NODEPORTS -p tcp -m comment --comment "${svc}" -m tcp --dport ${r.nodePort} -j ${ext}`);
         if (r.externalTrafficPolicy === "Local") {
           const svl = r.chain.replace("KUBE-SVC-", "KUBE-SVL-");
+          // 클러스터 안(Pod 대역)에서 온 것은 Local 과 상관없이 모든 엔드포인트로
+          lines.push(`-A ${ext} -s 10.244.0.0/16 -m comment --comment "pod traffic for ${svc} external destinations" -j ${r.chain}`);
           lines.push(`-A ${ext} -m comment --comment "${svc} (externalTrafficPolicy: Local)" -j ${svl}`);
           const local = r.seps.filter((s) => s.nodeName === this.nodeName);
           if (!local.length) lines.push(`-A ${svl} -m comment --comment "${svc} has no local endpoints" -j KUBE-MARK-DROP`);

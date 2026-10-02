@@ -311,9 +311,14 @@ export class ApiServer {
         }
       }
     }
-    // externalTrafficPolicy 는 바깥에서 들어오는 Service 에만 (기본 Cluster)
-    if (svc.spec.type === "ClusterIP") delete svc.spec.externalTrafficPolicy;
-    else svc.spec.externalTrafficPolicy ??= "Cluster";
+    // externalTrafficPolicy 는 바깥에서 들어오는 Service 에만 (기본 Cluster).
+    // ClusterIP 로 바꿀 때 옛 값을 그대로 들고 오면 조용히 지우고(실제 dropTypeDependentFields), 새로 적었으면 거절
+    if (svc.spec.type === "ClusterIP") {
+      const carried = prev && prev.spec.type !== "ClusterIP" && svc.spec.externalTrafficPolicy === prev.spec.externalTrafficPolicy;
+      if (svc.spec.externalTrafficPolicy && !carried)
+        throw new ApiError("Invalid", `Service "${name}" is invalid: spec.externalTrafficPolicy: Invalid value: "${svc.spec.externalTrafficPolicy}": may only be set for externally-accessible services`);
+      delete svc.spec.externalTrafficPolicy;
+    } else svc.spec.externalTrafficPolicy ??= "Cluster";
     svc.spec.ports.forEach((p, i) => {
       if (svc.spec.type === "ClusterIP") {
         delete p.nodePort;

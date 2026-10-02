@@ -6,7 +6,7 @@
 // 축소판: MetalLB·오퍼레이터는 Pod 없이 클러스터 부가 기능으로 돈다(MetalLB speaker 는 노드 전원으로 산다고 본다), 프록시는 StatefulSet 대신 Deployment,
 //         네임스페이스는 default 하나, tailnet 이름은 가짜(TAILNET).
 import { refOf } from "../api/server";
-import { SERVICE_NAME_LABEL, type Ingress, type IngressBackend, type Service } from "../api/types";
+import { SERVICE_NAME_LABEL, type Ingress, type IngressBackend, type IngressPath, type Service } from "../api/types";
 import type { ComponentContext } from "../controllers/base";
 import { Controller, nsKey, splitKey } from "../controllers/base";
 import { stableJson } from "../rng";
@@ -52,6 +52,10 @@ export class MetalLB extends Controller {
     for (const s of this.api.peekList("Service")) if (s.spec.type === "LoadBalancer") this.enqueue(nsKey(s.metadata.namespace, s.metadata.name));
   }
 
+  private allPending(): void {
+    for (const s2 of this.api.peekList("Service")) if (s2.spec.type === "LoadBalancer" && !lbIP(s2)) this.enqueue(nsKey(s2.metadata.namespace, s2.metadata.name));
+  }
+
   /** 지금 이 LoadBalancer IP 를 ARP 로 맡은 노드 */
   announcer(ns: string, name: string): string | undefined {
     return this.announce.get(nsKey(ns, name));
@@ -68,6 +72,8 @@ export class MetalLB extends Controller {
         });
         this.ctx.trace.add(this.name, "net.lb", `Service ${name} 이(가) LoadBalancer 가 아님 → IP ${lbIP(svc)} 반납`, refOf(svc));
       }
+      // IP 가 풀렸을 수 있다 → <pending> 으로 기다리던 Service 를 다시 본다 (실제 MetalLB 도 반납 뒤 전부 다시 처리)
+      this.allPending();
       return;
     }
     let ip = lbIP(svc);
@@ -149,13 +155,27 @@ export class TailscaleOperator extends Controller {
   constructor(ctx: ComponentContext) {
     super("tailscale-operator", ctx);
     ctx.api.watch("Ingress", (ev) => this.enqueue(nsKey(ev.object.metadata.namespace, ev.object.metadata.name)));
+    // 자기가 만든 프록시가 지워지면 다시 맞춘다 (reconcile)
+    ctx.api.watch("Deployment", (ev) => {
+      const owner = ev.object.metadata.ownerReferences.find((o) => o.kind === "Ingress");
+      if (ev.type === "DELETED" && owner) this.enqueue(nsKey(ev.object.metadata.namespace, owner.name));
+    });
   }
 
   protected reconcile(key: string): void {
     const [ns, name] = splitKey(key);
     const ing = this.api.get("Ingress", name, ns);
-    if (!ing || ing.spec.ingressClassName !== "tailscale") return;
+    if (!ing) return; // 지워졌으면 프록시는 ownerReference 로 가비지 컬렉터가 지운다
     const proxy = proxyName(name);
+    if (ing.spec.ingressClassName !== "tailscale") {
+      // 더 이상 tailscale 클래스가 아니면 내가 만든 프록시를 치운다
+      const mine = this.api.get("Deployment", proxy, ns);
+      if (mine && mine.metadata.ownerReferences.some((o) => o.uid === ing.metadata.uid)) {
+        this.ctx.trace.add(this.name, "net.lb", `Ingress ${name} 의 class 가 tailscale 이 아님 → 프록시 ${proxy} 삭제`, refOf(ing));
+        this.api.delete("Deployment", proxy, ns, this.name);
+      }
+      return;
+    }
     if (!this.api.get("Deployment", proxy, ns)) {
       this.api.create<"Deployment">(
         {
@@ -175,8 +195,21 @@ export class TailscaleOperator extends Controller {
       );
       this.ctx.trace.add(this.name, "net.lb", `Ingress ${name} (class tailscale) → 프록시 ${proxy} 생성 — tailnet 기기 ${hostOf(ing)} 로 붙어 TLS 를 끝내고 backend Service 로 보낸다${funnelOn(ing) ? " · funnel 켜짐: 공인 인터넷에서도 접근" : ""}`, refOf(ing));
     }
-    const host = `${hostOf(ing)}.${TAILNET}`;
-    if (ing.status.loadBalancer.ingress?.[0]?.hostname === host) return;
+    // tailnet 기기 이름은 겹칠 수 없다 → 다른 Ingress 가 쓰고 있으면 -1, -2 … 를 붙인다
+    const taken = new Set(
+      this.api
+        .peekList("Ingress")
+        .filter((o) => o.metadata.uid !== ing.metadata.uid)
+        .map((o) => o.status.loadBalancer.ingress?.[0]?.hostname)
+        .filter(Boolean),
+    );
+    const cur = ing.status.loadBalancer.ingress?.[0]?.hostname;
+    const base = hostOf(ing);
+    let host = `${base}.${TAILNET}`;
+    for (let i = 1; taken.has(host); i++) host = `${base}-${i}.${TAILNET}`;
+    // 이미 받은 이름이 이 기기 이름 규칙에 맞고 겹치지 않으면 그대로 (이름이 흔들리지 않게)
+    const keep = !!cur && !taken.has(cur) && new RegExp(`^${base}(-\\d+)?\\.${TAILNET.replace(/\./g, "\\.")}$`).test(cur);
+    if (cur === host || keep) return;
     this.api.patch("Ingress", name, ns, this.name, (o) => {
       o.status = { loadBalancer: { ingress: [{ hostname: host }] } };
     });
@@ -187,27 +220,40 @@ export function proxyName(ingress: string): string {
   return `ts-${ingress}`;
 }
 
-/** tailnet 기기 이름: tls.hosts 첫 번째, 없으면 Ingress 이름 */
+/** tailnet 기기 이름: tls.hosts 첫 번째의 첫 라벨, 없으면 Ingress 이름 */
 function hostOf(ing: Ingress): string {
-  return ing.spec.tls?.[0]?.hosts[0] ?? ing.metadata.name;
+  return (ing.spec.tls?.[0]?.hosts[0] ?? ing.metadata.name).split(".")[0]!;
 }
 
-/** ingress-nginx 의 규칙 고르기: 호스트가 같은 규칙에서 Exact 우선, 그다음 가장 긴 Prefix, 없으면 defaultBackend */
-export function matchIngress(ings: readonly Ingress[], host: string, path: string): { ing: Ingress; backend: IngressBackend; how: string } | undefined {
-  let best: { ing: Ingress; backend: IngressBackend; how: string; score: number } | undefined;
-  for (const ing of ings) {
-    for (const r of ing.spec.rules ?? []) {
-      if (r.host && r.host !== host) continue;
-      for (const p of r.http.paths) {
-        const exact = p.pathType === "Exact" && path === p.path;
-        const prefix = p.pathType === "Prefix" && (p.path === "/" || path === p.path || path.startsWith(p.path.endsWith("/") ? p.path : `${p.path}/`));
-        if (!exact && !prefix) continue;
-        const score = (exact ? 10_000 : 0) + p.path.length + (r.host ? 1000 : 0);
-        if (!best || score > best.score) best = { ing, backend: p.backend, how: `${r.host ?? "*"} ${p.path} (${p.pathType})`, score };
-      }
+/**
+ * ingress-nginx 의 규칙 고르기 — Host 마다 server 블록이 따로 있다:
+ * Host 가 맞는 규칙들(여러 Ingress 를 합침) 안에서만 경로를 고르고(Exact 우선, 그다음 가장 긴 Prefix — 경로 조각 경계로),
+ * 맞는 경로가 없으면 그 Host 의 Ingress 의 defaultBackend, 그것도 없으면 없음(404).
+ * Host 규칙이 하나도 없으면 host 없는 규칙(기본 server)에서 같은 방식으로, 마지막으로 아무 Ingress 의 defaultBackend.
+ */
+export function matchIngress(ings: readonly Ingress[], host: string, rawPath: string): { ing: Ingress; backend: IngressBackend; how: string } | undefined {
+  const path = rawPath.split(/[?#]/)[0] || "/";
+  const pick = (candidates: { ing: Ingress; host?: string; p: IngressPath }[]) => {
+    let best: { ing: Ingress; backend: IngressBackend; how: string; score: number } | undefined;
+    for (const { ing, host: h, p } of candidates) {
+      const exact = p.pathType === "Exact" && path === p.path;
+      const prefix = p.pathType === "Prefix" && (p.path === "/" || path === p.path || path.startsWith(p.path.endsWith("/") ? p.path : `${p.path}/`));
+      if (!exact && !prefix) continue;
+      const score = (exact ? 10_000 : 0) + p.path.length;
+      if (!best || score > best.score) best = { ing, backend: p.backend, how: `${h ?? "*"} ${p.path} (${p.pathType})`, score };
     }
+    return best;
+  };
+  const all = ings.flatMap((ing) => (ing.spec.rules ?? []).flatMap((r) => r.http.paths.map((p) => ({ ing, host: r.host, p }))));
+  const hosted = all.filter((x) => x.host === host);
+  if (hosted.length) {
+    const m = pick(hosted);
+    if (m) return m;
+    const def = [...new Set(hosted.map((x) => x.ing))].find((i) => i.spec.defaultBackend);
+    return def ? { ing: def, backend: def.spec.defaultBackend!, how: `${host} 의 defaultBackend` } : undefined;
   }
-  if (best) return best;
+  const m = pick(all.filter((x) => !x.host));
+  if (m) return m;
   const def = ings.find((i) => i.spec.defaultBackend);
   return def ? { ing: def, backend: def.spec.defaultBackend!, how: "defaultBackend" } : undefined;
 }
