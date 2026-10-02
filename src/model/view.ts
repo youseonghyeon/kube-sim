@@ -1,5 +1,5 @@
 // 화면에 그릴 모양을 클러스터에서 뽑는다 (순수 함수 — 테스트 가능).
-import { controllerOf, isNodeReady, isPodReady, NODE_LEASE_NS, SERVICE_NAME_LABEL, type Deployment, type Node, type Pod, type ReplicaSet, type Service } from "../core/api/types";
+import { controllerOf, isNodeReady, isPodReady, NODE_LEASE_NS, SERVICE_NAME_LABEL, type Deployment, type Ingress, type Node, type Pod, type ReplicaSet, type Service } from "../core/api/types";
 import type { Cluster } from "../core/cluster";
 import { nodeStatusText, podReadyText, podStatusText } from "../core/kubectl";
 import { DEFAULT_TOLERATION_SECONDS } from "../core/api/server";
@@ -60,9 +60,21 @@ export interface ServiceView {
   /** ready 인 엔드포인트의 Pod 이름 */
   ready: string[];
   notReady: string[];
+  /** LoadBalancer IP 와 그 IP 를 ARP 로 맡은 노드 */
+  lbIP?: string;
+  announcer?: string;
+}
+
+export interface IngressView {
+  ing: Ingress;
+  name: string;
+  address?: string;
+  /** "host/path → service:port" */
+  routes: string[];
 }
 
 export interface ClusterView {
+  ingresses: IngressView[];
   services: ServiceView[];
   nodes: NodeView[];
   pending: PodView[];
@@ -158,8 +170,25 @@ export function buildView(c: Cluster): ClusterView {
   const slices = c.api.list("EndpointSlice", "default");
   const services: ServiceView[] = c.api.list("Service", "default").map((svc) => {
     const eps = slices.filter((s) => s.metadata.labels[SERVICE_NAME_LABEL] === svc.metadata.name).flatMap((s) => s.endpoints);
-    return { svc, name: svc.metadata.name, ready: eps.filter((e) => e.conditions.ready).map((e) => e.targetRef.name), notReady: eps.filter((e) => !e.conditions.ready).map((e) => e.targetRef.name) };
+    const ip = svc.status.loadBalancer?.ingress?.[0]?.ip;
+    return {
+      svc,
+      name: svc.metadata.name,
+      ready: eps.filter((e) => e.conditions.ready).map((e) => e.targetRef.name),
+      notReady: eps.filter((e) => !e.conditions.ready).map((e) => e.targetRef.name),
+      lbIP: ip,
+      announcer: ip ? c.metallb.announcer(svc.metadata.namespace ?? "default", svc.metadata.name) : undefined,
+    };
   });
+  const ingresses: IngressView[] = c.api.list("Ingress", "default").map((ing) => ({
+    ing,
+    name: ing.metadata.name,
+    address: ing.status.loadBalancer.ingress?.[0]?.ip ?? ing.status.loadBalancer.ingress?.[0]?.hostname,
+    routes: [
+      ...(ing.spec.rules ?? []).flatMap((r) => r.http.paths.map((p) => `${r.host ?? "*"}${p.path}${p.pathType === "Prefix" && p.path !== "/" ? "*" : ""} → ${p.backend.service.name}:${p.backend.service.port.number}`)),
+      ...(ing.spec.defaultBackend ? [`(기본) → ${ing.spec.defaultBackend.service.name}:${ing.spec.defaultBackend.service.port.number}`] : []),
+    ],
+  }));
   // 롤아웃 중인 Deployment (Pod 가 둘 이상의 RS 에 걸쳐 있음) 의 Pod 에만 리비전 표시
   const rsPerOwner = new Map<string, Set<string>>();
   for (const p of pods) if (p.owner && p.rs) (rsPerOwner.get(p.owner) ?? rsPerOwner.set(p.owner, new Set()).get(p.owner)!).add(p.rs);
@@ -171,6 +200,7 @@ export function buildView(c: Cluster): ClusterView {
     p.isNew = !!d && p.pod.metadata.labels[HASH_LABEL] === deploymentHash(d);
   }
   return {
+    ingresses,
     services,
     nodes,
     pending: pods.filter((p) => !p.pod.spec.nodeName).sort(byCreation),

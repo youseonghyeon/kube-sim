@@ -37,6 +37,17 @@
 | `Container api failed liveness probe, will be restarted` · RESTARTS 증가 | liveness probe 연속 실패 | 앱이 정말 멈췄는지, 아니면 probe 포트·경로가 틀렸는지 (틀리면 계속 재시작 → CrashLoopBackOff) |
 | `error when evicting pods/"web-…" -n "default" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.` | PDB 의 허용 수가 0 — 대체 Pod 가 Ready 가 될 때까지 기다리는 중 | 정상. 끝나지 않으면 minAvailable 이 replicas 와 같은지 확인 (`kubectl get pdb`) |
 
+## 바깥에서 들어오기 (4단계)
+
+| 증상 / 출력 | 원인 | 고치는 법 |
+|---|---|---|
+| `EXTERNAL-IP <pending>` | MetalLB 주소 풀이 다 찼음 (192.168.0.240~250) | 안 쓰는 LoadBalancer Service 를 지우거나 ClusterIP 로 |
+| 앱 로그의 클라이언트 IP 가 노드 IP | externalTrafficPolicy: Cluster 의 SNAT | `kubectl patch svc … -p '{"spec":{"externalTrafficPolicy":"Local"}}'` (Ingress 컨트롤러의 Service 에) |
+| Local 로 바꾼 뒤 어떤 노드의 NodePort 로는 시간 초과 | 그 노드에 Pod 가 없으면 Local 은 버린다 | 앞단(LB)이 Pod 있는 노드로만 보내게 — MetalLB 는 자동으로 그렇게 한다 |
+| ingress-nginx 의 `404 Not Found` | Host·경로에 맞는 Ingress 규칙이 없음 (IP 로 접속하면 Host 가 IP) | 도메인으로 접속하거나 규칙·defaultBackend 추가 |
+| ingress-nginx 의 `503 Service Temporarily Unavailable` | 규칙의 Service 에 ready 엔드포인트가 없음 | `kubectl get endpoints <svc>` |
+| `*.ts.net` 이 공인 인터넷에서 `Could not resolve host` | Ingress 에 `tailscale.com/funnel: "true"` 가 없음 (tailnet 안에서만) | annotation 추가 (tailnet 정책에 funnel 허용도 필요) |
+
 ## 화면
 
 | 증상 | 원인 | 고치는 법 |

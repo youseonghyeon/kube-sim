@@ -1,7 +1,7 @@
 // 오른쪽 인스펙터: 고른 오브젝트의 개요·설정·describe·YAML. 아무것도 안 골랐으면 예제의 "해 볼 것".
 import { useSignal } from "@preact/signals";
 import { useEffect, useMemo } from "preact/hooks";
-import { controllerOf, isNodeReady, NODE_LEASE_NS, type Deployment, type KObject, type Node, type Pod, type ReplicaSet, type Service } from "../core/api/types";
+import { controllerOf, isNodeReady, NODE_LEASE_NS, type Deployment, type Ingress, type KObject, type Node, type Pod, type ReplicaSet, type Service } from "../core/api/types";
 import { eventSource, nodeStatusText, podRestartsText, podStatusText, rolloutStatusLine, runKubectl } from "../core/kubectl";
 import { fmtAge, fmtCpu, fmtMem, parseCpu, parseMem } from "../core/units";
 import { IMAGE_NAMES, IMAGES } from "../core/workloads";
@@ -120,6 +120,8 @@ function Overview({ obj }: { obj: KObject }) {
       return <NodeOverview n={obj} />;
     case "Service":
       return <ServiceOverview svc={obj} />;
+    case "Ingress":
+      return <IngressOverview ing={obj} />;
     case "PodDisruptionBudget":
       return (
         <>
@@ -772,6 +774,7 @@ function ServiceOverview({ svc }: { svc: Service }) {
           ["DNS", <span class="mono small">{svc.metadata.name}.default.svc.cluster.local</span>],
         ]}
       />
+      {svc.spec.type !== "ClusterIP" && <ExternalAccess svc={svc} />}
       <h3>엔드포인트 ({slices[0]?.metadata.name ?? "EndpointSlice 없음"})</h3>
       <ul class="ep-list">
         {eps.map((e) => (
@@ -876,6 +879,115 @@ function IptablesView({ node }: { node: string }) {
         {!powered && " 노드가 꺼져 있어 마지막으로 쓴 규칙에서 멈춰 있습니다."}
       </p>
       <pre class="term">{proxy ? proxy.iptablesSave() : "kube-proxy 없음"}</pre>
+    </>
+  );
+}
+
+// ---------- 바깥에서 들어오는 길 (4단계) ----------
+
+/** NodePort·LoadBalancer Service: 바깥 주소, 맡은 노드, externalTrafficPolicy 바꾸기, 바깥에서 curl */
+function ExternalAccess({ svc }: { svc: Service }) {
+  const c = sim.cluster;
+  const p = svc.spec.ports[0];
+  const ip = svc.status.loadBalancer?.ingress?.[0]?.ip;
+  const announcer = ip ? c.metallb.announcer(svc.metadata.namespace ?? "default", svc.metadata.name) : undefined;
+  const etp = svc.spec.externalTrafficPolicy ?? "Cluster";
+  const other = etp === "Cluster" ? "Local" : "Cluster";
+  return (
+    <>
+      <h3>바깥에서</h3>
+      <Rows
+        rows={[
+          ...(svc.spec.type === "LoadBalancer"
+            ? ([
+                ["LoadBalancer IP", <span class="mono">{ip ?? "<pending> (MetalLB 풀이 다 참)"}</span>],
+                ["맡은 노드", announcer ? `${announcer} (L2: ARP 에 이 노드가 답함)` : <span class="warn-text">없음{etp === "Local" ? " — Local 인데 Ready Pod 가 있는 노드가 없음" : ""}</span>],
+              ] as [string, preact.ComponentChildren][])
+            : []),
+          ["NodePort", <span class="mono">{p?.nodePort ?? "—"} (모든 노드)</span>],
+          [
+            "externalTrafficPolicy",
+            <span class="small">
+              {etp === "Cluster" ? "Cluster — 아무 노드의 Pod 로, 출발지는 노드 IP 로 SNAT (클라이언트 IP 사라짐)" : "Local — 들어온 노드의 Pod 로만, 출발지 보존 (Pod 없는 노드로 오면 버림)"}
+            </span>,
+          ],
+        ]}
+      />
+      <div class="actions">
+        <button class="btn sm" onClick={() => runAndShow(`kubectl patch svc ${svc.metadata.name} -p '{"spec":{"externalTrafficPolicy":"${other}"}}'`)}>
+          {other} 로 바꾸기
+        </button>
+        {ip && (
+          <button class="btn sm" onClick={() => runAndShow(`curl http://${ip}${p && p.port !== 80 ? `:${p.port}` : ""}/`)}>
+            바깥에서 curl {ip}
+          </button>
+        )}
+        {p?.nodePort &&
+          c.api.list("Node").map((n) => (
+            <button key={n.metadata.name} class="btn sm ghost" onClick={() => runAndShow(`curl http://${n.status.addresses[0]?.address}:${p.nodePort}/`)}>
+              {n.metadata.name}:{p.nodePort}
+            </button>
+          ))}
+      </div>
+    </>
+  );
+}
+
+function IngressOverview({ ing }: { ing: Ingress }) {
+  const address = ing.status.loadBalancer.ingress?.[0]?.ip ?? ing.status.loadBalancer.ingress?.[0]?.hostname;
+  const ts = ing.spec.ingressClassName === "tailscale";
+  const funnel = ing.metadata.annotations?.["tailscale.com/funnel"] === "true";
+  const hosts = [...new Set((ing.spec.rules ?? []).map((r) => r.host).filter((h): h is string => !!h))];
+  const urls = ts && address ? [`https://${address}/`] : hosts.map((h) => `http://${h}/`);
+  return (
+    <>
+      <div class="callout">
+        <div class="small">
+          {ts
+            ? "Tailscale 오퍼레이터가 이 Ingress 마다 프록시 Pod 를 띄워 tailnet 기기로 붙입니다. 프록시가 TLS 를 끝내고 backend Service 로 보냅니다 — NodePort·LoadBalancer·노드 공인 IP 가 필요 없습니다."
+            : "ingress-nginx 컨트롤러 Pod 가 Host·경로를 보고 규칙에 맞는 Service 의 Pod 로 직접 프록시합니다. 바깥에서는 컨트롤러의 LoadBalancer IP 로 들어옵니다."}
+        </div>
+      </div>
+      <Rows
+        rows={[
+          ["class", ing.spec.ingressClassName ?? "없음 (아무 컨트롤러도 처리하지 않음)"],
+          ["ADDRESS", <span class="mono">{address ?? "아직 없음"}</span>],
+          ...(ts ? ([["funnel", funnel ? "켜짐 — 공인 인터넷에서 접근" : "꺼짐 — tailnet 안에서만"]] as [string, preact.ComponentChildren][]) : []),
+        ]}
+      />
+      <h3>규칙</h3>
+      <ul class="list">
+        {(ing.spec.rules ?? []).flatMap((r) =>
+          r.http.paths.map((p) => (
+            <li key={`${r.host}${p.path}`}>
+              <span class="mono small">
+                {r.host ?? "*"}
+                {p.path} ({p.pathType})
+              </span>
+              <span>
+                → <Link kind="Service" name={p.backend.service.name} />:{p.backend.service.port.number}
+              </span>
+            </li>
+          )),
+        )}
+        {ing.spec.defaultBackend && (
+          <li>
+            <span class="mono small">(기본)</span>
+            <span>
+              → <Link kind="Service" name={ing.spec.defaultBackend.service.name} />:{ing.spec.defaultBackend.service.port.number}
+            </span>
+          </li>
+        )}
+      </ul>
+      <div class="actions">
+        {urls.map((u) => (
+          <button key={u} class="btn sm" onClick={() => runAndShow(`curl ${u}`)}>
+            바깥에서 curl {u}
+          </button>
+        ))}
+      </div>
+      <h3>이벤트</h3>
+      <Events uid={ing.metadata.uid} />
     </>
   );
 }

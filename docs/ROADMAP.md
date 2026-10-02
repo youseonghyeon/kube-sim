@@ -55,7 +55,9 @@
 - 배우는 것: rolling update(maxSurge·maxUnavailable)와 readiness 가 롤아웃을 멈추는 방식, `kubectl rollout undo`, liveness 실패 → 재시작, 종료 순서(EndpointSlice 에서 빠지는 것과 SIGTERM 의 경합 → 요청 실패, preStop 으로 해결), PodDisruptionBudget 과 `kubectl drain`
 - 예제: "새 버전 롤아웃 (중간에 readiness 실패)", "graceful shutdown 없는 앱의 502", "drain 과 PDB"
 
-## 4. 바깥에서 들어오는 트래픽
+## 4. 바깥에서 들어오는 트래픽 ✅ 2026-10-02
+- 된 것: LoadBalancer Service(MetalLB L2 — 풀 192.168.0.240~250, 노드 하나가 ARP 로 맡음, 꺼지면 다른 노드가 이어받음), externalTrafficPolicy(Cluster: SNAT·아무 노드 / Local: 출발지 보존·Pod 없는 노드는 버림·Pod 있는 노드만 IP 를 맡음), Ingress(ingress-nginx: Host·경로 규칙, Pod 로 직접 프록시, 404/503 / Tailscale 오퍼레이터: 프록시 Pod·tailnet 이름·funnel), 출발지 IP·X-Forwarded-For 추적, `curl` 을 kubectl 창에 치면 클러스터 밖에서 보냄, `kubectl get/describe/create ingress`·`patch svc`, 예제 3개(ingress·source-ip·tailscale — 사용자의 net-sim 배포 모양)
+- 축소판: MetalLB·Tailscale 오퍼레이터는 Pod 없는 부가 기능(speaker 는 노드 전원으로 산다고 봄, 장애 감지 즉시), 프록시는 StatefulSet 대신 Deployment, 바깥 DNS 는 Ingress 규칙의 host 가 ADDRESS 로 등록됐다고 가정, TLS 는 단계 문구로만, tailnet 이름은 가짜
 - 배우는 것: Ingress(호스트·경로 규칙, nginx 식), LoadBalancer Service(MetalLB 식 L2), `externalTrafficPolicy: Local` vs `Cluster`(출발지 IP 보존·추가 홉·노드에 Pod 가 없을 때)
 - 예제: "도메인 둘을 Ingress 하나로", "출발지 IP 가 사라지는 이유"
 - 메모: 사용자의 실제 구성(Tailscale funnel → Ingress → Service)을 예제로 만들 수 있다

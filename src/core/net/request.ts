@@ -329,8 +329,8 @@ function viaTailscaleProxy(c: Cluster, pod: Pod, src: Source, req: Req, steps: N
     text: `Tailscale 프록시: TLS(${req.host}) 를 끝내고 backend Service ${svc.metadata.name}:${be.service.port.number} (ClusterIP ${svc.spec.clusterIP}) 로 새 연결 — 출발지는 이 Pod(${pod.status.podIP}), X-Forwarded-For: ${xff}`,
     at: { pod: name, ingress: ing?.metadata.name },
   });
-  const inner: Req = { ...req, port: be.service.port.number };
-  return send(c, { node: pod.spec.nodeName!, pod: name, ip: pod.status.podIP ?? "", xff }, inner, svc.spec.clusterIP, be.service.port.number, steps);
+  // 실패 문구는 사용자가 접속한 주소(https://…:443)로 — 안쪽 Service 포트가 아니라
+  return send(c, { node: pod.spec.nodeName!, pod: name, ip: pod.status.podIP ?? "", xff }, req, svc.spec.clusterIP, be.service.port.number, steps);
 }
 
 /** 바깥(클러스터 밖 클라이언트)에서 노드IP:NodePort 로 */

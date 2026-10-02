@@ -2,7 +2,7 @@
 
 쿠버네티스가 "왜 이렇게 동작하는지" 를 직접 구성하고 한 단계씩 보며 익히는 학습 시뮬레이터. 자매 프로젝트 `../net-sim`(네트워크 시뮬레이터)과 같은 방식이다: 브라우저에서 돌고, 실제 클러스터에 연결하지 않으며, 모든 시뮬레이션은 결정론적. 디자인 품질이 최우선(`DESIGN.md`).
 
-지금 상태: **0·1단계 (2026-10-02).** Deployment·ReplicaSet·스케줄러·kubelet(pull·크래시 백오프·종료·heartbeat)·노드 장애(NotReady·taint·eviction)·kubectl 흉내·캔버스 UI. 2단계(Service·EndpointSlice·kube-proxy·CoreDNS·readiness), 3단계(롤링 업데이트·liveness·preStop·PDB/drain)도 됨. 다음 할 일은 `docs/ROADMAP.md` 4단계(Ingress·LoadBalancer·externalTrafficPolicy).
+지금 상태: **0·1단계 (2026-10-02).** Deployment·ReplicaSet·스케줄러·kubelet(pull·크래시 백오프·종료·heartbeat)·노드 장애(NotReady·taint·eviction)·kubectl 흉내·캔버스 UI. 2단계(Service·EndpointSlice·kube-proxy·CoreDNS·readiness), 3단계(롤링 업데이트·liveness·preStop·PDB/drain), 4단계(LoadBalancer·Ingress·externalTrafficPolicy·Tailscale funnel)도 됨. 다음 할 일은 `docs/ROADMAP.md` 5단계(운영 — 후보 중 고르기) 또는 6단계(GitOps).
 저장소: https://github.com/youseonghyeon/kube-sim (public). 배포는 아직 없다.
 
 ## 목적 — 누구의 어떤 이해를 바꾸나
@@ -37,7 +37,7 @@
   - `kubectl.ts` 문자열 명령 → API 호출 + 실제 모양의 출력 (`podStatusText` 등 표시 도우미는 UI 도 쓴다)
   - `workloads.ts` 이미지 카탈로그 = 컨테이너 안 앱 흉내(pull 시간, 크래시 조건, SIGTERM 반응). 카탈로그에 없는 이미지는 pull 실패
   - `units.ts` cpu(millicore)·memory(MiB)·AGE 표기 · `rng.ts` 시드 고정 난수·이름 접미사·템플릿 해시
-  - `net/kubeproxy.ts` 노드마다 iptables 규칙(모양·확률), `net/request.ts` CoreDNS 이름 풀기 + 요청 한 번의 단계(DNS → DNAT → 경로 → 응답/실패)
+  - `net/kubeproxy.ts` 노드마다 iptables 규칙(모양·확률·KUBE-EXT/SVL), `net/request.ts` CoreDNS 이름 풀기 + 요청 한 번의 단계(DNS → DNAT → 경로 → 응답/실패, 바깥 → LB·NodePort·Ingress·funnel, 출발지 IP 추적), `net/ingress.ts` MetalLB·ingress-nginx 상태·Tailscale 오퍼레이터·Ingress 규칙 고르기
   - `controllers/endpointslice.ts` Service 셀렉터 + Pod Ready → 엔드포인트
 - `src/model/` 편집 가능한 클러스터 정의(노드 + 매니페스트)와 예제(`examples.ts`, "해 볼 것" 포함), 정의 → 클러스터 diff 반영(`defSync.ts`), 화면 시계(`simClock.ts`), 신호·rAF(`sim.ts`), 화면 모양 뽑기(`view.ts`), 앱 상태(`store.ts` — localStorage. 되돌리기는 아직 없음)
 - `src/app/` Preact UI: 왼쪽 오브젝트 나무, 캔버스(컨트롤 플레인 · 스케줄 대기 · 노드 안 Pod 칩), 인스펙터(개요·설정·describe·YAML, 선택 없으면 예제의 "해 볼 것"), 아래 서랍(로그 · kubectl)

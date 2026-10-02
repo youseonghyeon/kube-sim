@@ -605,6 +605,45 @@ pre {
   gap: 8px;
 }
 
+/* 바깥: 인터넷 클라이언트 · Ingress */
+.outside {
+  display: grid;
+  gap: 2px;
+  min-width: 160px;
+  padding: 8px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface);
+  align-content: center;
+  text-align: center;
+}
+.ingress {
+  display: grid;
+  gap: 2px;
+  min-width: 240px;
+  padding: 8px 12px;
+  border: 1.5px solid var(--own-3);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--own-3) 8%, var(--surface));
+  text-align: left;
+}
+.ingress.sel {
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.ingress-route {
+  color: var(--ink-2);
+  font-size: 11px;
+}
+.svc-lb {
+  color: var(--own-2);
+  font-size: 11px;
+}
+.svc .svc-addr,
+.svc .svc-lb {
+  max-width: 340px;
+  overflow-wrap: anywhere;
+}
+
 /* Service (가상 주소 — 점선) */
 .svcs {
   margin-bottom: 14px;

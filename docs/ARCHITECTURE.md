@@ -35,6 +35,13 @@
 - 부하 발생기 (`net/traffic.ts`): 배경 타이머로 요청을 계속 계산, 실패만 트레이스에 남김.
 - PDB·drain: disruption 컨트롤러가 disruptionsAllowed 를 계산, `api.evict` 가 이를 보고 429(TooManyRequests) 또는 허용(허용 수를 줄이고 삭제). `DrainJob` 이 cordon → evict → 5초 재시도 → Pod 가 사라지면 "evicted" → "drained". 출력 줄이 시간이 지나며 늘어난다.
 
+## 6-1. 바깥에서 들어오는 길 (4단계, `net/ingress.ts`·`net/request.ts`)
+- LoadBalancer = NodePort + MetalLB 가 준 IP. speaker 는 노드 전원으로 살고(축소판), 후보 노드 중 해시 순서로 하나가 맡는다(맡던 노드가 계속 자격이 있으면 유지). Local 이면 Ready Pod 가 있는 노드만 후보.
+- kube-proxy: 바깥(LB IP·NodePort) → KUBE-EXT. Cluster 면 KUBE-MARK-MASQ(SNAT) 후 모든 엔드포인트, Local 이면 KUBE-SVL(이 노드의 엔드포인트만, 없으면 DROP).
+- 요청은 `Source.ip`(받는 쪽이 볼 출발지)와 `xff` 를 들고 다닌다. SNAT 에서 노드 IP 로, 프록시(ingress-nginx·Tailscale)는 새 연결이라 자기 Pod IP 가 되고 원래 출발지를 X-Forwarded-For 에 붙인다. 앱 응답에 "앱이 본 출발지" 를 함께 보여 준다.
+- ingress-nginx 는 Ingress 규칙(Host 일치 → Exact → 가장 긴 Prefix → defaultBackend)으로 Service 의 ready 엔드포인트를 골라 Pod 로 직접 보낸다(ClusterIP 를 거치지 않음). Tailscale 프록시는 backend Service 의 ClusterIP 로 보낸다(프록시 노드의 kube-proxy 규칙을 탐).
+- 바깥 DNS: Ingress 규칙의 host 는 그 Ingress 의 ADDRESS 로 풀린다고 가정. `*.ts.net` 은 funnel 이 켜진 tailscale Ingress 만 공인 인터넷에서 풀린다.
+
 ## 3-1. 노드 장애 (1단계, `controllers/nodelifecycle.ts`)
 - kubelet 은 `kube-node-lease` 의 Lease 를 10초마다 갱신(배경 타이머). Lease 는 Node 가 주인 → Node 를 지우면 GC.
 - node-lifecycle-controller: 5초마다(배경) Lease 를 보고 40초 넘게 갱신이 없으면 Ready=Unknown(`NodeStatusUnknown`), taint `node.kubernetes.io/unreachable` NoSchedule·NoExecute(timeAdded), 그 노드 Pod 의 Ready=False. 다시 갱신되고 kubelet 이 Ready 를 보고하면 taint 제거.

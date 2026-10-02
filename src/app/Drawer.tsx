@@ -149,7 +149,7 @@ function KubectlView() {
   const run = (cmd: string) => {
     const line = cmd.trim();
     if (!line) return;
-    sim.kubectl(line.startsWith("kubectl") || line.startsWith("k ") ? line : `kubectl ${line}`);
+    sim.kubectl(line.startsWith("kubectl") || line.startsWith("k ") || line.startsWith("curl ") ? line : `kubectl ${line}`);
     input.value = "";
     histIdx.current = -1;
   };
@@ -191,7 +191,7 @@ function KubectlView() {
           run(input.value);
         }}
       >
-        <span class="mono prompt">$ kubectl</span>
+        <span class="mono prompt" title="kubectl 명령. curl 로 시작하면 클러스터 밖에서 보냅니다">$ kubectl</span>
         <input
           ref={field}
           class="mono"

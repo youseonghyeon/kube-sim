@@ -8,6 +8,7 @@ import { Icon } from "./Icons";
 export function Sidebar() {
   const view = currentView();
   const pdbs = sim.cluster.api.list("PodDisruptionBudget", "default");
+  const ings = sim.cluster.api.list("Ingress", "default");
   const sel = selection.value;
   const isSel = (kind: string, name: string) => sel?.kind === kind && sel.name === name;
   const manifestNames = new Set(clusterDef.value.manifests.filter((m) => m.kind === "Deployment").map((m) => m.metadata.name));
@@ -35,7 +36,15 @@ export function Sidebar() {
             <button class={`tree-row${isSel("Deployment", d.name) ? " sel" : ""}`} data-tree={`deployment/${d.name}`} onClick={() => (selection.value = { kind: "Deployment", namespace: "default", name: d.name })}>
               <span class="own-swatch" style={{ background: `var(--own-${d.colorIndex})` }} />
               <span class="tree-name">{d.name}</span>
-              {!manifestNames.has(d.name) && <span class="tag" title="매니페스트에 없고 kubectl 로만 만든 것">kubectl</span>}
+              {!manifestNames.has(d.name) && (d.d.metadata.ownerReferences[0] ? (
+                <span class="tag" title={`${d.d.metadata.ownerReferences[0].kind} ${d.d.metadata.ownerReferences[0].name} 를 보고 컨트롤러가 만든 것`}>
+                  {d.d.metadata.ownerReferences[0].kind} 가 만듦
+                </span>
+              ) : (
+                <span class="tag" title="매니페스트에 없고 kubectl 로만 만든 것">
+                  kubectl
+                </span>
+              ))}
               <span class={`tree-count ${d.d.status.readyReplicas === d.d.spec.replicas ? "ok" : "wait"}`}>
                 {d.d.status.readyReplicas}/{d.d.spec.replicas}
               </span>
@@ -89,6 +98,19 @@ export function Sidebar() {
         ))}
         {!view.services.length && <div class="side-empty">없음. + 또는 kubectl expose</div>}
       </div>
+      {ings.length > 0 && (
+        <div class="side-section">
+          <div class="side-head">
+            <span>Ingress</span>
+          </div>
+          {ings.map((i) => (
+            <button key={i.metadata.uid} class={`tree-row${isSel("Ingress", i.metadata.name) ? " sel" : ""}`} onClick={() => (selection.value = { kind: "Ingress", namespace: "default", name: i.metadata.name })}>
+              <span class="tree-name">{i.metadata.name}</span>
+              <span class="tree-kind">{i.spec.ingressClassName}</span>
+            </button>
+          ))}
+        </div>
+      )}
       {pdbs.length > 0 && (
         <div class="side-section">
           <div class="side-head">

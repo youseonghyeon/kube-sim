@@ -150,7 +150,7 @@ await page.click(".menu-btn");
 await page.click('.menu-item[data-example="service"]');
 await page.selectOption(".transport .speed", "5");
 await waitFor(async () => (await statusTexts()).length === 4 && (await statusTexts()).every((s) => s === "Running"), "Pod 4개 Running");
-await waitFor(async () => (await page.locator(".svc .svc-eps").textContent())?.includes("ready 3"), "엔드포인트 ready 3");
+await waitFor(async () => (await page.locator(".svc .svc-eps").textContent())?.startsWith("엔드포인트 ready 3"), "엔드포인트 ready 3");
 check(true, "Service 상자에 엔드포인트 ready 3");
 await page.waitForTimeout(600); // kube-proxy 규칙 반영(시뮬레이션 1초 = 5배속에서 0.2초)을 기다림 — EndpointSlice 가 ready 여도 규칙은 조금 늦다
 await page.locator(".try", { hasText: "client 에서 curl" }).locator("button").click();
@@ -170,7 +170,7 @@ console.log("8) readiness");
 await page.click(".menu-btn");
 await page.click('.menu-item[data-example="readiness"]');
 await page.selectOption(".transport .speed", "10");
-await waitFor(async () => (await page.locator(".svc .svc-eps").textContent())?.includes("ready 3"), "api 엔드포인트 ready 3 (준비 15초 뒤)", 40000);
+await waitFor(async () => (await page.locator(".svc .svc-eps").textContent())?.startsWith("엔드포인트 ready 3"), "api 엔드포인트 ready 3 (준비 15초 뒤)", 40000);
 check(true, "준비 시간이 지나 ready 3");
 await page.locator(".try", { hasText: "고장 내기" }).locator("button").click();
 await waitFor(async () => (await page.locator(".svc .svc-eps").textContent())?.includes("not ready 1"), "고장 낸 Pod 가 not ready", 40000);
@@ -222,6 +222,38 @@ await waitFor(async () => (await page.locator(".term-res").last().textContent())
 const drainOut = await page.locator(".term-res").last().textContent();
 check(drainOut?.includes("Cannot evict pod as it would violate the pod's disruption budget."), "drain 출력에 PDB 거절과 재시도가 보인다", "core/drain.ts");
 await page.screenshot({ path: `${OUT}/16-drain.png` });
+
+// 12) Ingress: 바깥에서 curl 로 Host 에 따라 다른 Pod, 경로 점이 바깥 상자에서 출발
+console.log("12) Ingress");
+await page.click(".menu-btn");
+await page.click('.menu-item[data-example="ingress"]');
+await page.selectOption(".transport .speed", "5");
+await waitFor(async () => (await statusTexts()).filter((s) => s === "Running").length === 5, "Pod 5개 Running", 30000);
+await waitFor(async () => (await page.locator(".ingress .svc-addr").first().textContent())?.includes("192.168.0.240"), "Ingress ADDRESS", 10000);
+await page.waitForTimeout(600);
+check((await page.locator('[data-outside="internet"]').count()) === 1, "바깥 클라이언트 상자", "Canvas 바깥 섹션");
+await page.locator(".try", { hasText: "shop.example.com 으로" }).locator("button").click();
+await page.waitForTimeout(2200);
+await page.screenshot({ path: `${OUT}/17-ingress.png` });
+const ingOut = await page.locator(".term-res").last().textContent();
+check(ingOut?.includes("X-Forwarded-For: 192.168.0.1"), "Cluster 정책에서는 X-Forwarded-For 가 노드 IP", "request.ts viaService SNAT");
+await page.locator(".try", { hasText: "클라이언트 IP 지키기" }).locator("button").click();
+await page.waitForTimeout(800);
+await page.locator(".try").filter({ has: page.locator(".try-title", { hasText: /^다시 shop 으로$/ }) }).locator("button").click(); // 설명문에도 같은 말이 있어 제목으로 정확히
+await page.waitForTimeout(300);
+check((await page.locator(".term-res").last().textContent())?.includes("X-Forwarded-For: 203.0.113.7"), "Local 로 바꾸면 X-Forwarded-For 가 클라이언트 IP", "externalTrafficPolicy Local");
+
+// 13) Tailscale funnel
+console.log("13) Tailscale");
+await page.click(".menu-btn");
+await page.click('.menu-item[data-example="tailscale"]');
+// "not ready 1" 도 "ready 1" 을 담고 있어 앞에서부터 본다
+await waitFor(async () => (await page.locator('[data-service="net-sim"] .svc-eps').textContent().catch(() => ""))?.startsWith("엔드포인트 ready 1"), "net-sim readiness 통과 (10초 주기)", 40000);
+await page.waitForTimeout(600); // 규칙 반영
+await page.locator(".try", { hasText: "인터넷에서 접속" }).locator("button").click();
+await page.waitForTimeout(2500);
+check((await page.locator(".term-res").last().textContent())?.includes("<title>net-sim</title>"), "funnel → 프록시 → Service → net-sim 응답", "request.ts viaFunnel");
+await page.screenshot({ path: `${OUT}/18-tailscale.png` });
 
 check(errors.length === 0, `브라우저 오류 없음${errors.length ? `: ${errors.join(" | ")}` : ""}`, "콘솔 오류의 스택을 보고 고치세요");
 console.log(failed ? "ui-check 실패" : "ui-check 통과 — 스크린샷: .shots/");

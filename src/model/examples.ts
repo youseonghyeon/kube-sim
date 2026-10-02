@@ -1,5 +1,5 @@
 // 예제: 노드 + 매니페스트 + "해 볼 것"(학습 포인트를 직접 확인하는 행동).
-import { deployment, pdb, service, type Manifest } from "../core/cluster";
+import { deployment, ingress, pdb, service, type Manifest } from "../core/cluster";
 import type { Pod } from "../core/api/types";
 import type { NodeDef } from "../core/kubelet";
 
@@ -406,6 +406,96 @@ export const EXAMPLES: Example[] = [
         expect: "노드를 cordon 하고 Pod 를 Eviction API 로 내보냅니다. 허용 수가 0 이면 'Cannot evict pod as it would violate the pod's disruption budget.' 으로 거절되고 5초 뒤 다시 시도합니다. 대체 Pod 가 Ready 가 되면 다음 것을 내보냅니다.",
       },
       { title: "다시 쓰기", command: "kubectl uncordon worker-1", expect: "점검이 끝나면 uncordon 해야 새 Pod 가 다시 갑니다 (옮겨 간 Pod 가 돌아오지는 않습니다)." },
+    ],
+  },
+  {
+    id: "ingress",
+    title: "도메인 둘을 Ingress 하나로 (ingress-nginx)",
+    summary: "바깥 요청은 ingress-nginx 의 LoadBalancer IP 로 들어와, Host 와 경로에 따라 서로 다른 Service 의 Pod 로 갑니다. 그동안 클라이언트 IP 가 어떻게 되는지도 봅니다.",
+    build: () => ({
+      nodes: [node("worker-1"), node("worker-2")],
+      manifests: [
+        deployment("ingress-nginx-controller", { replicas: 1, image: "registry.k8s.io/ingress-nginx/controller:v1.11.2", cpu: 100, memory: 128, port: 80 }),
+        service("ingress-nginx-controller", { selector: { app: "ingress-nginx-controller" }, port: 80, type: "LoadBalancer" }),
+        deployment("shop", { replicas: 2, image: "traefik/whoami:v1.10", cpu: 100, memory: 64, port: 80 }),
+        service("shop", { selector: { app: "shop" }, port: 80 }),
+        deployment("api", { replicas: 2, image: "nginx:1.27", cpu: 100, memory: 64, port: 80 }),
+        service("api", { selector: { app: "api" }, port: 80 }),
+        ingress("shop", {
+          className: "nginx",
+          rules: [
+            { host: "shop.example.com", http: { paths: [{ path: "/", pathType: "Prefix", backend: { service: { name: "shop", port: { number: 80 } } } }] } },
+            { host: "api.example.com", http: { paths: [{ path: "/", pathType: "Prefix", backend: { service: { name: "api", port: { number: 80 } } } }] } },
+          ],
+        }),
+      ],
+    }),
+    tries: [
+      { title: "LoadBalancer IP 보기", command: "kubectl get svc ingress-nginx-controller", expect: "MetalLB 가 192.168.0.240 을 주고(EXTERNAL-IP), 노드 하나가 그 IP 를 ARP 로 맡습니다. 캔버스의 Service 상자에 어느 노드가 맡았는지 보입니다." },
+      { title: "Ingress 보기", command: "kubectl get ingress", expect: "호스트 두 개가 같은 ADDRESS(컨트롤러의 LoadBalancer IP)를 씁니다." },
+      {
+        title: "shop.example.com 으로",
+        command: "curl http://shop.example.com/",
+        expect: "바깥 DNS → LB IP → 맡은 노드 → kube-proxy 가 ingress-nginx Pod 로 → nginx 가 Host 를 보고 shop 의 Pod 로 직접 프록시. whoami 응답의 X-Forwarded-For 가 클라이언트(203.0.113.7)가 아니라 노드 IP 입니다 — externalTrafficPolicy: Cluster 의 SNAT 때문.",
+      },
+      { title: "api.example.com 으로", command: "curl http://api.example.com/", expect: "같은 IP·같은 nginx 지만 Host 가 달라 api 의 Pod 로 갑니다." },
+      { title: "Host 없이 IP 로", command: "curl http://192.168.0.240/", expect: "Host 가 IP 라 맞는 규칙이 없어 ingress-nginx 의 404 를 받습니다.", expectFail: true },
+      {
+        title: "클라이언트 IP 지키기",
+        command: `kubectl patch svc ingress-nginx-controller -p '{"spec":{"externalTrafficPolicy":"Local"}}'`,
+        expect: "Local 이면 SNAT 하지 않고, ingress-nginx Pod 가 있는 노드만 IP 를 맡습니다. 다시 shop 으로 curl 하면 X-Forwarded-For 가 203.0.113.7 입니다.",
+      },
+      { title: "다시 shop 으로", command: "curl http://shop.example.com/", expect: "X-Forwarded-For: 203.0.113.7 — 앱이 진짜 클라이언트를 압니다." },
+    ],
+  },
+  {
+    id: "source-ip",
+    title: "출발지 IP 가 사라지는 이유 (externalTrafficPolicy)",
+    summary: "whoami 는 받은 요청의 출발지(RemoteAddr)를 그대로 보여 줍니다. Cluster 와 Local 에서 무엇이 다른지, 왜 Local 은 Pod 가 없는 노드로 오면 버리는지 봅니다.",
+    build: () => ({
+      nodes: [node("worker-1"), node("worker-2")],
+      manifests: [
+        deployment("who", { replicas: 1, image: "traefik/whoami:v1.10", cpu: 100, memory: 64, port: 80, nodeSelector: { "kubernetes.io/hostname": "worker-2" } }),
+        service("who", { selector: { app: "who" }, port: 80, type: "LoadBalancer", nodePort: 30080 }),
+      ],
+    }),
+    tries: [
+      { title: "LoadBalancer 로", command: "curl http://192.168.0.240/", expect: "RemoteAddr 가 노드 IP 입니다 (Cluster: 들어온 노드가 출발지를 자기 IP 로 바꿔 응답이 자기에게 돌아오게 함)." },
+      { title: "Pod 없는 노드의 NodePort 로", command: "curl http://192.168.0.11:30080/", expect: "worker-1 에는 Pod 가 없지만 Cluster 라 worker-2 의 Pod 로 넘겨 줍니다 (한 홉 더, 출발지는 worker-1 IP)." },
+      { title: "Local 로 바꾸기", command: `kubectl patch svc who -p '{"spec":{"externalTrafficPolicy":"Local"}}'`, expect: "이제 들어온 노드의 Pod 로만 보내고 SNAT 하지 않습니다. MetalLB 는 Pod 가 있는 worker-2 만 IP 를 맡게 합니다." },
+      { title: "다시 LoadBalancer 로", command: "curl http://192.168.0.240/", expect: "RemoteAddr 가 203.0.113.7 — 클라이언트 IP 가 보존됩니다." },
+      { title: "Pod 없는 노드의 NodePort 로", command: "curl http://192.168.0.11:30080/", expect: "worker-1 에는 Pod 가 없어 버립니다 (시간 초과). 그래서 Local 은 앞단(LB)이 Pod 있는 노드로만 보내야 합니다.", expectFail: true },
+    ],
+  },
+  {
+    id: "tailscale",
+    title: "내 구성: Tailscale Funnel → Ingress → Service",
+    summary: "net-sim 배포(deploy/ 차트)와 같은 모양입니다. ingressClassName tailscale 이면 오퍼레이터가 프록시 Pod 를 tailnet 기기로 붙이고, funnel 이 공인 인터넷 요청을 그 기기로 넘깁니다.",
+    build: () => ({
+      nodes: [node("worker-1"), node("worker-2")],
+      manifests: [
+        deployment("net-sim", {
+          replicas: 1,
+          image: "ghcr.io/youseonghyeon/net-sim:latest",
+          cpu: 10,
+          memory: 16,
+          port: 8080,
+          readiness: { httpGet: { path: "/", port: 8080 }, periodSeconds: 10 },
+          liveness: { httpGet: { path: "/healthz", port: 8080 }, periodSeconds: 10 },
+        }),
+        service("net-sim", { selector: { app: "net-sim" }, port: 8080 }),
+        ingress("net-sim", { className: "tailscale", defaultBackend: { service: { name: "net-sim", port: { number: 8080 } } }, tls: ["net-sim"], annotations: { "tailscale.com/funnel": "true" } }),
+      ],
+    }),
+    tries: [
+      { title: "Ingress 주소", command: "kubectl get ingress", expect: "ADDRESS 가 IP 가 아니라 net-sim.<tailnet>.ts.net 입니다 (tailnet 이름은 가짜 — 계정마다 다름)." },
+      { title: "프록시 Pod", command: "kubectl get pods -o wide", expect: "오퍼레이터가 만든 ts-net-sim-… Pod 가 보입니다 (실제는 tailscale 네임스페이스의 StatefulSet — 축소판)." },
+      {
+        title: "인터넷에서 접속",
+        command: "curl https://net-sim.tailnet-1234.ts.net/",
+        expect: "공인 DNS → Funnel 중계 서버 → WireGuard 로 프록시 Pod → TLS 종료 → Service ClusterIP → (그 노드의 kube-proxy 규칙) → net-sim Pod. NodePort·LoadBalancer 가 하나도 없습니다.",
+      },
+      { title: "Ingress 자세히", command: "kubectl describe ingress net-sim", expect: "Default backend 가 net-sim:8080, Annotations 에 tailscale.com/funnel: true." },
     ],
   },
   {

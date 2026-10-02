@@ -119,11 +119,15 @@ function RequestPath({ root }: { root: RefObject<HTMLElement> }) {
 
 function buildHops(el: HTMLElement, req: RequestView): Hop[] {
   const out: Hop[] = [];
-  const start = req.fromPod ? center(el, q(el, `[data-pod="${esc(req.fromPod)}"]`)) : req.fromOutside ? center(el, q(el, `[data-node="${esc(req.fromOutside)}"] .node-head`)) : undefined;
+  const start = req.fromPod ? center(el, q(el, `[data-pod="${esc(req.fromPod)}"]`)) : req.fromOutside ? center(el, q(el, '[data-outside="internet"]')) : undefined;
   if (start) out.push({ pt: start });
   for (const s of req.net.steps) {
     const target = s.at?.dns
       ? q(el, '[data-comp="coredns"]')
+      : s.at?.ingress && s.kind === "dnat" && !s.at.pod
+        ? q(el, `[data-ingress="${esc(s.at.ingress)}"]`)
+      : s.at?.outside && !s.at.node && !s.at.pod
+        ? q(el, '[data-outside="internet"]')
       : s.at?.pod
         ? q(el, `[data-pod="${esc(s.at.pod)}"]`)
         : s.at?.service

@@ -7,7 +7,7 @@ import { fmtCpu, fmtMem } from "../core/units";
 import { Icon } from "./Icons";
 import { currentView, running, sim, simTime, simVersion, speed } from "../model/sim";
 import { selection } from "../model/store";
-import { CONTROL_PLANE, lastByActor, nodeStory, recentFlashes, refKey, type ClusterView, type NodeView, type PodView, type ServiceView } from "../model/view";
+import { CONTROL_PLANE, lastByActor, nodeStory, recentFlashes, refKey, type ClusterView, type IngressView, type NodeView, type PodView, type ServiceView } from "../model/view";
 
 const canvasTick = computed(() => Math.floor(simTime.value / (100 * Math.max(1, speed.value))));
 
@@ -31,6 +31,23 @@ export function Canvas() {
     <main class="canvas" ref={main} onClick={() => (selection.value = null)}>
       <ControlPlane now={now} windowMs={windowMs} version={version} />
       <TrafficBar />
+      {(view.ingresses.length > 0 || view.services.some((s) => s.svc.spec.type !== "ClusterIP")) && (
+        <section class="svcs" aria-label="바깥에서 들어오는 길">
+          <div class="lane-head">
+            <span class="lane-title">바깥</span>
+            <span class="lane-sub">클러스터 밖에서 들어오는 길 — kubectl 창에 curl http://… 를 치면 여기서 출발합니다</span>
+          </div>
+          <div class="svc-row">
+            <div class="outside" data-outside="internet">
+              <span class="svc-name">인터넷 클라이언트</span>
+              <span class="svc-addr mono">203.0.113.7</span>
+            </div>
+            {view.ingresses.map((i) => (
+              <IngressBox key={i.name} i={i} selected={sel?.kind === "Ingress" && sel.name === i.name} />
+            ))}
+          </div>
+        </section>
+      )}
       {view.services.length > 0 && (
         <section class="svcs" aria-label="Service">
           <div class="lane-head">
@@ -119,6 +136,30 @@ function TrafficBar() {
   );
 }
 
+function IngressBox({ i, selected }: { i: IngressView; selected: boolean }) {
+  return (
+    <button
+      class={`ingress${selected ? " sel" : ""}`}
+      data-ingress={i.name}
+      onClick={(e) => {
+        e.stopPropagation();
+        selection.value = { kind: "Ingress", namespace: "default", name: i.name };
+      }}
+    >
+      <span class="svc-top">
+        <span class="svc-name">{i.name}</span>
+        <span class="svc-type">Ingress · {i.ing.spec.ingressClassName ?? "class 없음"}</span>
+      </span>
+      <span class="svc-addr mono">{i.address ?? "ADDRESS 없음 (컨트롤러가 아직)"}</span>
+      {i.routes.slice(0, 4).map((r) => (
+        <span key={r} class="ingress-route mono">
+          {r}
+        </span>
+      ))}
+    </button>
+  );
+}
+
 function ServiceBox({ s, selected }: { s: ServiceView; selected: boolean }) {
   const p = s.svc.spec.ports[0];
   const total = s.ready.length + s.notReady.length;
@@ -139,6 +180,12 @@ function ServiceBox({ s, selected }: { s: ServiceView; selected: boolean }) {
         {s.svc.spec.clusterIP}:{p?.port} → :{p?.targetPort}
         {p?.nodePort ? ` · NodePort ${p.nodePort}` : ""}
       </span>
+      {s.lbIP && (
+        <span class="svc-lb mono">
+          LB {s.lbIP} · {s.announcer ? `${s.announcer} 가 맡음` : "맡은 노드 없음"} · {s.svc.spec.externalTrafficPolicy}
+        </span>
+      )}
+      {s.svc.spec.type === "LoadBalancer" && !s.lbIP && <span class="svc-lb mono">LB &lt;pending&gt;</span>}
       <span class={`svc-eps${s.ready.length ? "" : " none"}`}>{total ? `엔드포인트 ready ${s.ready.length}${s.notReady.length ? ` · not ready ${s.notReady.length}` : ""}` : "엔드포인트 없음 (셀렉터에 맞는 Pod 없음)"}</span>
     </button>
   );

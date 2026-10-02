@@ -50,7 +50,9 @@ describe("예제", () => {
       s.cluster.runFor(120_000);
       for (const t of ex.tries) {
         if (!t.command) continue;
-        const r = runKubectl(s.cluster, resolveCommand(s.cluster.api.list("Pod"), t.command)!);
+        const cmd = resolveCommand(s.cluster.api.list("Pod"), t.command)!;
+        // curl 로 시작하면 클러스터 밖에서 (화면의 kubectl 창과 같음)
+        const r = cmd.startsWith("curl ") ? s.cluster.requestExternal(cmd.split(/\s+/).pop()!) : runKubectl(s.cluster, cmd);
         expect(r.ok, `${t.command}\n${r.output}`).toBe(!t.expectFail);
         s.cluster.runFor(60_000);
       }
@@ -123,4 +125,25 @@ test("drain 예제: worker-1 의 두 번째 Pod 내보내기가 PDB 에 한 번 
   s.cluster.runFor(60_000);
   expect(r.drain!.lines.some((l) => l.includes("Cannot evict pod as it would violate the pod's disruption budget."))).toBe(true);
   expect(r.drain!.lines.at(-1)).toBe("node/worker-1 drained");
+});
+
+test("ingress·source-ip 예제: 설명대로 출발지가 노드 IP 였다가 Local 로 바꾸면 클라이언트 IP", () => {
+  const run = (id: string) => {
+    const s = new DefSync();
+    s.reset(EXAMPLES.find((e) => e.id === id)!.build(), "x");
+    s.cluster.runFor(30_000);
+    return s.cluster;
+  };
+  const a = run("ingress");
+  expect(a.requestExternal("http://shop.example.com/").forwardedFor).toMatch(/^192\.168\.0\.1\d$/);
+  runKubectl(a, `kubectl patch svc ingress-nginx-controller -p '{"spec":{"externalTrafficPolicy":"Local"}}'`);
+  a.runFor(3000);
+  expect(a.requestExternal("http://shop.example.com/").forwardedFor).toBe("203.0.113.7");
+  const b = run("source-ip");
+  expect(b.requestExternal("http://192.168.0.240/").seenSource).toMatch(/^192\.168\.0\.1\d$/);
+  expect(b.requestExternal("http://192.168.0.11:30080/").ok).toBe(true);
+  runKubectl(b, `kubectl patch svc who -p '{"spec":{"externalTrafficPolicy":"Local"}}'`);
+  b.runFor(3000);
+  expect(b.requestExternal("http://192.168.0.240/").seenSource).toBe("203.0.113.7");
+  expect(b.requestExternal("http://192.168.0.11:30080/").ok).toBe(false);
 });
