@@ -36,8 +36,8 @@ export interface ResourceDiff {
 }
 
 export class ArgoCD extends Controller {
-  /** Application → 마지막으로 Git 에서 가져온 리비전 */
-  private readonly fetched = new Map<string, string>();
+  /** Application → 마지막으로 Git 에서 가져온 리비전 (어느 source 에서 가져왔는지와 함께 — source 가 바뀌면 다시 가져온다) */
+  private readonly fetched = new Map<string, { sha: string; source: string }>();
   private readonly healTimers = new Map<string, TimerHandle>();
   /** 다음 Git 폴링 시각 */
   nextPollAt = POLL_MS;
@@ -56,7 +56,10 @@ export class ArgoCD extends Controller {
         this.healTimers.delete(key);
         return;
       }
-      this.enqueue(nsKey(ev.object.metadata.namespace, ev.object.metadata.name));
+      const key = nsKey(ev.object.metadata.namespace, ev.object.metadata.name);
+      const f = this.fetched.get(key);
+      if (f && f.source !== sourceKey(ev.object)) this.fetched.delete(key); // source 가 바뀜 → 새로 가져온다
+      this.enqueue(key);
     });
     for (const kind of TRACKED) {
       ctx.api.watch(kind, (ev) => {
@@ -83,8 +86,8 @@ export class ArgoCD extends Controller {
     if (!app) return;
     const head = this.repo(app.spec.source.repoURL)?.head?.sha;
     if (!head) return;
-    const prev = this.fetched.get(key);
-    this.fetched.set(key, head);
+    const prev = this.fetched.get(key)?.sha;
+    this.fetched.set(key, { sha: head, source: sourceKey(app) });
     if (prev !== head) this.ctx.trace.add(ARGO, "gitops.fetch", `${name}: Git ${app.spec.source.targetRevision} 을 가져옴 (${why}) → ${prev ? `${prev.slice(0, 7)} → ` : ""}${head.slice(0, 7)}`, refOf(app));
     this.enqueue(key);
   }
@@ -98,7 +101,7 @@ export class ArgoCD extends Controller {
     const app = this.api.get("Application", name, ns);
     if (!app) return;
     if (!this.fetched.has(key)) this.fetch(key, "처음 비교");
-    const rev = this.fetched.get(key);
+    const rev = this.fetched.get(key)?.sha;
     if (!rev) {
       this.setStatus(app, { sync: { status: "Unknown" }, health: { status: "Unknown" }, resources: [] });
       return;
@@ -112,9 +115,20 @@ export class ArgoCD extends Controller {
     }
     const auto = app.spec.syncPolicy?.automated;
     if (!auto) return;
-    const lastSynced = app.status.operationState?.syncResult?.revision;
-    if (lastSynced !== rev) {
-      // 새 리비전: 자동 sync 는 리비전마다 한 번
+    // 할 일이 prune 뿐인데 prune 이 꺼져 있으면 자동 sync 도 self-heal 도 하지 않는다 (해도 바뀌는 것이 없어 끝없이 되풀이된다)
+    const actionable = cmp.diffs.filter((d) => !d.extra || auto.prune);
+    if (!actionable.length) {
+      this.note(key, `${name}: 남은 차이가 Git 에서 지운 리소스(prune 대상)뿐인데 자동 prune 이 꺼져 있어 sync 하지 않음 — argocd app sync --prune 으로`, app);
+      return;
+    }
+    // Git 경로가 비면 자동 sync 는 전부 지우지 않는다 (allowEmpty 기본 false)
+    if (!this.desired(app, rev).length) {
+      this.note(key, `${name}: Git ${app.spec.source.path}/ 가 비어 있음 → auto-sync will wipe out all resources — 자동 sync 를 하지 않음 (allowEmpty=false)`, app);
+      return;
+    }
+    const last = app.status.operationState?.syncResult;
+    if (last?.revision !== rev || (last.source !== undefined && last.source !== sourceKey(app))) {
+      // 새 리비전(또는 새 source): 자동 sync 는 (리비전, source) 마다 한 번
       this.sync(name, { prune: !!auto.prune, automated: true });
       return;
     }
@@ -128,7 +142,7 @@ export class ArgoCD extends Controller {
         this.healTimers.delete(key);
         const now = this.api.get("Application", name, ns);
         if (!now?.spec.syncPolicy?.automated?.selfHeal) return;
-        const again = this.compare(now, this.fetched.get(key) ?? rev);
+        const again = this.compare(now, this.fetched.get(key)?.sha ?? rev);
         if (again.sync === "OutOfSync") this.sync(name, { prune: !!now.spec.syncPolicy.automated.prune, automated: true, selfHeal: true });
       }),
     );
@@ -162,14 +176,22 @@ export class ArgoCD extends Controller {
     return { sync, health, resources, diffs };
   }
 
+  /** 같은 안내를 되풀이해 찍지 않는다 */
+  private readonly notes = new Map<string, string>();
+  private note(key: string, msg: string, app: Application): void {
+    if (this.notes.get(key) === msg) return;
+    this.notes.set(key, msg);
+    this.ctx.trace.add(ARGO, "gitops.compare", msg, refOf(app));
+  }
+
   diffs(name: string): ResourceDiff[] {
     const app = this.api.get("Application", name, ARGO_NS);
-    const rev = this.fetched.get(nsKey(ARGO_NS, name));
+    const rev = this.fetched.get(nsKey(ARGO_NS, name))?.sha;
     return app && rev ? this.compare(app, rev).diffs : [];
   }
 
   fetchedRevision(name: string): string | undefined {
-    return this.fetched.get(nsKey(ARGO_NS, name));
+    return this.fetched.get(nsKey(ARGO_NS, name))?.sha;
   }
 
   /** sync: Git 의 매니페스트를 apply 하고, prune 이면 Git 에 없는 것을 지운다 */
@@ -177,16 +199,35 @@ export class ArgoCD extends Controller {
     const key = nsKey(ARGO_NS, name);
     const app = this.api.get("Application", name, ARGO_NS);
     if (!app) return { ok: false, message: `application "${name}" not found`, lines: [] };
-    if (!this.fetched.has(key)) this.fetch(key, "sync 전에");
-    const rev = this.fetched.get(key);
+    // 손으로 하는 sync 는 지금 Git HEAD 를 다시 읽는다 (리비전을 정하지 않으면 targetRevision 을 새로 푼다)
+    if (!opts.automated || !this.fetched.has(key)) this.fetch(key, opts.automated ? "sync 전에" : "sync — targetRevision 을 다시 풂");
+    const rev = this.fetched.get(key)?.sha;
     if (!rev) return { ok: false, message: "Git 저장소를 읽지 못했습니다", lines: [] };
     const now = this.now;
     const kind = opts.selfHeal ? "self-heal" : opts.automated ? "automated sync" : "sync";
     this.api.recordEvent(app, "Normal", "OperationStarted", `Initiated ${opts.automated ? "automated " : ""}sync to '${rev}'`, ARGO);
     const lines: string[] = [];
+    const failed: string[] = [];
     for (const m of this.desired(app, rev)) {
-      const r = this.applyManifest(m);
-      lines.push(`${resourceName(m.kind)}/${m.metadata.name} ${r}`);
+      try {
+        const r = this.applyManifest(m);
+        lines.push(`${resourceName(m.kind)}/${m.metadata.name} ${r}`);
+      } catch (e) {
+        const why = e instanceof Error ? e.message : String(e);
+        failed.push(`${resourceName(m.kind)}/${m.metadata.name}: ${why}`);
+        lines.push(`${resourceName(m.kind)}/${m.metadata.name} failed: ${why}`);
+      }
+    }
+    if (failed.length) {
+      const message = `one or more objects failed to apply, reason: ${failed.join("; ")}`;
+      this.ctx.trace.add(opts.actor ?? ARGO, "gitops.sync", `${name}: ${kind} 실패 — ${message}`, refOf(app));
+      this.api.patch("Application", name, ARGO_NS, ARGO, (o) => {
+        // 자동 sync 는 같은 리비전을 다시 시도하지 않는다 (retry 정책 없음) → 시도한 리비전을 남긴다
+        o.status.operationState = { phase: "Failed", message, syncResult: { revision: rev, source: sourceKey(app) }, startedAt: now, finishedAt: now };
+      });
+      this.api.recordEvent(app, "Warning", "OperationCompleted", `Sync operation to ${rev} failed: ${message}`, ARGO);
+      this.enqueue(key);
+      return { ok: false, message, lines };
     }
     for (const l of this.trackedLive(name)) {
       if (this.desired(app, rev).some((m) => m.kind === l.kind && m.metadata.name === l.metadata.name)) continue;
@@ -203,8 +244,9 @@ export class ArgoCD extends Controller {
       refOf(app),
     );
     this.api.patch("Application", name, ARGO_NS, ARGO, (o) => {
-      o.status.operationState = { phase: "Succeeded", message: "successfully synced (all tasks run)", syncResult: { revision: rev }, startedAt: now, finishedAt: now };
-      o.status.history = [...o.status.history, { id: o.status.history.length, revision: rev, deployedAt: now }].slice(-10);
+      o.status.operationState = { phase: "Succeeded", message: "successfully synced (all tasks run)", syncResult: { revision: rev, source: sourceKey(app) }, startedAt: now, finishedAt: now };
+      const nextId = o.status.history.length ? Math.max(...o.status.history.map((h) => h.id)) + 1 : 0;
+      o.status.history = [...o.status.history, { id: nextId, revision: rev, deployedAt: now }].slice(-10);
     });
     this.api.recordEvent(app, "Normal", "OperationCompleted", `Sync operation to ${rev} succeeded`, ARGO);
     this.enqueue(key);
@@ -239,6 +281,11 @@ export class ArgoCD extends Controller {
     const after = `${s.sync.status}/${s.health.status}`;
     if (before !== after) this.ctx.trace.add(ARGO, "gitops.compare", `${app.metadata.name}: ${before} → ${after}${s.sync.revision ? ` (Git ${s.sync.revision.slice(0, 7)})` : ""}`, refOf(app));
   }
+}
+
+function sourceKey(app: Application): string {
+  const s = app.spec.source;
+  return `${s.repoURL}|${s.path}|${s.targetRevision}`;
 }
 
 /** Git 에 적은 필드가 라이브에 같은 값으로 있는가 — 다른 곳을 "경로: Git · 라이브" 줄로 */

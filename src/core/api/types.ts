@@ -296,7 +296,7 @@ export interface Application {
     sync: { status: SyncStatus; revision?: string };
     health: { status: HealthStatus };
     resources: { kind: string; name: string; status: SyncStatus; health?: HealthStatus; requiresPruning?: boolean }[];
-    operationState?: { phase: "Running" | "Succeeded" | "Failed"; message: string; syncResult?: { revision: string }; startedAt: number; finishedAt?: number };
+    operationState?: { phase: "Running" | "Succeeded" | "Failed"; message: string; syncResult?: { revision: string; source?: string }; startedAt: number; finishedAt?: number };
     history: { id: number; revision: string; deployedAt: number }[];
     reconciledAt?: number;
   };

@@ -55,7 +55,7 @@ export function runArgocd(c: Cluster, line: string): KubectlResult {
         ok: false, // 실제처럼 차이가 있으면 종료 코드 1
         mutated: false,
         output: diffs
-          .map((d) => `===== ${d.kind === "Deployment" ? "apps" : ""}/${d.kind} default/${d.name} ======\n${d.lines.map((l) => {
+          .map((d) => `===== ${groupOf(d.kind)}/${d.kind} default/${d.name} ======\n${d.lines.map((l) => {
             const m = /^(.*): Git (.*) · 라이브 (.*)$/.exec(l);
             return m ? `< ${m[1]}: ${m[3]}   (라이브)\n> ${m[1]}: ${m[2]}   (Git)` : `  ${l}`;
           }).join("\n")}`)
@@ -85,6 +85,8 @@ export function runArgocd(c: Cluster, line: string): KubectlResult {
       const prune = boolFlag("--auto-prune");
       const heal = boolFlag("--self-heal");
       if (has("--sync-policy") && policy !== "automated" && policy !== "auto" && policy !== "none") return fail(`FATA[0000] Invalid sync policy "${policy}" — automated 또는 none`);
+      const willBeAuto = policy === "automated" || policy === "auto" || (policy !== "none" && !!app.spec.syncPolicy?.automated);
+      if ((prune !== undefined || heal !== undefined) && !willBeAuto) return fail("FATA[0000] Cannot set --self-heal or --auto-prune: application not configured with automatic sync (--sync-policy automated 를 먼저)");
       c.api.patch("Application", name, ARGO_NS, "argocd", (o) => {
         if (policy === "none") delete o.spec.syncPolicy;
         else {
@@ -98,6 +100,10 @@ export function runArgocd(c: Cluster, line: string): KubectlResult {
       return ok("", true);
     }
   }
+}
+
+function groupOf(kind: string): string {
+  return kind === "Deployment" ? "apps" : kind === "Ingress" ? "networking.k8s.io" : kind === "PodDisruptionBudget" ? "policy" : "";
 }
 
 function policyText(app: Application): string {
@@ -140,11 +146,11 @@ export function appGet(c: Cluster, app: Application): string {
     `  Path:             ${app.spec.source.path}`,
     "SyncWindow:         Sync Allowed",
     `Sync Policy:        ${policyText(app)}`,
-    `Sync Status:        ${app.status.sync.status}${rev ? ` to ${app.spec.source.targetRevision} (${rev.slice(0, 7)})` : ""}`,
+    `Sync Status:        ${app.status.sync.status}${rev ? ` ${app.status.sync.status === "OutOfSync" ? "from" : "to"} ${app.spec.source.targetRevision} (${rev.slice(0, 7)})` : ""}`,
     `Health Status:      ${app.status.health.status}`,
   ].join("\n");
   const rows = app.status.resources.map((r) => [
-    r.kind === "Deployment" ? "apps" : r.kind === "Ingress" ? "networking.k8s.io" : r.kind === "PodDisruptionBudget" ? "policy" : "",
+    groupOf(r.kind),
     r.kind,
     "default",
     r.name,

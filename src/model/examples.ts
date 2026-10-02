@@ -553,8 +553,9 @@ export const EXAMPLES: Example[] = [
       {
         title: "Git 에서 ingress.yaml 지우기",
         action: { type: "git-rm", repo: NET_SIM_REPO, file: "deploy/ingress.yaml" },
-        expect: "prune 이 켜져 있으니 다음 sync 때 Ingress(와 Tailscale 프록시)가 지워집니다. Refresh 로 당겨 보세요.",
+        expect: "prune 이 켜져 있으니 다음 sync 때 Ingress(와 Tailscale 프록시)가 지워집니다.",
       },
+      { title: "다시 Refresh", command: "argocd app get net-sim --refresh", expect: "새 리비전을 보고 자동 sync — prune 으로 Ingress 가 지워지고, 오퍼레이터가 만든 프록시는 ownerReferences 로 따라 지워집니다." },
       { title: "selfHeal 끄기", command: "argocd app set net-sim --self-heal=false", expect: "이제 kubectl 로 바꾼 것은 OutOfSync 로 남습니다 (자동 sync 는 새 커밋에만 돈다)." },
       { title: "다시 손대기", command: "kubectl scale deployment/net-sim --replicas=2", expect: "이번에는 되돌리지 않습니다." },
       { title: "무엇이 다른지", command: "argocd app diff net-sim", expect: "< 는 라이브, > 는 Git. 차이가 있어 실패(종료 코드 1)로 끝납니다.", expectFail: true },

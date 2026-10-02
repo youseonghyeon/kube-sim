@@ -17,7 +17,7 @@ import { IngressNginxStatus, MetalLB, TailscaleOperator } from "./net/ingress";
 import { KubeProxy } from "./net/kubeproxy";
 import { simulateExternal, simulateFromPod, simulateNodePort, type NetResult, type StepKind, type Tool } from "./net/request";
 import { Traffic } from "./net/traffic";
-import { Rng } from "./rng";
+import { Rng, stableJson } from "./rng";
 import { Scheduler } from "./scheduler";
 import { Trace } from "./trace";
 
@@ -244,13 +244,32 @@ export class Cluster {
     const cur = this.api.get(m.kind, m.metadata.name, ns);
     if (!cur) {
       // 종류마다 모양은 다르지만 만드는 방법은 같다 (서버가 메타데이터·상태를 채운다)
-      const draft = { apiVersion: m.apiVersion, kind: m.kind, metadata: { ...m.metadata, namespace: ns }, spec: structuredClone(m.spec) };
+      const draft = {
+        apiVersion: m.apiVersion,
+        kind: m.kind,
+        metadata: { ...m.metadata, namespace: ns, annotations: { ...((m.metadata as { annotations?: Record<string, string> }).annotations ?? {}), [LAST_APPLIED]: stableJson(m) } },
+        spec: structuredClone(m.spec),
+      };
       this.api.create(draft as unknown as Draft<typeof m.kind>, actor);
       return "created";
     }
     const rv = cur.metadata.resourceVersion;
     const next = this.api.patch(m.kind, m.metadata.name, ns, actor, (o) => {
       const spec = structuredClone(m.spec);
+      const prevApplied = parseApplied(o.metadata.annotations?.[LAST_APPLIED]);
+      if (o.kind === "Deployment" && m.kind === "Deployment") {
+        // 3-way merge (kubectl apply 처럼): 템플릿 주석 중 지난번 apply 가 넣었고 이번 매니페스트에 없는 것만 지운다.
+        // 그래서 kubectl rollout restart 가 붙인 restartedAt 은 apply 해도 남는다
+        const live = o.spec.template.metadata.annotations ?? {};
+        const prev = (prevApplied as DeploymentManifest | undefined)?.spec.template.metadata.annotations ?? {};
+        const want = m.spec.template.metadata.annotations ?? {};
+        const merged: Record<string, string> = { ...live };
+        for (const k of Object.keys(prev)) if (!(k in want)) delete merged[k];
+        Object.assign(merged, want);
+        const tmpl = (spec as Deployment["spec"]).template;
+        if (Object.keys(merged).length) tmpl.metadata = { ...tmpl.metadata, annotations: merged };
+        else delete tmpl.metadata.annotations;
+      }
       if (o.kind === "Service" && m.kind === "Service") {
         // 서버가 정한 값(clusterIP·nodePort)은 매니페스트에 없으면 지킨다 (apply 의 3-way merge 처럼)
         const s = spec as Service["spec"];
@@ -264,6 +283,7 @@ export class Cluster {
       (o as { spec: unknown }).spec = spec;
       o.metadata.labels = { ...(m.metadata.labels ?? {}) };
       if (m.kind === "Ingress" || m.kind === "Application") o.metadata.annotations = { ...(m.metadata.annotations ?? {}) };
+      o.metadata.annotations = { ...(o.metadata.annotations ?? {}), [LAST_APPLIED]: stableJson(m) };
     });
     return next && next.metadata.resourceVersion !== rv ? "configured" : "unchanged";
   }
@@ -275,6 +295,19 @@ export class Cluster {
 
   runFor(ms: number, maxEvents?: number): number {
     return this.clock.runUntil(this.clock.now + ms, maxEvents);
+  }
+}
+
+/** kubectl apply 가 남기는 "지난번에 적용한 매니페스트" — 다음 apply 의 3-way merge 에 쓴다 */
+export const LAST_APPLIED = "kubectl.kubernetes.io/last-applied-configuration";
+
+/** 주석 값은 사용자가 고칠 수 있는 입력이라 깨져 있을 수 있다 — 그러면 "지난번 apply 없음" 으로 본다 (kubectl 도 경고 뒤 2-way 로 진행) */
+function parseApplied(s: string | undefined): Manifest | undefined {
+  if (!s) return undefined;
+  try {
+    return JSON.parse(s) as Manifest;
+  } catch {
+    return undefined;
   }
 }
 
