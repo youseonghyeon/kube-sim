@@ -1,5 +1,5 @@
 // 화면에 그릴 모양을 클러스터에서 뽑는다 (순수 함수 — 테스트 가능).
-import { controllerOf, isNodeReady, isPodReady, NODE_LEASE_NS, SERVICE_NAME_LABEL, type Deployment, type Ingress, type Node, type Pod, type ReplicaSet, type Service } from "../core/api/types";
+import { controllerOf, isNodeReady, isPodReady, NODE_LEASE_NS, SERVICE_NAME_LABEL, type Application, type Deployment, type Ingress, type Node, type Pod, type ReplicaSet, type Service } from "../core/api/types";
 import type { Cluster } from "../core/cluster";
 import { nodeStatusText, podReadyText, podStatusText } from "../core/kubectl";
 import { DEFAULT_TOLERATION_SECONDS } from "../core/api/server";
@@ -73,7 +73,23 @@ export interface IngressView {
   routes: string[];
 }
 
+export interface AppView {
+  app: Application;
+  name: string;
+  /** Argo CD 가 지금 비교하는 리비전 / Git 의 최신 */
+  seen?: string;
+  head?: string;
+}
+
+export interface GitView {
+  url: string;
+  head?: { sha: string; message: string; author: string };
+  commits: number;
+}
+
 export interface ClusterView {
+  gits: GitView[];
+  apps: AppView[];
   ingresses: IngressView[];
   services: ServiceView[];
   nodes: NodeView[];
@@ -199,7 +215,11 @@ export function buildView(c: Cluster): ClusterView {
     const d = depByName.get(p.owner);
     p.isNew = !!d && p.pod.metadata.labels[HASH_LABEL] === deploymentHash(d);
   }
+  const gits: GitView[] = [...c.git.values()].map((r) => ({ url: r.url, head: r.head ? { sha: r.head.sha, message: r.head.message, author: r.head.author } : undefined, commits: r.commits.length }));
+  const apps: AppView[] = c.api.list("Application", "argocd").map((app) => ({ app, name: app.metadata.name, seen: c.argocd.fetchedRevision(app.metadata.name), head: c.git.get(app.spec.source.repoURL)?.head?.sha }));
   return {
+    gits,
+    apps,
     ingresses,
     services,
     nodes,

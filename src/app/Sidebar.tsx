@@ -9,6 +9,7 @@ export function Sidebar() {
   const view = currentView();
   const pdbs = sim.cluster.api.list("PodDisruptionBudget", "default");
   const ings = sim.cluster.api.list("Ingress", "default");
+  const apps = sim.cluster.api.list("Application", "argocd");
   const sel = selection.value;
   const isSel = (kind: string, name: string) => sel?.kind === kind && sel.name === name;
   const manifestNames = new Set(clusterDef.value.manifests.filter((m) => m.kind === "Deployment").map((m) => m.metadata.name));
@@ -36,7 +37,11 @@ export function Sidebar() {
             <button class={`tree-row${isSel("Deployment", d.name) ? " sel" : ""}`} data-tree={`deployment/${d.name}`} onClick={() => (selection.value = { kind: "Deployment", namespace: "default", name: d.name })}>
               <span class="own-swatch" style={{ background: `var(--own-${d.colorIndex})` }} />
               <span class="tree-name">{d.name}</span>
-              {!manifestNames.has(d.name) && (d.d.metadata.ownerReferences[0] ? (
+              {!manifestNames.has(d.name) && (d.d.metadata.labels["app.kubernetes.io/instance"] ? (
+                <span class="tag" title={`Argo CD Application ${d.d.metadata.labels["app.kubernetes.io/instance"]} 이 Git 을 보고 만든 것`}>
+                  Argo CD
+                </span>
+              ) : d.d.metadata.ownerReferences[0] ? (
                 <span class="tag" title={`${d.d.metadata.ownerReferences[0].kind} ${d.d.metadata.ownerReferences[0].name} 를 보고 컨트롤러가 만든 것`}>
                   {d.d.metadata.ownerReferences[0].kind} 가 만듦
                 </span>
@@ -98,6 +103,19 @@ export function Sidebar() {
         ))}
         {!view.services.length && <div class="side-empty">없음. + 또는 kubectl expose</div>}
       </div>
+      {apps.length > 0 && (
+        <div class="side-section">
+          <div class="side-head">
+            <span>Argo CD</span>
+          </div>
+          {apps.map((a) => (
+            <button key={a.metadata.uid} class={`tree-row${isSel("Application", a.metadata.name) ? " sel" : ""}`} onClick={() => (selection.value = { kind: "Application", namespace: "argocd", name: a.metadata.name })}>
+              <span class="tree-name">{a.metadata.name}</span>
+              <span class={`tree-count ${a.status.sync.status === "Synced" ? "ok" : "wait"}`}>{a.status.sync.status}</span>
+            </button>
+          ))}
+        </div>
+      )}
       {ings.length > 0 && (
         <div class="side-section">
           <div class="side-head">

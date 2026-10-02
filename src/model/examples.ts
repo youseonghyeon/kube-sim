@@ -1,5 +1,7 @@
 // 예제: 노드 + 매니페스트 + "해 볼 것"(학습 포인트를 직접 확인하는 행동).
-import { deployment, ingress, pdb, service, type Manifest } from "../core/cluster";
+import { application, deployment, ingress, pdb, service, type Manifest } from "../core/cluster";
+
+const NET_SIM_REPO = "https://github.com/youseonghyeon/net-sim.git";
 import type { Pod } from "../core/api/types";
 import type { NodeDef } from "../core/kubelet";
 
@@ -23,7 +25,11 @@ export interface TryStep {
     /** client Pod 에서 Service 로 계속 요청 보내기 / 멈추기 */
     | { type: "traffic"; service: string; on: boolean }
     /** 매니페스트에 preStop sleep 을 넣는다 (kubectl apply 와 같음) */
-    | { type: "prestop"; deployment: string; seconds: number };
+    | { type: "prestop"; deployment: string; seconds: number }
+    /** CI: 새 이미지를 빌드해 Git 의 그 파일 image 태그를 바꿔 커밋 (github-actions) */
+    | { type: "ci-bump"; repo: string; file: string }
+    /** Git 에서 파일을 지우고 커밋 */
+    | { type: "git-rm"; repo: string; file: string };
   /** 무엇을 보게 되나 (학습 포인트) */
   expect: string;
   /** 실패하는 것이 학습 포인트인 명령 (예: ClusterIP 로 ping) */
@@ -498,6 +504,61 @@ export const EXAMPLES: Example[] = [
         expect: "공인 DNS → Funnel 중계 서버 → WireGuard 로 프록시 Pod → TLS 종료 → Service ClusterIP → (그 노드의 kube-proxy 규칙) → net-sim Pod. NodePort·LoadBalancer 가 하나도 없습니다.",
       },
       { title: "Ingress 자세히", command: "kubectl describe ingress net-sim", expect: "Default backend 가 net-sim:8080, Annotations 에 tailscale.com/funnel: true." },
+    ],
+  },
+  {
+    id: "gitops",
+    title: "GitOps: Argo CD 가 Git 을 맞추는 방식 (내 배포 파이프라인)",
+    summary: "net-sim 의 실제 흐름입니다: CI 가 이미지 태그를 Git 에 커밋 → Argo CD 가 (3분 폴링으로) 알아채 자동 sync → 롤아웃. kubectl 로 손대면 selfHeal 이 되돌리고, Git 에서 지우면 prune 이 지웁니다.",
+    build: () => ({
+      nodes: [node("worker-1"), node("worker-2")],
+      git: [
+        {
+          url: NET_SIM_REPO,
+          message: "deploy: net-sim chart",
+          files: {
+            "deploy/deployment.yaml": deployment("net-sim", {
+              replicas: 1,
+              image: "ghcr.io/youseonghyeon/net-sim:bdfd45b",
+              cpu: 10,
+              memory: 16,
+              port: 8080,
+              readiness: { httpGet: { path: "/", port: 8080 }, periodSeconds: 10 },
+              liveness: { httpGet: { path: "/healthz", port: 8080 }, periodSeconds: 10 },
+            }),
+            "deploy/service.yaml": service("net-sim", { selector: { app: "net-sim" }, port: 8080 }),
+            "deploy/ingress.yaml": ingress("net-sim", { className: "tailscale", defaultBackend: { service: { name: "net-sim", port: { number: 8080 } } }, tls: ["net-sim"], annotations: { "tailscale.com/funnel": "true" } }),
+          },
+        },
+      ],
+      manifests: [application("net-sim", { repoURL: NET_SIM_REPO, path: "deploy", automated: { prune: true, selfHeal: true } })],
+    }),
+    tries: [
+      { title: "앱 상태", command: "argocd app get net-sim", expect: "Git(deploy/) 의 매니페스트 3개가 클러스터에 있고 Synced · Healthy 입니다. Sync Policy 는 net-sim 의 argocd/application.yaml 처럼 Automated (Prune) + selfHeal." },
+      {
+        title: "kubectl 로 손대기",
+        command: "kubectl scale deployment/net-sim --replicas=3",
+        expect: "곧 OutOfSync 가 되고, selfHeal 이 5초 뒤 Git 의 replicas 1 로 되돌립니다. 클러스터를 바꾸려면 Git 을 바꿔야 한다는 뜻입니다.",
+      },
+      {
+        title: "CI: 새 이미지 → Git 커밋",
+        action: { type: "ci-bump", repo: NET_SIM_REPO, file: "deploy/deployment.yaml" },
+        expect: "github-actions 가 values.yaml 의 tag 를 바꿔 커밋한 것과 같습니다. 그런데 Argo CD 는 아직 옛 리비전을 봅니다 — 3분마다 Git 을 확인하기 때문 (GitOps 상자에 '아직 모름').",
+      },
+      {
+        title: "기다리지 않고 Refresh",
+        command: "argocd app get net-sim --refresh",
+        expect: "새 리비전을 보자마자 OutOfSync → 자동 sync → 새 이미지로 롤링 업데이트. 30× 로 3분을 기다려 봐도 같습니다.",
+      },
+      {
+        title: "Git 에서 ingress.yaml 지우기",
+        action: { type: "git-rm", repo: NET_SIM_REPO, file: "deploy/ingress.yaml" },
+        expect: "prune 이 켜져 있으니 다음 sync 때 Ingress(와 Tailscale 프록시)가 지워집니다. Refresh 로 당겨 보세요.",
+      },
+      { title: "selfHeal 끄기", command: "argocd app set net-sim --self-heal=false", expect: "이제 kubectl 로 바꾼 것은 OutOfSync 로 남습니다 (자동 sync 는 새 커밋에만 돈다)." },
+      { title: "다시 손대기", command: "kubectl scale deployment/net-sim --replicas=2", expect: "이번에는 되돌리지 않습니다." },
+      { title: "무엇이 다른지", command: "argocd app diff net-sim", expect: "< 는 라이브, > 는 Git. 차이가 있어 실패(종료 코드 1)로 끝납니다.", expectFail: true },
+      { title: "손으로 sync", command: "argocd app sync net-sim", expect: "Git 대로 되돌리고 Synced 가 됩니다." },
     ],
   },
   {

@@ -1,8 +1,9 @@
 // 편집 중인 정의를 살아 있는 클러스터에 동기화하고, 시뮬레이션 시계를 화면 프레임마다 돌린다.
 // 순수 로직은 defSync.ts(동기화) · simClock.ts(시계) 에 있고, 여기는 신호와 rAF 만 다룬다.
 import { effect, signal } from "@preact/signals";
-import type { DeploymentManifest } from "../core/cluster";
-import { curlTarget, runKubectl, type KubectlResult } from "../core/kubectl";
+import type { DeploymentManifest, Manifest } from "../core/cluster";
+import { curlTarget, type KubectlResult } from "../core/kubectl";
+import { commandKind, runCommand } from "./commands";
 import type { NetResult } from "../core/net/request";
 import { DefSync } from "./defSync";
 import { exampleById, type TryAction } from "./examples";
@@ -118,13 +119,10 @@ class SimController {
 
   kubectl(command: string): KubectlResult {
     let result: KubectlResult;
-    // kubectl 없이 curl 로 시작하면 클러스터 밖(인터넷 클라이언트)에서 보낸다
-    const ext = curlTarget(command);
+    // kubectl 없이 curl 로 시작하면 클러스터 밖(인터넷 클라이언트)에서, argocd·git 은 그 CLI 로
+    const ext = commandKind(command) === "curl" ? curlTarget(command) : undefined;
     try {
-      if (ext !== undefined) {
-        const r = this.cluster.requestExternal(ext);
-        result = { ok: r.ok, output: r.output, mutated: true, net: r };
-      } else result = runKubectl(this.cluster, command);
+      result = runCommand(this.cluster, command);
     } catch (e) {
       result = { ok: false, output: `내부 오류: ${e instanceof Error ? e.message : String(e)}`, mutated: false };
     }
@@ -152,7 +150,9 @@ class SimController {
         const ct = m.spec.template.spec.containers[0]!;
         ct.lifecycle = { preStop: { sleep: { seconds: a.seconds } } };
       });
-    } else this.curlNodePort(a.node, c.api.get("Service", a.service, "default")!.spec.ports[0]!.nodePort!);
+    } else if (a.type === "ci-bump") this.ciBump(a.repo, a.file);
+    else if (a.type === "git-rm") this.gitRemove(a.repo, a.file);
+    else this.curlNodePort(a.node, c.api.get("Service", a.service, "default")!.spec.ports[0]!.nodePort!);
     return undefined;
   }
 
@@ -171,6 +171,11 @@ class SimController {
       if (!a.on) return c.traffic ? undefined : "돌고 있는 부하가 없습니다";
       if (c.traffic && !c.traffic.stopped) return "이미 부하를 보내고 있습니다";
       return this.clientPod(a.service) ? undefined : "요청을 보낼 돌고 있는 Pod 가 없습니다";
+    }
+    if (a.type === "ci-bump" || a.type === "git-rm") {
+      const head = c.git.get(a.repo)?.head;
+      if (!head) return "Git 저장소가 없습니다";
+      return head.files[a.file] ? undefined : `Git 에 ${a.file} 이(가) 없습니다${a.type === "git-rm" ? " (이미 지움)" : ""}`;
     }
     if (a.type === "prestop") {
       const m = clusterDef.peek().manifests.find((x): x is DeploymentManifest => x.kind === "Deployment" && x.metadata.name === a.deployment);
@@ -216,6 +221,40 @@ class SimController {
 
   resetTraffic(): void {
     this.cluster.traffic?.reset();
+    this.bump();
+  }
+
+  /** CI 흉내: 새 커밋 SHA 로 이미지를 빌드했다고 보고, Git 의 그 파일 image 태그를 바꿔 커밋 (github-actions) */
+  ciBump(url: string, file: string): void {
+    const c = this.cluster;
+    const head = c.git.get(url)?.head;
+    const m = head?.files[file];
+    if (!head || m?.kind !== "Deployment") return;
+    const files = structuredClone(head.files);
+    const d = files[file] as DeploymentManifest;
+    const ct = d.spec.template.spec.containers[0]!;
+    const tag = head.sha.slice(7, 14);
+    ct.image = `${ct.image.split(":")[0]}:${tag}`;
+    c.gitCommit(url, files, `ci: bump image tag to ${tag}`, "github-actions");
+    this.bump();
+  }
+
+  /** Git 작업 사본을 커밋 (인스펙터의 Git 편집기) */
+  gitCommit(url: string, files: Record<string, Manifest>, message: string): void {
+    this.cluster.gitCommit(url, files, message, "you");
+    this.bump();
+  }
+
+  gitRemove(url: string, file: string): void {
+    const head = this.cluster.git.get(url)?.head;
+    if (!head?.files[file]) return;
+    const files = structuredClone(head.files);
+    delete files[file];
+    this.gitCommit(url, files, `remove ${file.split("/").pop()}`);
+  }
+
+  argoRefresh(app: string): void {
+    this.cluster.argocd.refresh(app);
     this.bump();
   }
 

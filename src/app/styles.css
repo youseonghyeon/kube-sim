@@ -605,6 +605,61 @@ pre {
   gap: 8px;
 }
 
+/* GitOps: Git · Application */
+.git-box,
+.app-box {
+  display: grid;
+  gap: 3px;
+  min-width: 260px;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  text-align: left;
+}
+.git-box {
+  border: 1.5px solid var(--own-2);
+  background: color-mix(in srgb, var(--own-2) 7%, var(--surface));
+}
+.app-box {
+  border: 1.5px solid var(--own-5);
+  background: color-mix(in srgb, var(--own-5) 7%, var(--surface));
+}
+.git-box.sel,
+.app-box.sel {
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.app-badges {
+  display: flex;
+  gap: 4px;
+}
+.policy {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+}
+.check.off {
+  opacity: 0.5;
+}
+.git-file {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.git-file.removed {
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+.git-file-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.git-file-head .mono {
+  flex: 1;
+}
+
 /* 바깥: 인터넷 클라이언트 · Ingress */
 .outside {
   display: grid;

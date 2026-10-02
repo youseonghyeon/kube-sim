@@ -48,6 +48,15 @@
 | ingress-nginx 의 `503 Service Temporarily Unavailable` | 규칙의 Service 에 ready 엔드포인트가 없음 | `kubectl get endpoints <svc>` |
 | `*.ts.net` 이 공인 인터넷에서 `Could not resolve host` | Ingress 에 `tailscale.com/funnel: "true"` 가 없음 (tailnet 안에서만) | annotation 추가 (tailnet 정책에 funnel 허용도 필요) |
 
+## GitOps (6단계)
+
+| 증상 / 출력 | 원인 | 고치는 법 |
+|---|---|---|
+| Git 에 push 했는데 Argo CD 가 그대로 (Synced to 옛 리비전) | Argo CD 는 Git 을 3분마다 확인한다 | `argocd app get <앱> --refresh` 또는 GitHub webhook |
+| kubectl 로 바꾼 것이 몇 초 뒤 되돌아감 | selfHeal 이 켜져 있다 — Git 이 원하는 상태 | Git 을 바꾼다 (또는 selfHeal 끄기) |
+| `OutOfSync` 인데 자동 sync 가 안 됨 | 자동 sync 는 새 리비전에만 돈다. 드리프트는 selfHeal 이 꺼져 있으면 그대로 | `argocd app sync <앱>` 또는 selfHeal 켜기 |
+| Git 에서 지운 리소스가 남아 있음 (`ignored (requires pruning)`) | prune 이 꺼져 있다 | `argocd app sync <앱> --prune` 또는 `--auto-prune` |
+
 ## 화면
 
 | 증상 | 원인 | 고치는 법 |

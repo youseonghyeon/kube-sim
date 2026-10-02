@@ -255,6 +255,30 @@ await page.waitForTimeout(2500);
 check((await page.locator(".term-res").last().textContent())?.includes("<title>net-sim</title>"), "funnel → 프록시 → Service → net-sim 응답", "request.ts viaFunnel");
 await page.screenshot({ path: `${OUT}/18-tailscale.png` });
 
+// 14) GitOps: Argo CD selfHeal · CI 커밋 → (폴링 전엔 모름) → Refresh → 자동 sync
+console.log("14) GitOps");
+await page.click(".menu-btn");
+await page.click('.menu-item[data-example="gitops"]');
+await page.selectOption(".transport .speed", "5");
+const appBadge = () => page.locator('[data-app="net-sim"] .badge').first().textContent().catch(() => "");
+await waitFor(async () => (await appBadge()) === "Synced", "Argo CD Synced", 30000);
+check(true, "GitOps 상자: Application 이 Synced");
+await page.locator(".try", { hasText: "kubectl 로 손대기" }).locator("button").click();
+await waitFor(async () => (await appBadge()) === "OutOfSync", "kubectl 뒤 OutOfSync", 10000);
+check(true, "kubectl 로 바꾸면 OutOfSync");
+await waitFor(async () => (await appBadge()) === "Synced", "selfHeal 로 다시 Synced", 30000);
+check(true, "selfHeal 이 되돌려 다시 Synced");
+await page.locator(".try", { hasText: "CI: 새 이미지" }).locator("button").click();
+await page.waitForTimeout(300);
+check((await page.locator('[data-app="net-sim"]').textContent())?.includes("아직 모름"), "CI 커밋 뒤 Argo CD 는 아직 옛 리비전 (폴링 전)", "Canvas GitOpsLane / argocd.ts fetch");
+await page.screenshot({ path: `${OUT}/19-gitops-behind.png` });
+await page.locator(".try", { hasText: "기다리지 않고 Refresh" }).locator("button").click();
+await waitFor(async () => !(await page.locator('[data-app="net-sim"]').textContent())?.includes("아직 모름"), "Refresh 뒤 새 리비전", 10000);
+await page.locator('[data-app="net-sim"]').click();
+await page.waitForTimeout(300);
+await page.screenshot({ path: `${OUT}/20-gitops-app.png` });
+check(true, "Refresh 하면 새 리비전을 보고 자동 sync");
+
 check(errors.length === 0, `브라우저 오류 없음${errors.length ? `: ${errors.join(" | ")}` : ""}`, "콘솔 오류의 스택을 보고 고치세요");
 console.log(failed ? "ui-check 실패" : "ui-check 통과 — 스크린샷: .shots/");
 await done(failed ? 1 : 0);

@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import { Clock } from "../src/core/clock";
 import type { DeploymentManifest } from "../src/core/cluster";
 import { DefSync } from "../src/model/defSync";
+import { runCommand } from "../src/model/commands";
 import { EXAMPLES, resolveCommand } from "../src/model/examples";
 import { advanceClock } from "../src/model/simClock";
 import { runKubectl } from "../src/core/kubectl";
@@ -52,7 +53,7 @@ describe("예제", () => {
         if (!t.command) continue;
         const cmd = resolveCommand(s.cluster.api.list("Pod"), t.command)!;
         // curl 로 시작하면 클러스터 밖에서 (화면의 kubectl 창과 같음)
-        const r = cmd.startsWith("curl ") ? s.cluster.requestExternal(cmd.split(/\s+/).pop()!) : runKubectl(s.cluster, cmd);
+        const r = runCommand(s.cluster, cmd);
         expect(r.ok, `${t.command}\n${r.output}`).toBe(!t.expectFail);
         s.cluster.runFor(60_000);
       }

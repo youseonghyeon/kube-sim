@@ -1,12 +1,14 @@
 // 오른쪽 인스펙터: 고른 오브젝트의 개요·설정·describe·YAML. 아무것도 안 골랐으면 예제의 "해 볼 것".
 import { useSignal } from "@preact/signals";
 import { useEffect, useMemo } from "preact/hooks";
-import { controllerOf, isNodeReady, NODE_LEASE_NS, type Deployment, type Ingress, type KObject, type Node, type Pod, type ReplicaSet, type Service } from "../core/api/types";
+import { controllerOf, isNodeReady, NODE_LEASE_NS, type Application, type Deployment, type Ingress, type KObject, type Node, type Pod, type ReplicaSet, type Service } from "../core/api/types";
+import type { DeploymentManifest, Manifest } from "../core/cluster";
 import { eventSource, nodeStatusText, podRestartsText, podStatusText, rolloutStatusLine, runKubectl } from "../core/kubectl";
 import { fmtAge, fmtCpu, fmtMem, parseCpu, parseMem } from "../core/units";
 import { IMAGE_NAMES, IMAGES } from "../core/workloads";
 import { NODE_MONITOR_GRACE_MS } from "../core/controllers/nodelifecycle";
 import { exampleById, resolveCommand, type TryAction } from "../model/examples";
+import { appGet } from "../core/gitops/cli";
 import { deploymentHash, HASH_LABEL, revisionOf } from "../core/controllers/deployment";
 import { sim, simVersion } from "../model/sim";
 import { clusterDef, drawerOpen, drawerTab, exampleId, findManifest, removeManifest, selection, updateManifest, updateNodeDef, updateServiceManifest } from "../model/store";
@@ -34,6 +36,7 @@ export function Inspector() {
   }, [sel?.kind, sel?.name, hasSettings, hasIptables]);
 
   if (!sel) return <aside class="inspector">{<ExamplePanel />}</aside>;
+  if (sel.kind === "GitRepo") return <GitPanel url={sel.name} />;
   if (!obj) {
     return (
       <aside class="inspector">
@@ -82,7 +85,9 @@ export function Inspector() {
         {tab.value === "settings" && obj.kind === "Node" && <NodeSettings n={obj} />}
         {tab.value === "settings" && obj.kind === "Service" && <ServiceSettings name={obj.metadata.name} />}
         {tab.value === "iptables" && obj.kind === "Node" && <IptablesView node={obj.metadata.name} />}
-        {tab.value === "describe" && <pre class="term">{runKubectl(sim.cluster, `describe ${obj.kind.toLowerCase()} ${obj.metadata.name}`).output}</pre>}
+        {tab.value === "describe" && (
+          <pre class="term">{obj.kind === "Application" ? appGet(sim.cluster, obj) : runKubectl(sim.cluster, `describe ${obj.kind.toLowerCase()} ${obj.metadata.name}`).output}</pre>
+        )}
         {tab.value === "yaml" && <pre class="term">{toYaml(obj)}</pre>}
       </div>
     </aside>
@@ -129,6 +134,8 @@ function Overview({ obj }: { obj: KObject }) {
       return <ServiceOverview svc={obj} />;
     case "Ingress":
       return <IngressOverview ing={obj} />;
+    case "Application":
+      return <ApplicationOverview app={obj} />;
     case "PodDisruptionBudget":
       return (
         <>
@@ -694,6 +701,8 @@ function actionLabel(a: TryAction): string {
   if (a.type === "sick") return a.healthy ? `${a.deployment} 의 고장 난 Pod 고치기` : `${a.deployment} Pod 하나의 앱 고장 내기`;
   if (a.type === "traffic") return a.on ? `client 에서 ${a.service} 로 0.1초마다 curl (부하)` : "부하 멈추기";
   if (a.type === "prestop") return `${a.deployment} 에 preStop sleep ${a.seconds}초 넣기 (apply)`;
+  if (a.type === "ci-bump") return `CI: 새 이미지 빌드 → Git 의 ${a.file.split("/").pop()} 태그 커밋`;
+  if (a.type === "git-rm") return `Git 에서 ${a.file.split("/").pop()} 지우고 커밋`;
   return `(클러스터 밖에서) curl ${a.node}:<${a.service} 의 NodePort>`;
 }
 
@@ -996,5 +1005,192 @@ function IngressOverview({ ing }: { ing: Ingress }) {
       <h3>이벤트</h3>
       <Events uid={ing.metadata.uid} />
     </>
+  );
+}
+
+// ---------- GitOps (6단계) ----------
+
+function ApplicationOverview({ app }: { app: Application }) {
+  const c = sim.cluster;
+  const name = app.metadata.name;
+  const auto = app.spec.syncPolicy?.automated;
+  const seen = c.argocd.fetchedRevision(name);
+  const head = c.git.get(app.spec.source.repoURL)?.head?.sha;
+  const diffs = c.argocd.diffs(name);
+  const setPolicy = (args: string) => runAndShow(`argocd app set ${name} ${args}`);
+  return (
+    <>
+      {head && seen && head !== seen && (
+        <div class="callout warn">
+          <div class="callout-title">Git 에 새 커밋이 있지만 Argo CD 는 아직 모릅니다</div>
+          <div class="small">
+            Argo CD 는 Git 을 3분마다 확인합니다 (보는 것 {seen.slice(0, 7)} · Git {head.slice(0, 7)}). Refresh 하거나 기다리세요 — 실제로는 GitHub webhook 을 달면 바로 압니다.
+          </div>
+          <button class="btn sm" onClick={() => runAndShow(`argocd app get ${name} --refresh`)}>
+            Refresh
+          </button>
+        </div>
+      )}
+      <Rows
+        rows={[
+          ["Git", <span class="mono small">{app.spec.source.repoURL.replace(/^https:\/\//, "")} · {app.spec.source.targetRevision} · {app.spec.source.path}/</span>],
+          ["보는 리비전", <span class="mono">{seen?.slice(0, 7) ?? "—"}</span>],
+          ["마지막 sync", <span class="mono">{app.status.operationState?.syncResult?.revision.slice(0, 7) ?? "아직 없음"}</span>],
+        ]}
+      />
+      <h3>Sync Policy</h3>
+      <div class="policy">
+        <label class="check">
+          <input type="checkbox" checked={!!auto} onChange={(e) => setPolicy(e.currentTarget.checked ? "--sync-policy automated" : "--sync-policy none")} />
+          자동 sync — 새 커밋을 보면 스스로 sync
+        </label>
+        <label class={`check${auto ? "" : " off"}`}>
+          <input type="checkbox" disabled={!auto} checked={!!auto?.prune} onChange={(e) => setPolicy(`--auto-prune=${e.currentTarget.checked}`)} />
+          prune — Git 에서 지운 리소스도 지움
+        </label>
+        <label class={`check${auto ? "" : " off"}`}>
+          <input type="checkbox" disabled={!auto} checked={!!auto?.selfHeal} onChange={(e) => setPolicy(`--self-heal=${e.currentTarget.checked}`)} />
+          selfHeal — kubectl 로 바꾼 것을 5초 뒤 되돌림
+        </label>
+      </div>
+      <div class="actions">
+        <button class="btn sm" onClick={() => runAndShow(`argocd app get ${name} --refresh`)}>
+          Refresh
+        </button>
+        <button class="btn sm" onClick={() => runAndShow(`argocd app sync ${name}`)}>
+          Sync
+        </button>
+        <button class="btn sm" onClick={() => runAndShow(`argocd app sync ${name} --prune`)}>
+          Sync (prune)
+        </button>
+        <button class="btn sm ghost" onClick={() => runAndShow(`argocd app diff ${name}`)}>
+          diff
+        </button>
+        <button class="btn sm ghost" onClick={() => runAndShow(`argocd app history ${name}`)}>
+          history
+        </button>
+      </div>
+      <h3>리소스</h3>
+      <ul class="ep-list">
+        {app.status.resources.map((r) => (
+          <li key={`${r.kind}/${r.name}`}>
+            <span class={`dot ${r.status === "Synced" ? "ok" : "wait"}`} />
+            <span class="ep-main">
+              <Link kind={r.kind} name={r.name} />
+              <span class="small muted">
+                {r.kind} · {r.health ?? "—"}
+                {r.requiresPruning ? " · Git 에 없음 (prune 대상)" : ""}
+              </span>
+            </span>
+            <span class={r.status === "Synced" ? "muted small" : "warn-text"}>{r.status}</span>
+          </li>
+        ))}
+      </ul>
+      {diffs.length > 0 && (
+        <>
+          <h3>Git 과 다른 곳</h3>
+          <ul class="list">
+            {diffs.map((d) => (
+              <li key={`${d.kind}/${d.name}`}>
+                <span class="small">
+                  {d.kind} {d.name}: {d.lines.join(", ")}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      <h3>이벤트</h3>
+      <Events uid={app.metadata.uid} />
+    </>
+  );
+}
+
+/** Git 저장소: 커밋 기록과 작업 사본 편집 (replicas·image·파일 지우기) → 커밋 & push */
+function GitPanel({ url }: { url: string }) {
+  simVersion.value;
+  const repo = sim.cluster.git.get(url);
+  const draft = useSignal<Record<string, Manifest> | null>(null);
+  const message = useSignal("");
+  const head = repo?.head;
+  useEffect(() => {
+    draft.value = null;
+  }, [head?.sha]);
+  if (!repo || !head) return <aside class="inspector"><div class="insp-body"><p class="note">Git 저장소가 없습니다.</p></div></aside>;
+  const files = draft.value ?? head.files;
+  const edit = (f: (x: Record<string, Manifest>) => void) => {
+    const next = structuredClone(files);
+    f(next);
+    draft.value = next;
+  };
+  const changed = draft.value !== null && JSON.stringify(draft.value) !== JSON.stringify(head.files);
+  return (
+    <aside class="inspector">
+      <div class="insp-head">
+        <div class="insp-kind">Git 저장소</div>
+        <div class="insp-name mono">{url.replace(/^https:\/\//, "")}</div>
+        <button class="icon-btn sm insp-close" onClick={() => (selection.value = null)} aria-label="선택 해제">
+          <Icon name="close" size={15} />
+        </button>
+      </div>
+      <div class="insp-body">
+        <p class="note">여기서 고치고 커밋하면 git push 한 것과 같습니다. Argo CD 는 다음 폴링(3분)이나 Refresh 때 알게 됩니다.</p>
+        <h3>파일 (main · {head.sha.slice(0, 7)})</h3>
+        {Object.entries(head.files).map(([path]) => {
+          const m = files[path];
+          return (
+            <div key={path} class={`git-file${m ? "" : " removed"}`}>
+              <div class="git-file-head">
+                <span class="mono small">{path}</span>
+                <span class="muted small">{head.files[path]!.kind}</span>
+                <button class="btn sm ghost" onClick={() => edit((x) => (m ? delete x[path] : (x[path] = structuredClone(head.files[path]!))))}>
+                  {m ? "지우기" : "되살리기"}
+                </button>
+              </div>
+              {m?.kind === "Deployment" && (
+                <>
+                  <Field label="replicas">
+                    <div class="stepper">
+                      <button class="btn sm" onClick={() => edit((x) => ((x[path] as DeploymentManifest).spec.replicas = Math.max(0, m.spec.replicas - 1)))}>
+                        −
+                      </button>
+                      <span class="mono stepper-num">{m.spec.replicas}</span>
+                      <button class="btn sm" onClick={() => edit((x) => ((x[path] as DeploymentManifest).spec.replicas = Math.min(30, m.spec.replicas + 1)))}>
+                        +
+                      </button>
+                    </div>
+                  </Field>
+                  <Field label="image">
+                    <TextInput value={m.spec.template.spec.containers[0]!.image} onCommit={(v) => edit((x) => ((x[path] as DeploymentManifest).spec.template.spec.containers[0]!.image = v))} />
+                  </Field>
+                </>
+              )}
+            </div>
+          );
+        })}
+        <Field label="커밋 메시지">
+          <input class="input" value={message.value} placeholder={changed ? "예: scale net-sim to 2" : "바꾼 것이 없습니다"} onInput={(e) => (message.value = e.currentTarget.value)} />
+        </Field>
+        <div class="actions">
+          <button
+            class="btn"
+            disabled={!changed}
+            onClick={() => {
+              sim.gitCommit(url, draft.value!, message.value.trim() || "update manifests");
+              message.value = "";
+            }}
+          >
+            커밋 &amp; push
+          </button>
+          {changed && (
+            <button class="btn ghost" onClick={() => (draft.value = null)}>
+              되돌리기
+            </button>
+          )}
+        </div>
+        <h3>커밋 기록</h3>
+        <pre class="term">{repo.log()}</pre>
+      </div>
+    </aside>
   );
 }

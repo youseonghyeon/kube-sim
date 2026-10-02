@@ -44,6 +44,12 @@
 - ingress-nginx 는 Host 마다 server 블록: Host 가 맞는 규칙들 안에서만 경로를 고르고, 없으면 그 Ingress 의 defaultBackend, 그것도 없으면 404. Pod 에서 LoadBalancer IP 로 보낸 것은 KUBE-EXT 의 "pod traffic" 규칙으로 Local 과 상관없이 모든 엔드포인트로.
 - 축소판: Cluster 정책의 SNAT 출발지를 노드 InternalIP 로 보여 준다. 실제(k3s flannel VXLAN)에서는 MASQUERADE 가 나가는 인터페이스 주소를 써서 flannel.1·cni0 주소(10.42.x.0 대)로 보일 수 있다(확인 안 함 — 추정).
 
+## 7-1. GitOps (6단계, `gitops/`)
+- Git 은 클러스터 밖의 사실이라 API 오브젝트가 아니다 (`Cluster.git`). 커밋 = 파일 전체 스냅샷, SHA 는 내용으로 정해짐(결정론).
+- Argo CD 는 Application 마다 "가져온 리비전" 을 따로 기억한다 → Git 에 push 해도 다음 폴링(배경 타이머 3분)이나 Refresh 전에는 모른다. 라이브는 watch 로 바로 본다.
+- 비교: Git 매니페스트에 적힌 필드만 라이브와 비교(기본값으로 채워진 필드 무시), 추적 표(`app.kubernetes.io/instance`)가 붙었는데 Git 에 없는 것은 prune 대상.
+- 자동 sync 는 "마지막 sync 리비전 ≠ 지금 리비전" 일 때만. 같은 리비전의 드리프트는 selfHeal 이면 5초 뒤(일반 타이머 — 한 번) sync. Application 은 argocd 네임스페이스.
+
 ## 3-1. 노드 장애 (1단계, `controllers/nodelifecycle.ts`)
 - kubelet 은 `kube-node-lease` 의 Lease 를 10초마다 갱신(배경 타이머). Lease 는 Node 가 주인 → Node 를 지우면 GC.
 - node-lifecycle-controller: 5초마다(배경) Lease 를 보고 40초 넘게 갱신이 없으면 Ready=Unknown(`NodeStatusUnknown`), taint `node.kubernetes.io/unreachable` NoSchedule·NoExecute(timeAdded), 그 노드 Pod 의 Ready=False. 다시 갱신되고 kubelet 이 Ready 를 보고하면 taint 제거.

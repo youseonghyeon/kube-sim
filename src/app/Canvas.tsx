@@ -31,6 +31,7 @@ export function Canvas() {
     <main class="canvas" ref={main} onClick={() => (selection.value = null)}>
       <ControlPlane now={now} windowMs={windowMs} version={version} />
       <TrafficBar />
+      {(view.apps.length > 0 || view.gits.length > 0) && <GitOpsLane view={view} now={now} sel={sel} />}
       {(view.ingresses.length > 0 || view.services.some((s) => s.svc.spec.type !== "ClusterIP")) && (
         <section class="svcs" aria-label="바깥에서 들어오는 길">
           <div class="lane-head">
@@ -95,11 +96,80 @@ function focusOf(view: ClusterView, sel: { kind: string; name: string } | null):
   if (sel.kind === "Pod") return { pod: sel.name };
   if (sel.kind === "Deployment") return { pods: new Set(view.pods.filter((p) => p.owner === sel.name).map((p) => p.name)) };
   if (sel.kind === "ReplicaSet") return { pods: new Set(view.pods.filter((p) => p.rs === sel.name).map((p) => p.name)) };
+  if (sel.kind === "Application") {
+    const deps = new Set(view.deployments.filter((d) => d.d.metadata.labels["app.kubernetes.io/instance"] === sel.name).map((d) => d.name));
+    return { pods: new Set(view.pods.filter((p) => p.owner && deps.has(p.owner)).map((p) => p.name)) };
+  }
   if (sel.kind === "Service") {
     const s = view.services.find((x) => x.name === sel.name);
     if (s) return { pods: new Set([...s.ready, ...s.notReady]) };
   }
   return {};
+}
+
+/** GitOps: Git 저장소 → Argo CD Application (→ 아래의 클러스터 리소스) */
+function GitOpsLane({ view, now, sel }: { view: ClusterView; now: number; sel: { kind: string; name: string } | null }) {
+  const left = Math.max(0, sim.cluster.argocd.nextPollAt - now);
+  return (
+    <section class="svcs" aria-label="GitOps">
+      <div class="lane-head">
+        <span class="lane-title">GitOps</span>
+        <span class="lane-sub">Git 이 원하는 상태 — Argo CD 가 라이브와 비교해 맞춘다 · 다음 Git 확인까지 {Math.ceil(left / 1000)}초 (3분 폴링)</span>
+      </div>
+      <div class="svc-row">
+        {view.gits.map((g) => (
+          <button
+            key={g.url}
+            class={`git-box${sel?.kind === "GitRepo" && sel.name === g.url ? " sel" : ""}`}
+            data-git={g.url}
+            onClick={(e) => {
+              e.stopPropagation();
+              selection.value = { kind: "GitRepo", name: g.url };
+            }}
+          >
+            <span class="svc-top">
+              <span class="svc-name">{g.url.replace(/^https:\/\/github\.com\//, "").replace(/\.git$/, "")}</span>
+              <span class="svc-type">Git · main · 커밋 {g.commits}</span>
+            </span>
+            {g.head && (
+              <span class="svc-addr mono">
+                {g.head.sha.slice(0, 7)} {g.head.message}
+              </span>
+            )}
+          </button>
+        ))}
+        {view.apps.map((a) => {
+          const behind = a.head && a.seen && a.head !== a.seen;
+          const s = a.app.status;
+          return (
+            <button
+              key={a.name}
+              class={`app-box${sel?.kind === "Application" && sel.name === a.name ? " sel" : ""}`}
+              data-app={a.name}
+              onClick={(e) => {
+                e.stopPropagation();
+                selection.value = { kind: "Application", namespace: "argocd", name: a.name };
+              }}
+            >
+              <span class="svc-top">
+                <span class="svc-name">{a.name}</span>
+                <span class="svc-type">Argo CD Application</span>
+              </span>
+              <span class="app-badges">
+                <span class={`badge t-${s.sync.status === "Synced" ? "ok" : "wait"}`}>{s.sync.status}</span>
+                <span class={`badge t-${s.health.status === "Healthy" ? "ok" : s.health.status === "Progressing" ? "wait" : "bad"}`}>{s.health.status}</span>
+              </span>
+              <span class="svc-addr mono">
+                보는 리비전 {a.seen?.slice(0, 7) ?? "—"}
+                {behind ? ` · Git 은 ${a.head!.slice(0, 7)} (아직 모름)` : ""}
+              </span>
+              <span class="ingress-route">{a.app.spec.syncPolicy?.automated ? `자동 sync${a.app.spec.syncPolicy.automated.prune ? " · prune" : ""}${a.app.spec.syncPolicy.automated.selfHeal ? " · selfHeal" : ""}` : "수동 sync"}</span>
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
 }
 
 /** 부하 발생기의 최근 결과: 칸 하나가 요청 하나 (초록 성공 · 빨강 실패) */

@@ -65,7 +65,9 @@
 ## 5. 운영 (후보 — 시작할 때 고른다)
 - requests/limits 와 OOMKilled·CPU throttling, HPA(메트릭 흉내로 replicas 조정), NetworkPolicy(기본 허용 → 정책이 하나라도 걸리면 기본 차단), ConfigMap/Secret 변경과 재시작, StatefulSet + PVC(순서·고정 이름·고정 볼륨)
 
-## 6. GitOps (ArgoCD 식)
+## 6. GitOps (ArgoCD 식) ✅ 2026-10-02
+- 된 것: Git 저장소(커밋 이력, 경로별 매니페스트), Argo CD application-controller(3분 폴링·Refresh, Git 에 적은 필드 기준 비교 → Synced/OutOfSync, 리소스 Health, 자동 sync 는 새 리비전마다 한 번, selfHeal 5초, prune, 이력), `argocd app list/get/diff/sync/history/set`·`git log` 흉내, `kubectl get applications -n argocd`, 캔버스 GitOps 칸(Git → Application, '아직 모름' 표시·폴링 카운트다운), Application 인스펙터(정책 토글·리소스·차이), Git 인스펙터(작업 사본 편집 → 커밋), 예제 '내 배포 파이프라인'(CI 태그 커밋 → 폴링 → 자동 sync → 롤아웃)
+- 축소판: Argo CD 는 Pod 없는 부가 기능, Helm 렌더링 결과를 Git 에 있다고 봄, 대상 네임스페이스 default, sync 즉시 완료, 훅·sync wave·finalizer·webhook 없음
 - 배우는 것: Git(원하는 매니페스트) vs 라이브 비교 → Synced/OutOfSync, 수동·자동 sync, self-heal(누가 kubectl 로 고친 것을 되돌림), prune(Git 에서 지운 리소스 삭제), 이미지 태그 봇 커밋 → sync 흐름(사용자의 net-sim 배포 파이프라인과 같은 모양)
 - 예제: "kubectl edit 로 replicas 를 바꾸면 ArgoCD 가 되돌린다", "values.yaml 태그 하나 바꾸기 = 롤아웃"
 
