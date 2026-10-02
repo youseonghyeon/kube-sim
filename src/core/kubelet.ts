@@ -50,6 +50,12 @@ interface PodRt {
   crashBackoff: number;
   pullBackoff: number;
   startedAt?: number;
+  /** readiness probe 주기 (배경 타이머) */
+  probe?: TimerHandle;
+  probeFailures: number;
+  probeReady: boolean;
+  /** 사용자가 "앱 고장" 으로 만든 상태 — /ready 와 요청에 503 */
+  sick: boolean;
 }
 
 export class Kubelet {
@@ -146,7 +152,10 @@ export class Kubelet {
     this.powered = false;
     this.epoch++;
     this.heartbeat?.cancel();
-    for (const rt of this.pods.values()) rt.timer?.cancel();
+    for (const rt of this.pods.values()) {
+      rt.timer?.cancel();
+      rt.probe?.cancel();
+    }
     const n = this.pods.size;
     this.pods.clear();
     this.pulls.clear();
@@ -201,7 +210,10 @@ export class Kubelet {
     this.stopped = true;
     this.heartbeat?.cancel();
     this.unwatch();
-    for (const rt of this.pods.values()) rt.timer?.cancel();
+    for (const rt of this.pods.values()) {
+      rt.timer?.cancel();
+      rt.probe?.cancel();
+    }
     this.pods.clear();
   }
 
@@ -214,6 +226,7 @@ export class Kubelet {
     if (ev.type === "DELETED") {
       if (rt) {
         rt.timer?.cancel();
+        rt.probe?.cancel();
         this.pods.delete(p.metadata.uid);
       }
       return;
@@ -242,6 +255,9 @@ export class Kubelet {
       restarts,
       crashBackoff: 0,
       pullBackoff: 0,
+      probeFailures: 0,
+      probeReady: false,
+      sick: false,
     };
     this.pods.set(rt.uid, rt);
     const now = this.ctx.clock.now;
@@ -352,30 +368,114 @@ export class Kubelet {
     rt.startedAt = now;
     this.event(p, "Normal", "Created", `Created container: ${c.name}`);
     this.event(p, "Normal", "Started", `Started container ${c.name}`);
+    const probe = c.readinessProbe;
     this.ctx.trace.add(
       this.actor,
       "kubelet.start",
-      `${rt.name} 컨테이너 ${c.name} 시작 (${c.image}${rt.restarts ? `, ${rt.restarts}번째 재시작` : ""}) → Running · readiness probe 없음 → 바로 Ready`,
+      `${rt.name} 컨테이너 ${c.name} 시작 (${c.image}${rt.restarts ? `, ${rt.restarts}번째 재시작` : ""}) → Running · ${
+        probe ? `readiness probe(GET :${probe.httpGet.port}${probe.httpGet.path}, ${probe.periodSeconds ?? 10}초마다)가 통과해야 Ready` : "readiness probe 없음 → 바로 Ready"
+      }`,
       refOf(p),
     );
+    rt.probeReady = !probe;
+    rt.probeFailures = 0;
     this.patchPod(rt, (o) => {
       o.status.phase = "Running";
       const cs = o.status.containerStatuses[0];
       if (cs) {
         cs.state = { running: { startedAt: now } };
-        cs.ready = true;
+        cs.ready = !probe;
         cs.started = true;
         cs.restartCount = rt.restarts;
       }
-      setCondition(o, "ContainersReady", "True", now);
-      setCondition(o, "Ready", "True", now);
+      if (!probe) {
+        setCondition(o, "ContainersReady", "True", now);
+        setCondition(o, "Ready", "True", now);
+      }
     });
+    if (probe) this.scheduleProbe(rt, (probe.initialDelaySeconds ?? 0) * 1000 || (probe.periodSeconds ?? 10) * 1000);
     if (spec?.crashAfterMs !== undefined) rt.timer = this.ctx.clock.after(spec.crashAfterMs, this.actor, () => this.crash(rt, spec.exitCode ?? 1));
+  }
+
+  // ---------- readiness probe ----------
+
+  /** 배경 타이머: 컨테이너가 도는 동안 끝없이 반복하는 주기 동작 */
+  private scheduleProbe(rt: PodRt, delay: number): void {
+    rt.probe?.cancel();
+    const epoch = this.epoch;
+    rt.probe = this.ctx.clock.background(delay, this.actor, () => {
+      if (epoch !== this.epoch || rt.stage !== "running" || !this.pods.has(rt.uid)) return;
+      this.runProbe(rt);
+    });
+  }
+
+  private runProbe(rt: PodRt): void {
+    const p = this.livePod(rt);
+    if (!p) return;
+    const c = p.spec.containers[0]!;
+    const probe = c.readinessProbe;
+    if (!probe) return;
+    const spec = imageSpec(c.image);
+    const now = this.ctx.clock.now;
+    const url = `http://${rt.ip}:${probe.httpGet.port}${probe.httpGet.path}`;
+    let fail: string | undefined;
+    if (spec?.port !== probe.httpGet.port) fail = `Get "${url}": dial tcp ${rt.ip}:${probe.httpGet.port}: connect: connection refused`;
+    else if (rt.sick || now - (rt.startedAt ?? now) < (spec.warmupMs ?? 0)) fail = "HTTP probe failed with statuscode: 503";
+    const threshold = probe.failureThreshold ?? 3;
+    if (fail) {
+      rt.probeFailures++;
+      this.event(p, "Warning", "Unhealthy", `Readiness probe failed: ${fail}`);
+      if (rt.probeReady && rt.probeFailures >= threshold) {
+        rt.probeReady = false;
+        this.ctx.trace.add(this.actor, "kubelet.probe", `${rt.name} readiness probe ${threshold}번 연속 실패 (${fail}) → Ready=False → EndpointSlice 에서 빠져 트래픽을 받지 않음 (컨테이너는 계속 Running)`, refOf(p));
+        this.setReady(rt, false, now);
+      } else if (!rt.probeReady && rt.probeFailures === 1) {
+        this.ctx.trace.add(this.actor, "kubelet.probe", `${rt.name} readiness probe 실패 (${fail}) → 아직 Ready 아님`, refOf(p));
+      }
+    } else {
+      rt.probeFailures = 0;
+      if (!rt.probeReady) {
+        rt.probeReady = true;
+        this.ctx.trace.add(this.actor, "kubelet.probe", `${rt.name} readiness probe 통과 (GET ${probe.httpGet.path} → 200) → Ready=True → EndpointSlice 에 들어가 트래픽을 받기 시작`, refOf(p));
+        this.setReady(rt, true, now);
+      }
+    }
+    this.scheduleProbe(rt, (probe.periodSeconds ?? 10) * 1000);
+  }
+
+  private setReady(rt: PodRt, ready: boolean, now: number): void {
+    this.patchPod(rt, (o) => {
+      const cs = o.status.containerStatuses[0];
+      if (cs) cs.ready = ready;
+      const why = ready ? undefined : `containers with unready status: [${names(o)}]`;
+      setCondition(o, "ContainersReady", ready ? "True" : "False", now, ready ? undefined : "ContainersNotReady", why);
+      setCondition(o, "Ready", ready ? "True" : "False", now, ready ? undefined : "ContainersNotReady", why);
+    });
+  }
+
+  /** 앱 고장 흉내 (DB 연결이 끊긴 것처럼): readiness 와 요청이 503 */
+  setSick(podUid: string, sick: boolean): boolean {
+    const rt = this.pods.get(podUid);
+    if (!rt) return false;
+    rt.sick = sick;
+    return true;
+  }
+
+  /** 요청 흉내가 묻는 것: 이 Pod 의 컨테이너가 지금 돌고 있는지, 고장인지 */
+  appState(podUid: string): { running: boolean; sick: boolean; warm: boolean } | undefined {
+    if (!this.powered) return undefined;
+    const rt = this.pods.get(podUid);
+    if (!rt) return undefined;
+    const running = rt.stage === "running" || rt.stage === "terminating";
+    const p = this.ctx.api.peekList("Pod").find((x) => x.metadata.uid === podUid);
+    const warmup = p ? (imageSpec(p.spec.containers[0]!.image)?.warmupMs ?? 0) : 0;
+    return { running, sick: rt.sick, warm: this.ctx.clock.now - (rt.startedAt ?? 0) >= warmup };
   }
 
   private crash(rt: PodRt, exitCode: number): void {
     const p = this.livePod(rt);
     if (!p) return;
+    rt.probe?.cancel();
     const c = p.spec.containers[0]!;
     const now = this.ctx.clock.now;
     const ran = now - (rt.startedAt ?? now);
@@ -434,6 +534,7 @@ export class Kubelet {
 
   private terminate(rt: PodRt, p: Pod): void {
     rt.timer?.cancel();
+    rt.probe?.cancel();
     const wasRunning = rt.stage === "running";
     rt.stage = "terminating";
     const c = p.spec.containers[0]!;

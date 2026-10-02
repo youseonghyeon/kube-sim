@@ -88,7 +88,8 @@ function StatusBadge({ obj }: { obj: KObject }) {
     const s = nodeStatusText(obj);
     return <span class={`badge t-${!isNodeReady(obj) ? "bad" : obj.spec.unschedulable ? "wait" : "ok"}`}>{s}</span>;
   }
-  if (obj.kind === "Lease") return null;
+  if (obj.kind === "Lease" || obj.kind === "EndpointSlice") return null;
+  if (obj.kind === "Service") return <span class="badge">{obj.spec.type}</span>;
   const ready = obj.status.readyReplicas;
   return <span class={`badge t-${ready === obj.spec.replicas ? "ok" : "wait"}`}>{`${ready}/${obj.spec.replicas} Ready`}</span>;
 }

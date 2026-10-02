@@ -11,14 +11,29 @@ export interface ImageSpec {
   exitCode?: number;
   /** SIGTERM 을 받고 끝나는 데 걸리는 시간(ms). 유예 시간보다 길면 SIGKILL */
   termMs: number;
+  /** 앱이 듣는 포트 (없으면 아무 포트도 열지 않음) */
+  port?: number;
+  /** HTTP 응답 본문 (curl 로 받으면 보이는 것) */
+  body?: string;
+  /** 시작 후 이만큼 지나야 readiness 가 통과 (앱 준비 시간) */
+  warmupMs?: number;
   description: string;
 }
 
 export const IMAGES: Record<string, ImageSpec> = {
-  "nginx:1.27": { pullMs: 3000, sizeMB: 72, termMs: 300, description: "웹 서버. 잘 뜨고 SIGTERM 에 바로 끝납니다" },
-  "nginx:1.28": { pullMs: 3000, sizeMB: 73, termMs: 300, description: "웹 서버 새 버전" },
-  "ghcr.io/youseonghyeon/net-sim:latest": { pullMs: 4000, sizeMB: 25, termMs: 300, description: "정적 사이트 (nginx 위 net-sim)" },
-  "redis:7": { pullMs: 2500, sizeMB: 45, termMs: 500, description: "인메모리 DB" },
+  "nginx:1.27": { pullMs: 3000, sizeMB: 72, termMs: 300, port: 80, body: "<title>Welcome to nginx!</title>", description: "웹 서버 (포트 80). 잘 뜨고 SIGTERM 에 바로 끝납니다" },
+  "nginx:1.28": { pullMs: 3000, sizeMB: 73, termMs: 300, port: 80, body: "<title>Welcome to nginx!</title> (1.28)", description: "웹 서버 새 버전 (포트 80)" },
+  "ghcr.io/youseonghyeon/net-sim:latest": { pullMs: 4000, sizeMB: 25, termMs: 300, port: 80, body: "<title>net-sim</title>", description: "정적 사이트 (nginx 위 net-sim, 포트 80)" },
+  "redis:7": { pullMs: 2500, sizeMB: 45, termMs: 500, port: 6379, description: "인메모리 DB (포트 6379, HTTP 아님)" },
+  "example/api:1.0": {
+    pullMs: 2500,
+    sizeMB: 40,
+    termMs: 300,
+    port: 8080,
+    body: '{"status":"ok"}',
+    warmupMs: 15_000,
+    description: "API 서버 (포트 8080). 시작 후 15초 동안 캐시를 데우느라 /ready 가 503 — readiness probe 연습용",
+  },
   "example/worker:1.0": {
     pullMs: 2000,
     sizeMB: 30,

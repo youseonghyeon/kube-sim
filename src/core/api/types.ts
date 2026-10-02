@@ -27,10 +27,21 @@ export interface Resources {
   memory: number;
 }
 
+export interface Probe {
+  httpGet: { path: string; port: number };
+  initialDelaySeconds?: number;
+  /** 기본 10 */
+  periodSeconds?: number;
+  /** 기본 3 — 이만큼 연속 실패하면 Ready=False */
+  failureThreshold?: number;
+}
+
 export interface Container {
   name: string;
   image: string;
   resources: { requests: Resources };
+  ports?: { containerPort: number; protocol?: "TCP" }[];
+  readinessProbe?: Probe;
 }
 
 export interface Toleration {
@@ -150,6 +161,43 @@ export interface Node {
   };
 }
 
+export interface ServicePort {
+  name?: string;
+  protocol: "TCP";
+  port: number;
+  targetPort: number;
+  nodePort?: number;
+}
+
+export interface Service {
+  apiVersion: "v1";
+  kind: "Service";
+  metadata: ObjectMeta;
+  spec: { type: "ClusterIP" | "NodePort"; selector: Record<string, string>; ports: ServicePort[]; clusterIP?: string };
+  status: Record<string, never>;
+}
+
+export interface Endpoint {
+  addresses: string[];
+  conditions: { ready: boolean; serving: boolean; terminating: boolean };
+  nodeName?: string;
+  targetRef: { kind: "Pod"; name: string; uid: string };
+}
+
+/** EndpointSlice 컨트롤러가 Service 셀렉터에 맞는 Pod 의 IP 를 모아 둔 것 (kube-proxy 가 이것을 본다) */
+export interface EndpointSlice {
+  apiVersion: "discovery.k8s.io/v1";
+  kind: "EndpointSlice";
+  metadata: ObjectMeta;
+  addressType: "IPv4";
+  endpoints: Endpoint[];
+  ports: { name?: string; port: number; protocol: "TCP" }[];
+  spec?: undefined;
+  status: Record<string, never>;
+}
+
+export const SERVICE_NAME_LABEL = "kubernetes.io/service-name";
+
 /** kubelet 의 heartbeat: kube-node-lease 네임스페이스에 노드마다 하나, 10초마다 renewTime 을 갱신한다 */
 export interface Lease {
   apiVersion: "coordination.k8s.io/v1";
@@ -161,7 +209,7 @@ export interface Lease {
 
 export const NODE_LEASE_NS = "kube-node-lease";
 
-export type KObject = Pod | ReplicaSet | Deployment | Node | Lease;
+export type KObject = Pod | ReplicaSet | Deployment | Node | Lease | Service | EndpointSlice;
 export type Kind = KObject["kind"];
 
 export type ObjectOf<K extends Kind> = Extract<KObject, { kind: K }>;

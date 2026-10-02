@@ -1,8 +1,9 @@
 // kubectl 흉내: 문자열 명령 → API 호출 + 실제와 같은 모양의 출력. 코어 API 위의 얇은 층이다.
 // 축소판: default 네임스페이스만, 자주 쓰는 하위 명령·플래그만.
 import { ApiError } from "./api/server";
-import { controllerOf, isNodeReady, NODE_LEASE_NS, podRequests, type KEvent, type Kind, type Node, type Pod } from "./api/types";
-import { deployment, type Cluster } from "./cluster";
+import { controllerOf, isNodeReady, NODE_LEASE_NS, podRequests, SERVICE_NAME_LABEL, type KEvent, type Kind, type Node, type Pod } from "./api/types";
+import { deployment, service, type Cluster } from "./cluster";
+import type { NetResult } from "./net/request";
 import { deploymentHash, HASH_LABEL } from "./controllers/deployment";
 import { nodeUsage } from "./scheduler";
 import { fmtAge, fmtClock, fmtCpu, fmtMem, parseCpu, parseMem } from "./units";
@@ -12,11 +13,22 @@ export interface KubectlResult {
   output: string;
   /** 클러스터를 바꾸는 명령이었는지 (UI 가 다시 그린다) */
   mutated: boolean;
+  /** kubectl exec 로 보낸 요청의 단계 (화면에서 경로를 그린다) */
+  net?: NetResult;
 }
 
 export const KUBE_VERSION = "v1.31.0";
 
-const RESOURCE_ALIASES: Record<string, Kind | "Event" | "all"> = {
+type Res = Kind | "Event" | "Endpoints" | "all";
+
+const RESOURCE_ALIASES: Record<string, Res> = {
+  svc: "Service",
+  service: "Service",
+  services: "Service",
+  ep: "Endpoints",
+  endpoints: "Endpoints",
+  endpointslice: "EndpointSlice",
+  endpointslices: "EndpointSlice",
   po: "Pod",
   pod: "Pod",
   pods: "Pod",
@@ -37,26 +49,48 @@ const RESOURCE_ALIASES: Record<string, Kind | "Event" | "all"> = {
   all: "all",
 };
 
-const KIND_PREFIX: Record<Kind, string> = { Pod: "pod", Deployment: "deployment.apps", ReplicaSet: "replicaset.apps", Node: "node", Lease: "lease.coordination.k8s.io" };
-const KIND_PLURAL: Record<Kind, string> = { Pod: "pods", Deployment: "deployments.apps", ReplicaSet: "replicasets.apps", Node: "nodes", Lease: "leases.coordination.k8s.io" };
+const KIND_PREFIX: Record<Kind, string> = {
+  Pod: "pod",
+  Deployment: "deployment.apps",
+  ReplicaSet: "replicaset.apps",
+  Node: "node",
+  Lease: "lease.coordination.k8s.io",
+  Service: "service",
+  EndpointSlice: "endpointslice.discovery.k8s.io",
+};
+const KIND_PLURAL: Record<Kind, string> = {
+  Pod: "pods",
+  Deployment: "deployments.apps",
+  ReplicaSet: "replicasets.apps",
+  Node: "nodes",
+  Lease: "leases.coordination.k8s.io",
+  Service: "services",
+  EndpointSlice: "endpointslices.discovery.k8s.io",
+};
 
 export const KUBECTL_HELP = [
   "쓸 수 있는 명령 (축소판 — default 네임스페이스):",
-  "  kubectl get pods [-o wide] | deploy | rs | nodes [-o wide] | events | all",
-  "  kubectl describe pod|deploy|rs|node <이름>",
+  "  kubectl get pods [-o wide] | deploy | rs | svc | endpoints | endpointslices | nodes [-o wide] | events | all",
+  "  kubectl describe pod|deploy|rs|svc|node <이름>",
+  "  kubectl expose deployment <이름> --port=80 [--target-port=8080] [--type=NodePort]",
+  "  kubectl exec <pod> -- curl http://<service>[:포트] | ping <주소> | nslookup <이름>",
   "  kubectl create deployment <이름> --image=<이미지> [--replicas=N]",
   "  kubectl scale deployment/<이름> --replicas=N",
   "  kubectl set image deployment/<이름> <컨테이너>=<이미지>",
   "  kubectl set resources deployment/<이름> --requests=cpu=500m,memory=256Mi",
-  "  kubectl delete pod|deploy|rs <이름>   (pod 는 --force --grace-period=0 로 강제)",
+  "  kubectl delete pod|deploy|rs|svc <이름>   (pod 는 --force --grace-period=0 로 강제)",
   "  kubectl cordon|uncordon <노드>",
   "  kubectl get leases -n kube-node-lease   (kubelet heartbeat)",
 ].join("\n");
 
 export function runKubectl(cluster: Cluster, line: string): KubectlResult {
-  const args = tokenize(line.trim());
-  if (args[0] === "kubectl" || args[0] === "k") args.shift();
-  if (!args.length) return fail("kubectl 다음에 명령을 쓰세요. 예: kubectl get pods\n\n" + KUBECTL_HELP);
+  const all = tokenize(line.trim());
+  if (all[0] === "kubectl" || all[0] === "k") all.shift();
+  if (!all.length) return fail("kubectl 다음에 명령을 쓰세요. 예: kubectl get pods\n\n" + KUBECTL_HELP);
+  // `--` 뒤는 컨테이너 안에서 실행할 명령 (kubectl exec) — 플래그로 읽지 않는다
+  const dd = all.indexOf("--");
+  const args = dd >= 0 ? all.slice(0, dd) : all;
+  const inner = dd >= 0 ? all.slice(dd + 1) : [];
   const { pos, flags } = parseFlags(args);
   const cmd = pos.shift()!;
   const ns = flags.get("n");
@@ -83,6 +117,10 @@ export function runKubectl(cluster: Cluster, line: string): KubectlResult {
       case "cordon":
       case "uncordon":
         return cordon(cluster, cmd, pos, line);
+      case "expose":
+        return expose(cluster, pos, flags, line);
+      case "exec":
+        return exec(cluster, pos, inner);
       case "help":
       case "--help":
       case "-h":
@@ -121,7 +159,7 @@ function parseFlags(args: string[]): { pos: string[]; flags: Map<string, string>
     } else if (a.startsWith("--")) {
       const eq = a.indexOf("=");
       if (eq > 0) flags.set(a.slice(2, eq), a.slice(eq + 1));
-      else if (["replicas", "image", "requests", "grace-period"].includes(a.slice(2)) && args[i + 1] && !args[i + 1]!.startsWith("-")) flags.set(a.slice(2), args[++i]!);
+      else if (["replicas", "image", "requests", "grace-period", "port", "target-port", "type", "name"].includes(a.slice(2)) && args[i + 1] && !args[i + 1]!.startsWith("-")) flags.set(a.slice(2), args[++i]!);
       else flags.set(a.slice(2), "true");
     } else if (a.startsWith("-o")) flags.set("o", a.slice(2));
     else pos.push(a);
@@ -130,7 +168,7 @@ function parseFlags(args: string[]): { pos: string[]; flags: Map<string, string>
 }
 
 /** "deployment/web" 또는 "deployment web" → [Kind, 이름들] */
-function resourceArgs(pos: string[]): { kind: Kind | "Event" | "all"; names: string[] } {
+function resourceArgs(pos: string[]): { kind: Res; names: string[] } {
   const first = pos[0];
   if (!first) throw new KubectlError("error: You must specify the type of resource to get. 예: kubectl get pods");
   if (first.includes("/")) {
@@ -140,14 +178,14 @@ function resourceArgs(pos: string[]): { kind: Kind | "Event" | "all"; names: str
   return { kind: resolveKind(first), names: pos.slice(1) };
 }
 
-function resolveKind(r: string): Kind | "Event" | "all" {
+function resolveKind(r: string): Res {
   const k = RESOURCE_ALIASES[r.toLowerCase()];
   if (!k) throw new KubectlError(`error: the server doesn't have a resource type "${r}"`);
   return k;
 }
 
-function needWorkload(kind: Kind | "Event" | "all", allowed: Kind[], verb: string): Kind {
-  if (kind === "Event" || kind === "all" || !allowed.includes(kind)) throw new KubectlError(`error: ${verb} 는 ${allowed.map((k) => KIND_PLURAL[k]).join("·")} 에만 쓸 수 있습니다 (축소판)`);
+function needWorkload(kind: Res, allowed: Kind[], verb: string): Kind {
+  if (kind === "Event" || kind === "all" || kind === "Endpoints" || !allowed.includes(kind)) throw new KubectlError(`error: ${verb} 는 ${allowed.map((k) => KIND_PLURAL[k]).join("·")} 에만 쓸 수 있습니다 (축소판)`);
   return kind;
 }
 
@@ -158,7 +196,7 @@ function get(c: Cluster, pos: string[], flags: Map<string, string>): string {
   const wide = flags.get("o") === "wide";
   if (flags.has("o") && !wide) throw new KubectlError(`error: 출력 형식 "${flags.get("o")}" 는 아직 없습니다 (wide 만). YAML 은 인스펙터의 YAML 탭에서 보세요`);
   if (kind === "all") {
-    const parts = [getPods(c, [], false, true), getDeploys(c, [], true), getRs(c, [], true)].filter(Boolean);
+    const parts = [getPods(c, [], false, true), getServices(c, [], true), getDeploys(c, [], true), getRs(c, [], true)].filter(Boolean);
     return parts.join("\n\n") || "No resources found in default namespace.";
   }
   switch (kind) {
@@ -172,6 +210,12 @@ function get(c: Cluster, pos: string[], flags: Map<string, string>): string {
       return getNodes(c, names, wide) || "No resources found";
     case "Event":
       return getEvents(c) || "No resources found in default namespace.";
+    case "Service":
+      return getServices(c, names, false) || "No resources found in default namespace.";
+    case "Endpoints":
+      return getEndpoints(c, names) || "No resources found in default namespace.";
+    case "EndpointSlice":
+      return getSlices(c, names) || "No resources found in default namespace.";
     case "Lease":
       if (flags.get("n") !== NODE_LEASE_NS) return "No resources found in default namespace. (노드 Lease 는 -n kube-node-lease)";
       return getLeases(c, names) || `No resources found in ${NODE_LEASE_NS} namespace.`;
@@ -239,6 +283,55 @@ function getNodes(c: Cluster, names: string[], wide: boolean): string {
   );
 }
 
+function getServices(c: Cluster, names: string[], prefixed: boolean): string {
+  const ss = pick(c, "Service", c.api.list("Service", "default"), names);
+  if (!ss.length) return "";
+  return table(
+    ["NAME", "TYPE", "CLUSTER-IP", "EXTERNAL-IP", "PORT(S)", "AGE"],
+    ss.map((s) => [
+      `${prefixed ? "service/" : ""}${s.metadata.name}`,
+      s.spec.type,
+      s.spec.clusterIP ?? "<none>",
+      "<none>",
+      s.spec.ports.map((p) => `${p.port}${p.nodePort ? `:${p.nodePort}` : ""}/${p.protocol}`).join(","),
+      fmtAge(c.now - s.metadata.creationTimestamp),
+    ]),
+  );
+}
+
+/** 주소 목록을 kubectl 처럼 3개까지 + N more... */
+function fewAddrs(addrs: string[]): string {
+  if (!addrs.length) return "<none>";
+  return addrs.length > 3 ? `${addrs.slice(0, 3).join(",")} + ${addrs.length - 3} more...` : addrs.join(",");
+}
+
+function slicesOf(c: Cluster, svc: string) {
+  return c.api.list("EndpointSlice", "default").filter((s) => s.metadata.labels[SERVICE_NAME_LABEL] === svc);
+}
+
+/** Endpoints(옛 API)는 EndpointSlice 에서 ready 인 것만 모아 보여 준다 (축소판: 따로 저장하지 않음) */
+function getEndpoints(c: Cluster, names: string[]): string {
+  const ss = pick(c, "Service", c.api.list("Service", "default"), names);
+  if (!ss.length) return "";
+  return table(
+    ["NAME", "ENDPOINTS", "AGE"],
+    ss.map((s) => [s.metadata.name, fewAddrs(readyAddrs(c, s.metadata.name)), fmtAge(c.now - s.metadata.creationTimestamp)]),
+  );
+}
+
+function readyAddrs(c: Cluster, svc: string): string[] {
+  return slicesOf(c, svc).flatMap((sl) => sl.endpoints.filter((e) => e.conditions.ready).flatMap((e) => sl.ports.map((p) => `${e.addresses[0]}:${p.port}`)));
+}
+
+function getSlices(c: Cluster, names: string[]): string {
+  const ss = pick(c, "EndpointSlice", c.api.list("EndpointSlice", "default"), names);
+  if (!ss.length) return "";
+  return table(
+    ["NAME", "ADDRESSTYPE", "PORTS", "ENDPOINTS", "AGE"],
+    ss.map((s) => [s.metadata.name, s.addressType, s.ports.map((p) => p.port).join(",") || "<unset>", fewAddrs(s.endpoints.map((e) => e.addresses[0]!)), fmtAge(c.now - s.metadata.creationTimestamp)]),
+  );
+}
+
 function getLeases(c: Cluster, names: string[]): string {
   const ls = pick(c, "Lease", c.api.list("Lease", NODE_LEASE_NS), names);
   if (!ls.length) return "";
@@ -261,7 +354,7 @@ function getEvents(c: Cluster): string {
 
 function describe(c: Cluster, pos: string[]): string {
   const { kind, names } = resourceArgs(pos);
-  const k = needWorkload(kind, ["Pod", "Deployment", "ReplicaSet", "Node"], "describe");
+  const k = needWorkload(kind, ["Pod", "Deployment", "ReplicaSet", "Node", "Service"], "describe");
   const name = names[0];
   if (!name) throw new KubectlError(`error: 이름을 함께 쓰세요. 예: kubectl describe ${k.toLowerCase()} <이름>`);
   const o = c.api.get(k, name, "default");
@@ -293,6 +386,24 @@ function describe(c: Cluster, pos: string[]): string {
     }
     case "Lease":
       throw new KubectlError("error: describe lease 는 아직 없습니다 — kubectl get leases -n kube-node-lease");
+    case "EndpointSlice":
+      throw new KubectlError("error: describe endpointslice 는 아직 없습니다 — kubectl get endpointslices");
+    case "Service": {
+      const lines: [string, string][] = [
+        ["Name", o.metadata.name],
+        ["Namespace", "default"],
+        ["Labels", labelsText(o.metadata.labels)],
+        ["Selector", Object.entries(o.spec.selector).map(([a, b]) => `${a}=${b}`).join(",") || "<none>"],
+        ["Type", o.spec.type],
+        ["IP", o.spec.clusterIP ?? "None"],
+      ];
+      for (const p of o.spec.ports) {
+        lines.push(["Port", `${p.name ?? "<unset>"}  ${p.port}/${p.protocol}`], ["TargetPort", `${p.targetPort}/${p.protocol}`]);
+        if (p.nodePort) lines.push(["NodePort", `${p.name ?? "<unset>"}  ${p.nodePort}/${p.protocol}`]);
+        lines.push(["Endpoints", readyAddrs(c, o.metadata.name).join(",") || "<none>"]);
+      }
+      return kv(lines) + eventsBlock(c, o.metadata.uid);
+    }
     case "ReplicaSet": {
       const pods = c.api.list("Pod", "default").filter((p) => controllerOf(p.metadata)?.uid === o.metadata.uid);
       const running = pods.filter((p) => p.status.phase === "Running").length;
@@ -535,6 +646,51 @@ function cordon(c: Cluster, cmd: "cordon" | "uncordon", pos: string[], line: str
     else delete o.spec.unschedulable;
   });
   return ok(`node/${name} ${cmd}ed`, true);
+}
+
+function expose(c: Cluster, pos: string[], flags: Map<string, string>, line: string): KubectlResult {
+  const { kind, names } = resourceArgs(pos);
+  const k = needWorkload(kind, ["Deployment"], "expose");
+  const name = names[0];
+  if (!name) throw new KubectlError("error: 이름이 필요합니다. 예: kubectl expose deployment web --port=80");
+  const d = c.api.get(k, name, "default");
+  if (!d || d.kind !== "Deployment") throw new ApiError("NotFound", `deployments.apps "${name}" not found`);
+  const port = Number(flags.get("port"));
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new KubectlError("error: couldn't find port via --port flag or introspection — --port=80 처럼 쓰세요");
+  const targetPort = flags.has("target-port") ? Number(flags.get("target-port")) : (d.spec.template.spec.containers[0]?.ports?.[0]?.containerPort ?? port);
+  if (!Number.isInteger(targetPort) || targetPort < 1) throw new KubectlError(`error: --target-port 를 읽지 못했습니다 ("${flags.get("target-port")}")`);
+  const type = (flags.get("type") ?? "ClusterIP") as "ClusterIP" | "NodePort";
+  if (type !== "ClusterIP" && type !== "NodePort") throw new KubectlError(`error: --type 은 ClusterIP 또는 NodePort (축소판). 받은 값 "${type}"`);
+  const svcName = flags.get("name") ?? name;
+  if (c.api.get("Service", svcName, "default")) throw new ApiError("AlreadyExists", `services "${svcName}" already exists`);
+  userTrace(c, line);
+  c.apply(service(svcName, { selector: d.spec.selector.matchLabels, port, targetPort, type }), "kubectl");
+  return ok(`service/${svcName} exposed`, true);
+}
+
+/** kubectl exec <pod> -- curl|wget|ping|nslookup <대상> */
+function exec(c: Cluster, pos: string[], inner: string[]): KubectlResult {
+  const podName = pos.filter((p) => !p.startsWith("-"))[0];
+  if (!podName) throw new KubectlError("error: Pod 이름이 필요합니다. 예: kubectl exec web-xxx -- curl http://web");
+  const p = c.api.get("Pod", podName, "default");
+  if (!p) throw new ApiError("NotFound", `pods "${podName}" not found`);
+  if (!inner.length) throw new KubectlError("error: you must specify at least one command for the container — 예: kubectl exec <pod> -- curl http://web");
+  const ct = p.spec.containers[0]!;
+  if (p.spec.nodeName && !c.nodePowered(p.spec.nodeName)) {
+    const ip = c.api.get("Node", p.spec.nodeName)?.status.addresses[0]?.address;
+    return fail(`Error from server: error dialing backend: dial tcp ${ip}:10250: i/o timeout (노드 ${p.spec.nodeName} 의 kubelet 이 응답하지 않음)`);
+  }
+  const cs = p.status.containerStatuses[0];
+  if (!cs || !("running" in cs.state)) return fail(`error: unable to upgrade connection: container not found ("${ct.name}")`);
+  const [tool0, ...rest] = inner;
+  const target = rest.filter((a) => !a.startsWith("-")).pop();
+  const tool = tool0 === "wget" ? "curl" : tool0;
+  if (tool !== "curl" && tool !== "ping" && tool !== "nslookup")
+    return fail(`OCI runtime exec failed: exec failed: unable to start container process: exec: "${tool0}": executable file not found in $PATH: unknown\n(이 시뮬레이터의 컨테이너에는 curl·wget·ping·nslookup 만 있습니다 — 축소판)`);
+  if (!target) return fail(`${tool}: 대상이 필요합니다. 예: kubectl exec ${podName} -- ${tool} ${tool === "curl" ? "http://web" : "web"}`);
+  c.trace.add("user", "user", `kubectl exec ${podName} -- ${inner.join(" ")}`, { kind: "Pod", namespace: "default", name: podName });
+  const r = c.requestFromPod(podName, tool, target);
+  return { ok: r.ok, output: r.output, mutated: true, net: r };
 }
 
 function parseReplicas(s: string): number {

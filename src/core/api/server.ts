@@ -3,7 +3,7 @@
 import type { Clock } from "../clock";
 import { stableJson } from "../rng";
 import type { Trace } from "../trace";
-import { CLUSTER_SCOPED, type KEvent, type KObject, type Kind, type ObjectMeta, type ObjectOf, type Pod } from "./types";
+import { CLUSTER_SCOPED, type KEvent, type KObject, type Kind, type ObjectMeta, type ObjectOf, type Pod, type Service } from "./types";
 
 export type WatchType = "ADDED" | "MODIFIED" | "DELETED";
 
@@ -125,6 +125,7 @@ export class ApiServer {
     };
     if (!obj.status) obj.status = emptyStatus(kind) as ObjectOf<K>["status"];
     if (obj.kind === "Pod") addDefaultTolerations(obj as Pod);
+    if (obj.kind === "Service") this.allocateServiceAddresses(obj as Service);
     this.store.set(key, obj);
     this.trace.add("kube-apiserver", "api.create", `${actor} 의 요청 → ${kind} ${name} 저장 (resourceVersion ${obj.metadata.resourceVersion})`, refOf(obj));
     this.notify("ADDED", obj);
@@ -234,6 +235,43 @@ export class ApiServer {
     }
   }
 
+  // ---------- Service 주소 (API 서버가 정한다) ----------
+
+  /** ClusterIP 는 10.96.0.0/12 에서 (10.96.0.1 = kubernetes, 10.96.0.10 = kube-dns 는 비워 둠), NodePort 는 30000-32767 */
+  private allocateServiceAddresses(svc: Service): void {
+    const used = new Set<string>(["10.96.0.1", "10.96.0.10"]);
+    const usedPorts = new Set<number>();
+    for (const o of this.store.values()) {
+      if (o.kind !== "Service" || o === svc) continue;
+      if (o.spec.clusterIP) used.add(o.spec.clusterIP);
+      for (const p of o.spec.ports) if (p.nodePort) usedPorts.add(p.nodePort);
+    }
+    if (svc.spec.clusterIP && used.has(svc.spec.clusterIP)) throw new ApiError("Invalid", `Service "${svc.metadata.name}" is invalid: spec.clusterIP: Invalid value: "${svc.spec.clusterIP}": provided IP is already allocated`);
+    if (!svc.spec.clusterIP) {
+      for (let i = 0; ; i++) {
+        const host = 100 + ((stableHash(svc.metadata.name) + i) % 150);
+        const ip = `10.96.${Math.floor(i / 150)}.${host}`;
+        if (!used.has(ip)) {
+          svc.spec.clusterIP = ip;
+          break;
+        }
+      }
+    }
+    if (svc.spec.type === "NodePort") {
+      for (const p of svc.spec.ports) {
+        if (p.nodePort) continue;
+        for (let i = 0; ; i++) {
+          const port = 30000 + ((stableHash(`${svc.metadata.name}/${p.port}`) + i) % 2768);
+          if (!usedPorts.has(port)) {
+            p.nodePort = port;
+            usedPorts.add(port);
+            break;
+          }
+        }
+      }
+    }
+  }
+
   // ---------- watch ----------
 
   watch<K extends Kind>(kind: K, fn: (ev: WatchEvent<K>) => void): () => void {
@@ -307,6 +345,12 @@ function addDefaultTolerations(p: Pod): void {
   }
 }
 
+function stableHash(s: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193) >>> 0;
+  return h;
+}
+
 function emptyStatus(kind: Kind): unknown {
   switch (kind) {
     case "Pod":
@@ -318,6 +362,8 @@ function emptyStatus(kind: Kind): unknown {
     case "Node":
       return { capacity: { cpu: 0, memory: 0, pods: 0 }, allocatable: { cpu: 0, memory: 0, pods: 0 }, conditions: [], addresses: [], images: [] };
     case "Lease":
+    case "Service":
+    case "EndpointSlice":
       return {};
   }
 }
@@ -326,6 +372,7 @@ function lower(kind: Kind): string {
   if (kind === "ReplicaSet") return "replicasets.apps";
   if (kind === "Deployment") return "deployments.apps";
   if (kind === "Lease") return "leases.coordination.k8s.io";
+  if (kind === "EndpointSlice") return "endpointslices.discovery.k8s.io";
   return `${kind.toLowerCase()}s`;
 }
 

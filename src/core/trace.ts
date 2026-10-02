@@ -27,6 +27,8 @@ export type TraceKind =
   | "kubelet.backoff"
   | "kubelet.kill"
   | "kubelet.removed"
+  /** readiness probe 결과로 Ready 가 바뀜 */
+  | "kubelet.probe"
   | "node.register"
   /** kubelet 이 꺼지거나 다시 켜짐 (사용자 동작) */
   | "node.power"
@@ -34,7 +36,16 @@ export type TraceKind =
   | "node.notready"
   | "node.ready"
   /** taint-eviction-controller: NoExecute taint 를 못 견디는 Pod 를 지움 */
-  | "node.evict";
+  | "node.evict"
+  /** kube-proxy 가 노드의 iptables 규칙을 다시 씀 */
+  | "net.rules"
+  /** 요청 한 번의 단계: DNS → DNAT(규칙) → 노드 간 경로 → 앱 응답 / 실패 */
+  | "net.request"
+  | "net.dns"
+  | "net.dnat"
+  | "net.route"
+  | "net.response"
+  | "net.fail";
 
 export interface ObjRef {
   kind: string;
