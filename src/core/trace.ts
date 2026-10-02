@@ -41,6 +41,12 @@ export type TraceKind =
   | "net.rules"
   /** MetalLB IP 할당·노드 맡기, Ingress 주소, Tailscale 프록시 */
   | "net.lb"
+  /** GitOps: Git 커밋, Argo CD 가 Git 을 가져옴·비교·sync·self-heal */
+  | "git.commit"
+  | "gitops.fetch"
+  | "gitops.compare"
+  | "gitops.sync"
+  | "gitops.selfheal"
   /** 요청 한 번의 단계: DNS → DNAT(규칙) → 노드 간 경로 → 앱 응답 / 실패 */
   | "net.request"
   | "net.dns"

@@ -36,7 +36,7 @@ function save(key: string, value: unknown): void {
 
 function isDef(v: unknown): v is ClusterDef {
   const d = v as ClusterDef;
-  return !!d && Array.isArray(d.nodes) && Array.isArray(d.manifests) && d.nodes.every((n) => typeof n?.name === "string" && typeof n.cpu === "number" && typeof n.memory === "number");
+  return !!d && Array.isArray(d.nodes) && Array.isArray(d.manifests) && (d.git === undefined || Array.isArray(d.git)) && d.nodes.every((n) => typeof n?.name === "string" && typeof n.cpu === "number" && typeof n.memory === "number");
 }
 
 const saved = load<Saved>(DEF_KEY);

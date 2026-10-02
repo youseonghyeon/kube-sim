@@ -101,6 +101,13 @@ function StatusBadge({ obj }: { obj: KObject }) {
   if (obj.kind === "Lease" || obj.kind === "EndpointSlice") return null;
   if (obj.kind === "Service") return <span class="badge">{obj.spec.type}</span>;
   if (obj.kind === "Ingress") return <span class="badge">{obj.spec.ingressClassName ?? "class 없음"}</span>;
+  if (obj.kind === "Application")
+    return (
+      <>
+        <span class={`badge t-${obj.status.sync.status === "Synced" ? "ok" : "wait"}`}>{obj.status.sync.status}</span>
+        <span class={`badge t-${obj.status.health.status === "Healthy" ? "ok" : obj.status.health.status === "Degraded" || obj.status.health.status === "Missing" ? "bad" : "wait"}`}>{obj.status.health.status}</span>
+      </>
+    );
   if (obj.kind === "PodDisruptionBudget") return <span class={`badge t-${obj.status.disruptionsAllowed > 0 ? "ok" : "wait"}`}>{`허용 ${obj.status.disruptionsAllowed}`}</span>;
   const ready = obj.status.readyReplicas;
   return <span class={`badge t-${ready === obj.spec.replicas ? "ok" : "wait"}`}>{`${ready}/${obj.spec.replicas} Ready`}</span>;

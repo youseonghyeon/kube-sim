@@ -16,6 +16,7 @@ export class DefSync {
     this.nodes.clear();
     this.manifests.clear();
     this.cluster.trace.add("user", "user", why);
+    for (const g of def.git ?? []) this.cluster.gitCommit(g.url, g.files, g.message, "you");
     this.sync(def);
   }
 
@@ -53,9 +54,10 @@ export class DefSync {
       if (wantManifests.has(key)) continue;
       this.manifests.delete(key);
       const [kind, name] = key.split("/") as [Manifest["kind"], string];
-      if (c.api.get(kind, name, "default")) {
+      const ns = kind === "Application" ? "argocd" : "default";
+      if (c.api.get(kind, name, ns)) {
         c.trace.add("user", "user", `매니페스트 삭제 (kubectl delete): ${resourceName(kind)}/${name}`);
-        c.api.delete(kind, name, "default", "kubectl");
+        c.api.delete(kind, name, ns, "kubectl");
       }
       changed = true;
     }
@@ -95,5 +97,13 @@ export function manifestKey(m: Manifest): string {
 }
 
 function resourceName(kind: Manifest["kind"]): string {
-  return kind === "Deployment" ? "deployment.apps" : kind === "Service" ? "service" : kind === "Ingress" ? "ingress.networking.k8s.io" : "poddisruptionbudget.policy";
+  return kind === "Deployment"
+    ? "deployment.apps"
+    : kind === "Service"
+      ? "service"
+      : kind === "Ingress"
+        ? "ingress.networking.k8s.io"
+        : kind === "Application"
+          ? "application.argoproj.io"
+          : "poddisruptionbudget.policy";
 }

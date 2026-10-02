@@ -30,6 +30,9 @@ const RESOURCE_ALIASES: Record<string, Res> = {
   services: "Service",
   ep: "Endpoints",
   endpoints: "Endpoints",
+  app: "Application",
+  application: "Application",
+  applications: "Application",
   ing: "Ingress",
   ingress: "Ingress",
   ingresses: "Ingress",
@@ -68,6 +71,7 @@ const KIND_PREFIX: Record<Kind, string> = {
   EndpointSlice: "endpointslice.discovery.k8s.io",
   PodDisruptionBudget: "poddisruptionbudget.policy",
   Ingress: "ingress.networking.k8s.io",
+  Application: "application.argoproj.io",
 };
 const KIND_PLURAL: Record<Kind, string> = {
   Pod: "pods",
@@ -79,6 +83,7 @@ const KIND_PLURAL: Record<Kind, string> = {
   EndpointSlice: "endpointslices.discovery.k8s.io",
   PodDisruptionBudget: "poddisruptionbudgets.policy",
   Ingress: "ingresses.networking.k8s.io",
+  Application: "applications.argoproj.io",
 };
 
 export const KUBECTL_HELP = [
@@ -116,7 +121,8 @@ export function runKubectl(cluster: Cluster, line: string): KubectlResult {
   const cmd = pos.shift()!;
   const ns = flags.get("n");
   const leaseNs = ns === NODE_LEASE_NS && cmd === "get" && /^leases?$/.test(pos[0] ?? "");
-  if (ns !== undefined && ns !== "default" && !leaseNs) {
+  const appNs = ns === "argocd" && cmd === "get" && /^(app|applications?)$/.test(pos[0] ?? "");
+  if (ns !== undefined && ns !== "default" && !leaseNs && !appNs) {
     // 축소판: 네임스페이스는 default 하나. 다른 이름은 조용히 무시하지 않고 비어 있다고 답한다 (노드는 클러스터 범위라 그대로)
     if (cmd === "get" && !/^(no|node|nodes)$/.test(pos[0] ?? "")) return ok(`No resources found in ${ns} namespace.`);
     if (cmd !== "get") return fail(`error: 이 시뮬레이터에는 default 네임스페이스만 있습니다 (축소판). -n ${ns} 를 빼고 다시 하세요`);
@@ -248,6 +254,12 @@ function get(c: Cluster, pos: string[], flags: Map<string, string>): string {
       return getPdbs(c, names) || "No resources found in default namespace.";
     case "Ingress":
       return getIngresses(c, names) || "No resources found in default namespace.";
+    case "Application": {
+      if (flags.get("n") !== "argocd") return "No resources found in default namespace. (Argo CD Application 은 -n argocd)";
+      const apps = pick(c, "Application", c.api.list("Application", "argocd"), names);
+      if (!apps.length) return "No resources found in argocd namespace.";
+      return table(["NAME", "SYNC STATUS", "HEALTH STATUS"], apps.map((a) => [a.metadata.name, a.status.sync.status, a.status.health.status]));
+    }
     case "Lease":
       if (flags.get("n") !== NODE_LEASE_NS) return "No resources found in default namespace. (노드 Lease 는 -n kube-node-lease)";
       return getLeases(c, names) || `No resources found in ${NODE_LEASE_NS} namespace.`;
@@ -457,6 +469,8 @@ function describe(c: Cluster, pos: string[]): string {
       throw new KubectlError("error: describe endpointslice 는 아직 없습니다 — kubectl get endpointslices");
     case "PodDisruptionBudget":
       throw new KubectlError("error: describe pdb 는 아직 없습니다 — kubectl get pdb");
+    case "Application":
+      throw new KubectlError("error: Application 은 argocd app get <이름> 으로 보세요");
     case "Service": {
       const lines: [string, string][] = [
         ["Name", o.metadata.name],

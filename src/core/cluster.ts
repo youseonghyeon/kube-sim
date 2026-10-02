@@ -1,7 +1,7 @@
 // 클러스터 한 벌: 시계 + 트레이스 + API 서버 + 컨트롤 플레인(스케줄러·컨트롤러) + 노드마다 kubelet.
 // 바깥(모델·kubectl·UI)은 여기 메서드로만 클러스터를 바꾼다.
-import { ApiServer, WATCH_DELAY_MS } from "./api/server";
-import type { Deployment, Ingress, PodDisruptionBudget, PodSpec, Probe, Service, ServiceType } from "./api/types";
+import { ApiServer, WATCH_DELAY_MS, type Draft } from "./api/server";
+import type { Application, Deployment, Ingress, PodDisruptionBudget, PodSpec, Probe, Service, ServiceType } from "./api/types";
 import { Clock } from "./clock";
 import type { ComponentContext } from "./controllers/base";
 import { DeploymentController } from "./controllers/deployment";
@@ -11,6 +11,8 @@ import { EndpointSliceController } from "./controllers/endpointslice";
 import { NodeLifecycleController, TaintEvictionController } from "./controllers/nodelifecycle";
 import { ReplicaSetController } from "./controllers/replicaset";
 import { Kubelet, type NodeDef } from "./kubelet";
+import { ARGO, ArgoCD } from "./gitops/argocd";
+import { GitRepo, type Commit } from "./gitops/git";
 import { IngressNginxStatus, MetalLB, TailscaleOperator } from "./net/ingress";
 import { KubeProxy } from "./net/kubeproxy";
 import { simulateExternal, simulateFromPod, simulateNodePort, type NetResult, type StepKind, type Tool } from "./net/request";
@@ -48,7 +50,14 @@ export interface IngressManifest {
   spec: Ingress["spec"];
 }
 
-export type Manifest = DeploymentManifest | ServiceManifest | PdbManifest | IngressManifest;
+export interface ApplicationManifest {
+  apiVersion: "argoproj.io/v1alpha1";
+  kind: "Application";
+  metadata: { name: string; namespace?: string; labels?: Record<string, string>; annotations?: Record<string, string> };
+  spec: Application["spec"];
+}
+
+export type Manifest = DeploymentManifest | ServiceManifest | PdbManifest | IngressManifest | ApplicationManifest;
 
 export interface ClusterOptions {
   seed?: number;
@@ -64,6 +73,10 @@ export class Cluster {
   readonly kubeProxies = new Map<string, KubeProxy>();
   /** LoadBalancer IP 를 주고 어느 노드가 맡는지 정한다 */
   readonly metallb: MetalLB;
+  /** Git 저장소들 (URL → 저장소) */
+  readonly git = new Map<string, GitRepo>();
+  /** Argo CD application-controller */
+  readonly argocd: ArgoCD;
   /** 요청 흉내 전용 난수 (kube-proxy 의 확률 분배) — Pod 이름 난수와 분리해 요청을 보내도 이후 이름이 바뀌지 않게 */
   readonly netRng: Rng;
   private nodeIndex = 0;
@@ -81,6 +94,11 @@ export class Cluster {
     this.metallb = new MetalLB(this.ctx, (n) => this.nodePowered(n));
     new IngressNginxStatus(this.ctx);
     new TailscaleOperator(this.ctx);
+    this.argocd = new ArgoCD(
+      this.ctx,
+      (url) => this.git.get(url),
+      (m) => this.apply(m, ARGO),
+    );
     new Scheduler(this.ctx);
     new NodeLifecycleController(this.ctx);
     new TaintEvictionController(this.ctx);
@@ -137,6 +155,18 @@ export class Cluster {
 
   resizeNode(name: string, cpu: number, memory: number): void {
     this.kubelets.get(name)?.resize(cpu, memory);
+  }
+
+  /** Git 저장소에 커밋 (없으면 만든다) */
+  gitCommit(url: string, files: Record<string, Manifest>, message: string, author = "you"): Commit {
+    let repo = this.git.get(url);
+    if (!repo) {
+      repo = new GitRepo(url);
+      this.git.set(url, repo);
+    }
+    const c = repo.commit(files, message, author, this.clock.now);
+    this.trace.add(author, "git.commit", `git push → ${url.replace(/^https:\/\//, "")} main ${c.sha.slice(0, 7)} "${message}" (Argo CD 는 다음 폴링이나 Refresh 때 알게 된다)`);
+    return c;
   }
 
   /** kubectl drain: 노드를 cordon 하고 Pod 를 Eviction API 로 내보낸다 (시간이 지나며 진행) */
@@ -213,10 +243,9 @@ export class Cluster {
     const ns = m.metadata.namespace ?? "default";
     const cur = this.api.get(m.kind, m.metadata.name, ns);
     if (!cur) {
-      if (m.kind === "Deployment") this.api.create<"Deployment">({ apiVersion: m.apiVersion, kind: m.kind, metadata: { ...m.metadata, namespace: ns }, spec: structuredClone(m.spec) }, actor);
-      else if (m.kind === "Service") this.api.create<"Service">({ apiVersion: m.apiVersion, kind: m.kind, metadata: { ...m.metadata, namespace: ns }, spec: structuredClone(m.spec) }, actor);
-      else if (m.kind === "PodDisruptionBudget") this.api.create<"PodDisruptionBudget">({ apiVersion: m.apiVersion, kind: m.kind, metadata: { ...m.metadata, namespace: ns }, spec: structuredClone(m.spec) }, actor);
-      else this.api.create<"Ingress">({ apiVersion: m.apiVersion, kind: m.kind, metadata: { ...m.metadata, namespace: ns }, spec: structuredClone(m.spec) }, actor);
+      // 종류마다 모양은 다르지만 만드는 방법은 같다 (서버가 메타데이터·상태를 채운다)
+      const draft = { apiVersion: m.apiVersion, kind: m.kind, metadata: { ...m.metadata, namespace: ns }, spec: structuredClone(m.spec) };
+      this.api.create(draft as unknown as Draft<typeof m.kind>, actor);
       return "created";
     }
     const rv = cur.metadata.resourceVersion;
@@ -228,13 +257,13 @@ export class Cluster {
         s.clusterIP ??= o.spec.clusterIP;
         s.ports.forEach((p, i) => {
           // 매니페스트에 nodePort 가 없으면 지금 것을 이어받는다 (포트 번호가 바뀌었으면 같은 자리의 것). 없으면 API 서버가 새로 정한다
-          if (s.type === "NodePort") p.nodePort ??= (o.spec.ports.find((x) => x.port === p.port) ?? o.spec.ports[i])?.nodePort;
+          if (s.type !== "ClusterIP") p.nodePort ??= (o.spec.ports.find((x) => x.port === p.port) ?? o.spec.ports[i])?.nodePort;
           else delete p.nodePort;
         });
       }
       (o as { spec: unknown }).spec = spec;
       o.metadata.labels = { ...(m.metadata.labels ?? {}) };
-      if (m.kind === "Ingress") o.metadata.annotations = { ...(m.metadata.annotations ?? {}) };
+      if (m.kind === "Ingress" || m.kind === "Application") o.metadata.annotations = { ...(m.metadata.annotations ?? {}) };
     });
     return next && next.metadata.resourceVersion !== rv ? "configured" : "unchanged";
   }
@@ -247,6 +276,21 @@ export class Cluster {
   runFor(ms: number, maxEvents?: number): number {
     return this.clock.runUntil(this.clock.now + ms, maxEvents);
   }
+}
+
+/** 예제에서 쓰는 Argo CD Application (argocd 네임스페이스) */
+export function application(name: string, opts: { repoURL: string; path: string; automated?: { prune: boolean; selfHeal: boolean } }): ApplicationManifest {
+  return {
+    apiVersion: "argoproj.io/v1alpha1",
+    kind: "Application",
+    metadata: { name, namespace: "argocd" },
+    spec: {
+      project: "default",
+      source: { repoURL: opts.repoURL, path: opts.path, targetRevision: "main" },
+      destination: { server: "https://kubernetes.default.svc", namespace: "default" },
+      ...(opts.automated ? { syncPolicy: { automated: { ...opts.automated } } } : {}),
+    },
+  };
 }
 
 /** 예제에서 쓰는 Ingress */

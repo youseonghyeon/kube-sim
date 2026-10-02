@@ -6,6 +6,8 @@ import type { NodeDef } from "../core/kubelet";
 export interface ClusterDef {
   nodes: NodeDef[];
   manifests: Manifest[];
+  /** 처음부터 있는 Git 저장소 (GitOps 예제) — 첫 커밋 */
+  git?: { url: string; message: string; files: Record<string, Manifest> }[];
 }
 
 export interface TryStep {

@@ -73,6 +73,8 @@ export const IMAGES: Record<string, ImageSpec> = {
 };
 
 export function imageSpec(image: string): ImageSpec | undefined {
+  // net-sim 은 CI 가 커밋 SHA 로 태그를 단다 → 어떤 태그든 같은 앱
+  if (image.startsWith("ghcr.io/youseonghyeon/net-sim:")) return IMAGES["ghcr.io/youseonghyeon/net-sim:latest"];
   return IMAGES[image];
 }
 

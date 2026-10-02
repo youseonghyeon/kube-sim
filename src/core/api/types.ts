@@ -278,7 +278,31 @@ export interface Lease {
 
 export const NODE_LEASE_NS = "kube-node-lease";
 
-export type KObject = Pod | ReplicaSet | Deployment | Node | Lease | Service | EndpointSlice | PodDisruptionBudget | Ingress;
+export type SyncStatus = "Synced" | "OutOfSync" | "Unknown";
+export type HealthStatus = "Healthy" | "Progressing" | "Degraded" | "Missing" | "Unknown";
+
+/** Argo CD 의 Application: Git 저장소의 한 경로를 클러스터의 한 네임스페이스에 맞춰 둔다 */
+export interface Application {
+  apiVersion: "argoproj.io/v1alpha1";
+  kind: "Application";
+  metadata: ObjectMeta;
+  spec: {
+    project: string;
+    source: { repoURL: string; path: string; targetRevision: string };
+    destination: { server: string; namespace: string };
+    syncPolicy?: { automated?: { prune?: boolean; selfHeal?: boolean } };
+  };
+  status: {
+    sync: { status: SyncStatus; revision?: string };
+    health: { status: HealthStatus };
+    resources: { kind: string; name: string; status: SyncStatus; health?: HealthStatus; requiresPruning?: boolean }[];
+    operationState?: { phase: "Running" | "Succeeded" | "Failed"; message: string; syncResult?: { revision: string }; startedAt: number; finishedAt?: number };
+    history: { id: number; revision: string; deployedAt: number }[];
+    reconciledAt?: number;
+  };
+}
+
+export type KObject = Pod | ReplicaSet | Deployment | Node | Lease | Service | EndpointSlice | PodDisruptionBudget | Ingress | Application;
 export type Kind = KObject["kind"];
 
 export type ObjectOf<K extends Kind> = Extract<KObject, { kind: K }>;

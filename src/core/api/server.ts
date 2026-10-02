@@ -444,6 +444,8 @@ function emptyStatus(kind: Kind): unknown {
       return { currentHealthy: 0, desiredHealthy: 0, disruptionsAllowed: 0, expectedPods: 0, observedGeneration: 0 };
     case "Ingress":
       return { loadBalancer: {} };
+    case "Application":
+      return { sync: { status: "Unknown" }, health: { status: "Unknown" }, resources: [], history: [] };
     case "Lease":
     case "Service":
     case "EndpointSlice":
@@ -458,6 +460,7 @@ function lower(kind: Kind): string {
   if (kind === "EndpointSlice") return "endpointslices.discovery.k8s.io";
   if (kind === "PodDisruptionBudget") return "poddisruptionbudgets.policy";
   if (kind === "Ingress") return "ingresses.networking.k8s.io";
+  if (kind === "Application") return "applications.argoproj.io";
   return `${kind.toLowerCase()}s`;
 }
 
