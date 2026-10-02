@@ -152,6 +152,7 @@ await page.selectOption(".transport .speed", "5");
 await waitFor(async () => (await statusTexts()).length === 4 && (await statusTexts()).every((s) => s === "Running"), "Pod 4개 Running");
 await waitFor(async () => (await page.locator(".svc .svc-eps").textContent())?.includes("ready 3"), "엔드포인트 ready 3");
 check(true, "Service 상자에 엔드포인트 ready 3");
+await page.waitForTimeout(600); // kube-proxy 규칙 반영(시뮬레이션 1초 = 5배속에서 0.2초)을 기다림 — EndpointSlice 가 ready 여도 규칙은 조금 늦다
 await page.locator(".try", { hasText: "client 에서 curl" }).locator("button").click();
 await page.waitForTimeout(1500);
 await page.screenshot({ path: `${OUT}/11-request-path.png` });
@@ -177,6 +178,50 @@ check(true, "앱을 고장 내면 probe 실패 뒤 엔드포인트 not ready 1")
 await page.locator(".svc").first().click();
 await page.waitForTimeout(200);
 await page.screenshot({ path: `${OUT}/13-readiness.png` });
+
+// 9) 롤링 업데이트: 부하를 보내며 이미지 바꾸기 → r1·r2 가 섞였다가 r2 만, 실패 0 (preStop 있음)
+console.log("9) 롤링 업데이트");
+await page.click(".menu-btn");
+await page.click('.menu-item[data-example="rolling"]');
+await page.selectOption(".transport .speed", "2");
+await waitFor(async () => (await statusTexts()).filter((s) => s === "Running").length === 5, "Pod 5개 Running");
+await page.locator(".try", { hasText: "부하 보내기" }).locator("button").click();
+await waitFor(async () => (await page.locator(".traffic .tick").count()) > 10, "부하 막대에 칸이 쌓임");
+check(true, "부하 막대가 보인다");
+await page.locator(".traffic-actions button", { hasText: "0 으로" }).click(); // 막 뜬 Pod 의 규칙 반영 전 실패는 세지 않는다
+await page.locator(".try", { hasText: "이미지 바꾸기" }).locator("button").click();
+await waitFor(async () => (await page.locator(".pod-rev.new").count()) > 0, "롤아웃 중 r2 표시", 20000);
+await page.screenshot({ path: `${OUT}/14-rolling.png` });
+check(true, "롤아웃 중 Pod 칩에 리비전(r1·r2)");
+await waitFor(async () => (await page.locator(".pod-rev").count()) === 0 && (await statusTexts()).filter((s) => s === "Running").length === 5, "롤아웃 끝", 60000);
+const failText = await page.locator(".traffic-count").nth(1).textContent();
+check(failText === "실패 0", `preStop 이 있는 롤링 업데이트는 요청 실패 0 (${failText})`, "kubelet preStop / RULE_SYNC_MS / Deployment rolling");
+
+// 10) 종료 경합: preStop 없이 Pod 를 지우면 실패가 생긴다
+console.log("10) 종료 경합");
+await page.click(".menu-btn");
+await page.click('.menu-item[data-example="graceful"]');
+await page.selectOption(".transport .speed", "2");
+await waitFor(async () => (await statusTexts()).filter((s) => s === "Running").length === 4, "Pod 4개 Running");
+await page.locator(".try", { hasText: "부하 보내기" }).locator("button").click();
+await page.waitForTimeout(800);
+await page.locator(".try", { hasText: "Pod 하나 지우기" }).first().locator("button").click();
+await waitFor(async () => (await page.locator(".traffic-count.bad").count()) === 1, "부하 실패가 생김", 15000);
+check(true, "preStop 없이 Pod 를 지우면 부하 막대에 실패");
+await page.screenshot({ path: `${OUT}/15-graceful-fail.png` });
+
+// 11) drain + PDB
+console.log("11) drain");
+await page.click(".menu-btn");
+await page.click('.menu-item[data-example="drain"]');
+await page.selectOption(".transport .speed", "5");
+await waitFor(async () => (await statusTexts()).filter((s) => s === "Running").length === 3, "Pod 3개 Running");
+await page.waitForTimeout(500);
+await page.locator(".try", { hasText: "worker-1 비우기" }).locator("button").click();
+await waitFor(async () => (await page.locator(".term-res").last().textContent())?.includes("node/worker-1 drained"), "drained", 40000);
+const drainOut = await page.locator(".term-res").last().textContent();
+check(drainOut?.includes("Cannot evict pod as it would violate the pod's disruption budget."), "drain 출력에 PDB 거절과 재시도가 보인다", "core/drain.ts");
+await page.screenshot({ path: `${OUT}/16-drain.png` });
 
 check(errors.length === 0, `브라우저 오류 없음${errors.length ? `: ${errors.join(" | ")}` : ""}`, "콘솔 오류의 스택을 보고 고치세요");
 console.log(failed ? "ui-check 실패" : "ui-check 통과 — 스크린샷: .shots/");

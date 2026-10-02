@@ -7,6 +7,7 @@ import { Icon } from "./Icons";
 
 export function Sidebar() {
   const view = currentView();
+  const pdbs = sim.cluster.api.list("PodDisruptionBudget", "default");
   const sel = selection.value;
   const isSel = (kind: string, name: string) => sel?.kind === kind && sel.name === name;
   const manifestNames = new Set(clusterDef.value.manifests.filter((m) => m.kind === "Deployment").map((m) => m.metadata.name));
@@ -88,6 +89,21 @@ export function Sidebar() {
         ))}
         {!view.services.length && <div class="side-empty">없음. + 또는 kubectl expose</div>}
       </div>
+      {pdbs.length > 0 && (
+        <div class="side-section">
+          <div class="side-head">
+            <span>PodDisruptionBudget</span>
+          </div>
+          {pdbs.map((b) => (
+            <button key={b.metadata.uid} class={`tree-row${isSel("PodDisruptionBudget", b.metadata.name) ? " sel" : ""}`} onClick={() => (selection.value = { kind: "PodDisruptionBudget", namespace: "default", name: b.metadata.name })}>
+              <span class="tree-name">{b.metadata.name}</span>
+              <span class={`tree-count ${b.status.disruptionsAllowed > 0 ? "ok" : "wait"}`} title="지금 허용되는 자발적 중단 수">
+                허용 {b.status.disruptionsAllowed}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
       <div class="side-section">
         <div class="side-head">
           <span>노드</span>

@@ -2,7 +2,7 @@
 
 쿠버네티스가 "왜 이렇게 동작하는지" 를 직접 구성하고 한 단계씩 보며 익히는 학습 시뮬레이터. 자매 프로젝트 `../net-sim`(네트워크 시뮬레이터)과 같은 방식이다: 브라우저에서 돌고, 실제 클러스터에 연결하지 않으며, 모든 시뮬레이션은 결정론적. 디자인 품질이 최우선(`DESIGN.md`).
 
-지금 상태: **0·1단계 (2026-10-02).** Deployment·ReplicaSet·스케줄러·kubelet(pull·크래시 백오프·종료·heartbeat)·노드 장애(NotReady·taint·eviction)·kubectl 흉내·캔버스 UI. 2단계(Service·EndpointSlice·kube-proxy·CoreDNS·readiness)도 대부분 됨. 다음 할 일은 `docs/ROADMAP.md` 3단계(롤링 업데이트·liveness·종료 순서).
+지금 상태: **0·1단계 (2026-10-02).** Deployment·ReplicaSet·스케줄러·kubelet(pull·크래시 백오프·종료·heartbeat)·노드 장애(NotReady·taint·eviction)·kubectl 흉내·캔버스 UI. 2단계(Service·EndpointSlice·kube-proxy·CoreDNS·readiness), 3단계(롤링 업데이트·liveness·preStop·PDB/drain)도 됨. 다음 할 일은 `docs/ROADMAP.md` 4단계(Ingress·LoadBalancer·externalTrafficPolicy).
 저장소: https://github.com/youseonghyeon/kube-sim (public). 배포는 아직 없다.
 
 ## 목적 — 누구의 어떤 이해를 바꾸나
@@ -29,7 +29,8 @@
   - `clock.ts` 시계·이벤트 큐(일반 타이머 + 배경 타이머) — net-sim `src/core/network.ts` 의 큐 개념
   - `trace.ts` `TraceKind` 목록. 새 이벤트 종류는 여기에 먼저 등록한다
   - `api/` API 서버 흉내: 오브젝트 저장소(kind·namespace·name, `metadata.resourceVersion`·`generation`·`ownerReferences`·`labels`), watch, 낙관적 동시성, ownerReference 가비지 컬렉션, 이벤트(`kubectl get events`)
-  - `controllers/` 공통 워크큐(`base.ts`) + Deployment·ReplicaSet + `nodelifecycle.ts`(node-lifecycle·taint-eviction) (계획: EndpointSlice, 나중에 HPA·StatefulSet)
+  - `controllers/` 공통 워크큐(`base.ts`) + Deployment(롤링·Recreate·리비전)·ReplicaSet·EndpointSlice·disruption(PDB) + `nodelifecycle.ts`(node-lifecycle·taint-eviction) (나중에 HPA·StatefulSet)
+  - `drain.ts` kubectl drain 진행(Eviction API, 5초 재시도), `net/traffic.ts` 부하 발생기
   - `scheduler.ts` 필터 → 점수 → 바인딩, FailedScheduling 문구
   - `kubelet.ts` 노드마다 Pod 수명주기: 샌드박스·IP → 이미지 pull → 시작 → 크래시 백오프 → SIGTERM·정리, Lease heartbeat, 전원 끄기·켜기 (계획: probe)
   - `cluster.ts` 위 컴포넌트를 묶은 한 벌 + pod-garbage-collector. 바깥은 여기로만 클러스터를 바꾼다

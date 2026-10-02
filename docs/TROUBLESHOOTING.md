@@ -27,6 +27,16 @@
 | `curl: (28) … Connection timed out` | Service 에 없는 포트로 보냄, 또는 꺼진 노드의 Pod 로 DNAT 됨(NotReady 전까지 엔드포인트가 남음) | 포트 확인. 노드 장애면 40초 뒤 엔드포인트에서 빠진다 |
 | Pod 가 `0/1 Running` 이고 트래픽을 안 받음 | readiness probe 가 아직(또는 계속) 실패 — `Readiness probe failed: HTTP probe failed with statuscode: 503` | 앱 준비 시간·상태 확인. Running ≠ Ready |
 
+## 배포·종료 (3단계)
+
+| 증상 / 출력 | 원인 | 고치는 법 |
+|---|---|---|
+| `Waiting for deployment "api" rollout to finish: 2 out of 4 new replicas have been updated...` 에서 멈춤 | 새 Pod 가 Ready 가 안 돼 옛 Pod 를 더 줄일 수 없음 (maxUnavailable) | 새 Pod 의 readiness 이벤트를 본다. 고치거나 `kubectl rollout undo` |
+| `error: deployment "api" exceeded its progress deadline` | progressDeadlineSeconds(600초) 동안 진전 없음 — 알림일 뿐 되돌리지 않음 | `kubectl rollout undo` |
+| Pod 를 지우거나 롤아웃할 때 요청 일부가 연결 거부 | SIGTERM 으로 앱이 먼저 멈추고, 모든 노드의 규칙에서 빠지기까지 틈이 있음 | `lifecycle.preStop` 에 sleep 몇 초 |
+| `Container api failed liveness probe, will be restarted` · RESTARTS 증가 | liveness probe 연속 실패 | 앱이 정말 멈췄는지, 아니면 probe 포트·경로가 틀렸는지 (틀리면 계속 재시작 → CrashLoopBackOff) |
+| `error when evicting pods/"web-…" -n "default" (will retry after 5s): Cannot evict pod as it would violate the pod's disruption budget.` | PDB 의 허용 수가 0 — 대체 Pod 가 Ready 가 될 때까지 기다리는 중 | 정상. 끝나지 않으면 minAvailable 이 replicas 와 같은지 확인 (`kubectl get pdb`) |
+
 ## 화면
 
 | 증상 | 원인 | 고치는 법 |

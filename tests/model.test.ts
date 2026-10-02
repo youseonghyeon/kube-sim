@@ -114,3 +114,13 @@ test("YAML: 숫자로 읽히는 문자열만 따옴표 (실제 kubectl -o yaml �
   expect(toYaml({ requests: { cpu: 1000, memory: 1024 } })).toBe('requests:\n  cpu: "1"\n  memory: 1Gi');
   expect(toYaml({ v: "1.5", w: "nginx:1.27", x: "True" })).toBe('v: "1.5"\nw: nginx:1.27\nx: "True"');
 });
+
+test("drain 예제: worker-1 의 두 번째 Pod 내보내기가 PDB 에 한 번 막혔다가 끝난다", () => {
+  const s = new DefSync();
+  s.reset(EXAMPLES.find((e) => e.id === "drain")!.build(), "x");
+  s.cluster.runFor(20_000);
+  const r = runKubectl(s.cluster, "kubectl drain worker-1 --ignore-daemonsets");
+  s.cluster.runFor(60_000);
+  expect(r.drain!.lines.some((l) => l.includes("Cannot evict pod as it would violate the pod's disruption budget."))).toBe(true);
+  expect(r.drain!.lines.at(-1)).toBe("node/worker-1 drained");
+});

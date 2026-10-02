@@ -8,7 +8,7 @@ import { DefSync } from "./defSync";
 import { exampleById, type TryAction } from "./examples";
 import { advanceClock, EVENT_BURST_LIMIT } from "./simClock";
 import { buildView, type ClusterView } from "./view";
-import { clusterDef, exampleId } from "./store";
+import { clusterDef, exampleId, updateManifest } from "./store";
 
 /** 보관하는 트레이스 상한 (넘으면 오래된 것부터) */
 const TRACE_CAP = 20_000;
@@ -139,6 +139,14 @@ class SimController {
     else if (a.type === "sick") {
       c.setPodHealth(this.actionPod(a.deployment)!, a.healthy);
       this.bump();
+    } else if (a.type === "traffic") {
+      if (a.on) this.startTraffic(a.service);
+      else this.stopTraffic();
+    } else if (a.type === "prestop") {
+      updateManifest(a.deployment, (m) => {
+        const ct = m.spec.template.spec.containers[0]!;
+        ct.lifecycle = { preStop: { sleep: { seconds: a.seconds } } };
+      });
     } else this.curlNodePort(a.node, c.api.get("Service", a.service, "default")!.spec.ports[0]!.nodePort!);
     return undefined;
   }
@@ -154,6 +162,16 @@ class SimController {
       if (!pod) return `${a.deployment} 의 Pod 가 아직 돌고 있지 않습니다`;
       return c.podSick(pod) === !a.healthy ? (a.healthy ? "고장 난 Pod 가 없습니다" : "이미 고장 냈습니다") : undefined;
     }
+    if (a.type === "traffic") {
+      if (!a.on) return c.traffic ? undefined : "돌고 있는 부하가 없습니다";
+      if (c.traffic && !c.traffic.stopped) return "이미 부하를 보내고 있습니다";
+      return this.clientPod(a.service) ? undefined : "요청을 보낼 돌고 있는 Pod 가 없습니다";
+    }
+    if (a.type === "prestop") {
+      const m = clusterDef.peek().manifests.find((x): x is DeploymentManifest => x.kind === "Deployment" && x.metadata.name === a.deployment);
+      if (!m) return `Deployment ${a.deployment} 매니페스트가 없습니다`;
+      return m.spec.template.spec.containers[0]?.lifecycle?.preStop?.sleep.seconds === a.seconds ? "이미 넣었습니다" : undefined;
+    }
     const svc = c.api.get("Service", a.service, "default");
     if (!svc?.spec.ports[0]?.nodePort) return `NodePort Service ${a.service} 가 아직 없습니다 (앞 단계를 먼저)`;
     return c.kubelets.has(a.node) ? undefined : `노드 ${a.node} 이(가) 없습니다`;
@@ -164,6 +182,36 @@ class SimController {
     return this.cluster.api
       .list("Pod", "default")
       .find((p) => p.metadata.labels.app === deployment && p.metadata.deletionTimestamp === undefined && p.status.containerStatuses[0] && "running" in p.status.containerStatuses[0].state)?.metadata.name;
+  }
+
+  /** 요청을 보낼 Pod: client 가 있으면 그것, 없으면 이 Service 의 엔드포인트가 아닌 돌고 있는 Pod, 그것도 없으면 아무 돌고 있는 Pod */
+  clientPod(svc: string): string | undefined {
+    const c = this.cluster;
+    const running = c.api
+      .list("Pod", "default")
+      .filter((p) => p.metadata.deletionTimestamp === undefined && p.spec.nodeName && c.nodePowered(p.spec.nodeName) && p.status.containerStatuses[0] && "running" in p.status.containerStatuses[0].state);
+    const sel = c.api.get("Service", svc, "default")?.spec.selector ?? {};
+    const inSvc = (labels: Record<string, string>) => Object.entries(sel).every(([k, v]) => labels[k] === v);
+    return (running.find((p) => p.metadata.labels.app === "client") ?? running.find((p) => !inSvc(p.metadata.labels)) ?? running[0])?.metadata.name;
+  }
+
+  /** Service 로 100ms 마다 curl (부하) */
+  startTraffic(svc: string): void {
+    const from = this.clientPod(svc);
+    if (!from) return;
+    const p = this.cluster.api.get("Service", svc, "default")?.spec.ports[0];
+    this.cluster.startTraffic(from, `http://${svc}${p && p.port !== 80 ? `:${p.port}` : ""}`, 100);
+    this.bump();
+  }
+
+  stopTraffic(): void {
+    this.cluster.stopTraffic();
+    this.bump();
+  }
+
+  resetTraffic(): void {
+    this.cluster.traffic?.reset();
+    this.bump();
   }
 
   /** 화면 밖 동작 뒤 다시 그리기 */

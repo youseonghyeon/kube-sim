@@ -2,11 +2,12 @@
 import { useSignal } from "@preact/signals";
 import { useEffect, useMemo } from "preact/hooks";
 import { controllerOf, isNodeReady, NODE_LEASE_NS, type Deployment, type KObject, type Node, type Pod, type ReplicaSet, type Service } from "../core/api/types";
-import { eventSource, nodeStatusText, podRestartsText, podStatusText, runKubectl } from "../core/kubectl";
+import { eventSource, nodeStatusText, podRestartsText, podStatusText, rolloutStatusLine, runKubectl } from "../core/kubectl";
 import { fmtAge, fmtCpu, fmtMem, parseCpu, parseMem } from "../core/units";
 import { IMAGE_NAMES, IMAGES } from "../core/workloads";
 import { NODE_MONITOR_GRACE_MS } from "../core/controllers/nodelifecycle";
 import { exampleById, resolveCommand, type TryAction } from "../model/examples";
+import { deploymentHash, HASH_LABEL, revisionOf } from "../core/controllers/deployment";
 import { sim, simVersion } from "../model/sim";
 import { clusterDef, drawerOpen, drawerTab, exampleId, findManifest, removeManifest, selection, updateManifest, updateNodeDef, updateServiceManifest } from "../model/store";
 import { toneOf } from "../model/view";
@@ -118,6 +119,20 @@ function Overview({ obj }: { obj: KObject }) {
       return <NodeOverview n={obj} />;
     case "Service":
       return <ServiceOverview svc={obj} />;
+    case "PodDisruptionBudget":
+      return (
+        <>
+          <Rows
+            rows={[
+              ["selector", <span class="mono">{Object.entries(obj.spec.selector.matchLabels).map(([k, v]) => `${k}=${v}`).join(",")}</span>],
+              ["조건", obj.spec.minAvailable !== undefined ? `minAvailable ${obj.spec.minAvailable}` : `maxUnavailable ${obj.spec.maxUnavailable}`],
+              ["지금", `Ready ${obj.status.currentHealthy} · 최소 ${obj.status.desiredHealthy} · 기대 ${obj.status.expectedPods}`],
+              ["중단 허용", String(obj.status.disruptionsAllowed)],
+            ]}
+          />
+          <p class="note">drain 같은 자발적 중단(Eviction API)은 허용 수가 0 이면 거절됩니다. 노드가 죽는 것 같은 비자발적 중단은 막지 못합니다.</p>
+        </>
+      );
     default:
       return null;
   }
@@ -260,28 +275,57 @@ function DeploymentOverview({ d }: { d: Deployment }) {
   const rss = c.api.list("ReplicaSet", "default").filter((r) => controllerOf(r.metadata)?.uid === d.metadata.uid);
   const drift = sim.drift(d.metadata.name);
   const inManifest = !!findManifest("Deployment", d.metadata.name);
+  const st = rolloutStatusLine(d);
+  const hash = deploymentHash(d);
+  const strategy = d.spec.strategy?.type === "Recreate" ? "Recreate" : `RollingUpdate (maxSurge ${d.spec.strategy?.rollingUpdate?.maxSurge ?? "25%"} · maxUnavailable ${d.spec.strategy?.rollingUpdate?.maxUnavailable ?? "25%"})`;
+  const prestop = d.spec.template.spec.containers[0]?.lifecycle?.preStop?.sleep.seconds;
   return (
     <>
       {inManifest && drift.length > 0 && <DriftNote name={d.metadata.name} drift={drift} />}
+      <div class={`callout${st.text.startsWith("error") ? " bad" : st.done ? "" : " warn"}`}>
+        <div class="small muted">kubectl rollout status</div>
+        <div class="mono small">{st.text}</div>
+        {!st.done && st.text.includes("new replicas have been updated") && d.status.availableReplicas < d.spec.replicas && (
+          <div class="small">새 Pod 가 Ready 가 되어야 옛 Pod 를 더 줄일 수 있습니다. 멈춰 있다면 새 Pod 의 readiness 를 보세요.</div>
+        )}
+      </div>
       <Rows
         rows={[
-          ["replicas", `원하는 ${d.spec.replicas} · 있는 ${d.status.replicas} · Ready ${d.status.readyReplicas}`],
-          ["selector", <span class="mono">{Object.entries(d.spec.selector.matchLabels).map(([k, v]) => `${k}=${v}`).join(",")}</span>],
+          ["replicas", `원하는 ${d.spec.replicas} · 있는 ${d.status.replicas} · 새 템플릿 ${d.status.updatedReplicas} · Ready ${d.status.readyReplicas}`],
+          ["전략", <span class="small">{strategy}</span>],
           ["이미지", <span class="mono">{d.spec.template.spec.containers[0]?.image}</span>],
-          ["generation", `${d.metadata.generation} (관찰 ${d.status.observedGeneration})`],
+          ["preStop", prestop ? `sleep ${prestop}초` : <span class="muted">없음</span>],
+          ["revision", d.metadata.annotations?.["deployment.kubernetes.io/revision"] ?? "—"],
         ]}
       />
-      <h3>ReplicaSet</h3>
-      <p class="muted small">템플릿 해시마다 하나. 지금 템플릿의 것만 replicas 를 가집니다.</p>
+      <div class="actions">
+        <button class="btn sm" onClick={() => runAndShow(`kubectl rollout status deployment/${d.metadata.name}`)}>
+          rollout status
+        </button>
+        <button class="btn sm" onClick={() => runAndShow(`kubectl rollout restart deployment/${d.metadata.name}`)} title="템플릿에 restartedAt 을 붙여 새 ReplicaSet 으로 모두 교체합니다">
+          rollout restart
+        </button>
+        <button class="btn sm" disabled={rss.length < 2} onClick={() => runAndShow(`kubectl rollout undo deployment/${d.metadata.name}`)} title="바로 전 리비전의 템플릿으로 되돌립니다">
+          rollout undo
+        </button>
+      </div>
+      <h3>ReplicaSet (리비전)</h3>
+      <p class="muted small">템플릿 해시마다 하나. 지금 템플릿의 것(새)이 늘고 옛것이 줄어드는 것이 롤아웃입니다.</p>
       <ul class="list">
-        {rss.map((r) => (
-          <li key={r.metadata.uid}>
-            <Link kind="ReplicaSet" name={r.metadata.name} />
-            <span class="muted">
-              {r.status.readyReplicas}/{r.spec.replicas}
-            </span>
-          </li>
-        ))}
+        {[...rss]
+          .sort((a, b) => revisionOf(b) - revisionOf(a))
+          .map((r) => (
+            <li key={r.metadata.uid}>
+              <span>
+                <span class="mono small muted">rev {revisionOf(r)} </span>
+                <Link kind="ReplicaSet" name={r.metadata.name} />
+                {r.metadata.labels[HASH_LABEL] === hash && <span class="tag">새</span>}
+              </span>
+              <span class="muted">
+                {r.status.readyReplicas}/{r.spec.replicas}
+              </span>
+            </li>
+          ))}
       </ul>
       <h3>이벤트</h3>
       <Events uid={d.metadata.uid} />
@@ -454,6 +498,47 @@ function DeploymentSettings({ d }: { d: Deployment }) {
           validate={(v) => (parseMem(v) === undefined ? "128Mi · 1Gi 처럼 쓰세요" : undefined)}
         />
       </Field>
+      <Field label="strategy" hint="RollingUpdate: 조금씩 바꿈 · Recreate: 옛 Pod 를 다 지운 뒤 새로 (그동안 서비스 중단)">
+        <select
+          class="input"
+          value={m.spec.strategy?.type ?? "RollingUpdate"}
+          onChange={(e) => updateManifest(name, (x) => (x.spec.strategy = e.currentTarget.value === "Recreate" ? { type: "Recreate" } : { type: "RollingUpdate", rollingUpdate: { maxSurge: "25%", maxUnavailable: "25%" } }))}
+        >
+          <option value="RollingUpdate">RollingUpdate</option>
+          <option value="Recreate">Recreate</option>
+        </select>
+      </Field>
+      {(m.spec.strategy?.type ?? "RollingUpdate") === "RollingUpdate" && (
+        <div class="field-row">
+          <Field label="maxSurge" hint="replicas 보다 더 둘 수 있는 수 (1 · 25%)">
+            <TextInput
+              value={String(m.spec.strategy?.rollingUpdate?.maxSurge ?? "25%")}
+              validate={intOrPct}
+              onCommit={(v) => updateManifest(name, (x) => (x.spec.strategy = { type: "RollingUpdate", rollingUpdate: { maxSurge: parseIntOrPct(v), maxUnavailable: x.spec.strategy?.rollingUpdate?.maxUnavailable ?? "25%" } }))}
+            />
+          </Field>
+          <Field label="maxUnavailable" hint="동시에 빠져도 되는 수 (0 · 25%)">
+            <TextInput
+              value={String(m.spec.strategy?.rollingUpdate?.maxUnavailable ?? "25%")}
+              validate={intOrPct}
+              onCommit={(v) => updateManifest(name, (x) => (x.spec.strategy = { type: "RollingUpdate", rollingUpdate: { maxSurge: x.spec.strategy?.rollingUpdate?.maxSurge ?? "25%", maxUnavailable: parseIntOrPct(v) } }))}
+            />
+          </Field>
+        </div>
+      )}
+      <Field label="preStop sleep (초)" hint="SIGTERM 전에 기다리는 시간 — 그사이 엔드포인트가 빠져 요청 실패가 없어진다. 0 이면 없음">
+        <TextInput
+          value={String(ct.lifecycle?.preStop?.sleep.seconds ?? 0)}
+          validate={(v) => (/^\d+$/.test(v) && Number(v) <= 60 ? undefined : "0~60 사이 정수")}
+          onCommit={(v) =>
+            updateManifest(name, (x) => {
+              const c0 = x.spec.template.spec.containers[0]!;
+              if (Number(v) > 0) c0.lifecycle = { preStop: { sleep: { seconds: Number(v) } } };
+              else delete c0.lifecycle;
+            })
+          }
+        />
+      </Field>
       <div class="actions">
         <button
           class="btn danger"
@@ -597,7 +682,18 @@ function ExamplePanel() {
 function actionLabel(a: TryAction): string {
   if (a.type === "power") return a.on ? `노드 ${a.node} 다시 켜기` : `노드 ${a.node} 끄기`;
   if (a.type === "sick") return a.healthy ? `${a.deployment} 의 고장 난 Pod 고치기` : `${a.deployment} Pod 하나의 앱 고장 내기`;
+  if (a.type === "traffic") return a.on ? `client 에서 ${a.service} 로 0.1초마다 curl (부하)` : "부하 멈추기";
+  if (a.type === "prestop") return `${a.deployment} 에 preStop sleep ${a.seconds}초 넣기 (apply)`;
   return `(클러스터 밖에서) curl ${a.node}:<${a.service} 의 NodePort>`;
+}
+
+function intOrPct(v: string): string | undefined {
+  return /^\d+%?$/.test(v.trim()) ? undefined : "1 처럼 개수나 25% 처럼 퍼센트";
+}
+
+function parseIntOrPct(v: string): number | string {
+  const t = v.trim();
+  return t.endsWith("%") ? t : Number(t);
 }
 
 function TryActionRow({ action }: { action: TryAction }) {
@@ -657,22 +753,12 @@ function CurlFrom({ pod }: { pod: string }) {
   );
 }
 
-/** 요청을 보낼 Pod: client 가 있으면 그것, 없으면 이 Service 의 엔드포인트가 아닌 돌고 있는 Pod, 그것도 없으면 아무 돌고 있는 Pod */
-function clientPodFor(svc: string): string | undefined {
-  const c = sim.cluster;
-  const running = c.api
-    .list("Pod", "default")
-    .filter((p) => p.metadata.deletionTimestamp === undefined && p.spec.nodeName && c.nodePowered(p.spec.nodeName) && p.status.containerStatuses[0] && "running" in p.status.containerStatuses[0].state);
-  const sel = c.api.get("Service", svc, "default")?.spec.selector ?? {};
-  const inSvc = (labels: Record<string, string>) => Object.entries(sel).every(([k, v]) => labels[k] === v);
-  return (running.find((p) => p.metadata.labels.app === "client") ?? running.find((p) => !inSvc(p.metadata.labels)) ?? running[0])?.metadata.name;
-}
-
 function ServiceOverview({ svc }: { svc: Service }) {
   const c = sim.cluster;
   const slices = c.api.list("EndpointSlice", "default").filter((s) => s.metadata.labels["kubernetes.io/service-name"] === svc.metadata.name);
   const eps = slices.flatMap((s) => s.endpoints);
-  const client = clientPodFor(svc.metadata.name);
+  const client = sim.clientPod(svc.metadata.name);
+  const traffic = c.traffic && !c.traffic.stopped ? c.traffic : undefined;
   const p = svc.spec.ports[0];
   return (
     <>
@@ -707,6 +793,15 @@ function ServiceOverview({ svc }: { svc: Service }) {
         <button class="btn ghost" disabled={!client} onClick={() => client && runAndShow(`kubectl exec ${client} -- ping ${svc.metadata.name}`)}>
           ping
         </button>
+        {traffic ? (
+          <button class="btn danger" onClick={() => sim.stopTraffic()}>
+            부하 멈추기
+          </button>
+        ) : (
+          <button class="btn" disabled={!client} onClick={() => sim.startTraffic(svc.metadata.name)} title="0.1초마다 curl 을 계속 보내 성공·실패를 셉니다 (롤아웃·Pod 삭제 중 실패를 보려고)">
+            부하 보내기
+          </button>
+        )}
       </div>
       {svc.spec.type === "NodePort" && p?.nodePort && (
         <>

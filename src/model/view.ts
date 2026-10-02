@@ -3,6 +3,7 @@ import { controllerOf, isNodeReady, isPodReady, NODE_LEASE_NS, SERVICE_NAME_LABE
 import type { Cluster } from "../core/cluster";
 import { nodeStatusText, podReadyText, podStatusText } from "../core/kubectl";
 import { DEFAULT_TOLERATION_SECONDS } from "../core/api/server";
+import { deploymentHash, HASH_LABEL, revisionOf } from "../core/controllers/deployment";
 import { NODE_MONITOR_GRACE_MS } from "../core/controllers/nodelifecycle";
 import { nodeUsage } from "../core/scheduler";
 import type { ObjRef, TraceEvent } from "../core/trace";
@@ -21,6 +22,10 @@ export interface PodView {
   /** 주인 Deployment (없으면 ReplicaSet, 그것도 없으면 undefined) */
   owner?: string;
   rs?: string;
+  /** ReplicaSet 리비전 — 주인 Deployment 의 Pod 가 여러 RS 에 걸쳐 있을 때(롤아웃 중)만 */
+  revision?: number;
+  /** 이 Pod 의 RS 가 지금 템플릿의 것인가 (롤아웃 중 새/옛 구분) */
+  isNew?: boolean;
   colorIndex: number;
 }
 
@@ -111,6 +116,8 @@ export function buildView(c: Cluster): ClusterView {
   const colorOf = new Map(deps.map((d, i) => [d.metadata.name, i % OWNER_COLORS]));
   const rsOwner = new Map(rss.map((r) => [r.metadata.uid, controllerOf(r.metadata)?.name]));
   const rsName = new Map(rss.map((r) => [r.metadata.uid, r.metadata.name]));
+  const rsRev = new Map(rss.map((r) => [r.metadata.uid, revisionOf(r)]));
+  const depByName = new Map(deps.map((d) => [d.metadata.name, d]));
   const allPods = c.api.list("Pod");
   const pods: PodView[] = allPods.map((p) => {
     const status = podStatusText(p);
@@ -153,6 +160,16 @@ export function buildView(c: Cluster): ClusterView {
     const eps = slices.filter((s) => s.metadata.labels[SERVICE_NAME_LABEL] === svc.metadata.name).flatMap((s) => s.endpoints);
     return { svc, name: svc.metadata.name, ready: eps.filter((e) => e.conditions.ready).map((e) => e.targetRef.name), notReady: eps.filter((e) => !e.conditions.ready).map((e) => e.targetRef.name) };
   });
+  // 롤아웃 중인 Deployment (Pod 가 둘 이상의 RS 에 걸쳐 있음) 의 Pod 에만 리비전 표시
+  const rsPerOwner = new Map<string, Set<string>>();
+  for (const p of pods) if (p.owner && p.rs) (rsPerOwner.get(p.owner) ?? rsPerOwner.set(p.owner, new Set()).get(p.owner)!).add(p.rs);
+  for (const p of pods) {
+    if (!p.owner || (rsPerOwner.get(p.owner)?.size ?? 0) < 2) continue;
+    const ref = controllerOf(p.pod.metadata);
+    p.revision = ref ? rsRev.get(ref.uid) : undefined;
+    const d = depByName.get(p.owner);
+    p.isNew = !!d && p.pod.metadata.labels[HASH_LABEL] === deploymentHash(d);
+  }
   return {
     services,
     nodes,

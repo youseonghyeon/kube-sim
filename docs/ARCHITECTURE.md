@@ -28,6 +28,13 @@
 - Node lifecycle: heartbeat(Lease) 끊김 → NotReady → taint → toleration 만료 Pod eviction.
 - 트레이스 actor 이름은 실제 컴포넌트 이름: `kube-scheduler`, `replicaset-controller`, `deployment-controller`, `kubelet@node-1`, `kube-proxy@node-2`, `coredns`.
 
+## 3-2. 배포·종료 (3단계)
+- Deployment 컨트롤러 (`controllers/deployment.ts`): 새 RS = 지금 템플릿 해시의 RS. RollingUpdate 는 실제 알고리즘의 축소판 — 새 RS 는 전체(spec.replicas 합)가 replicas+maxSurge 를 넘지 않게 늘리고, 옛 RS 는 "전체 − minAvailable − 새 RS 의 unavailable" 과 "available − minAvailable" 중 작은 만큼 줄인다(옛 RS 의 안 뜬 Pod 부터). 그래서 새 Pod 가 Ready 가 안 되면 멈춘다. Recreate 는 옛 Pod 가 모두 사라진 뒤 새 RS 를 늘린다(Pod 삭제를 watch). 옛 템플릿으로 돌아오면(undo) 그 RS 의 리비전을 맨 위로. 진전 마감은 일반 타이머(끝나면 취소).
+- 종료 순서: Pod 삭제 → (watch) kubelet 이 preStop → SIGTERM(앱은 새 연결을 받지 않고 termMs 뒤 종료) → 정리, 동시에 EndpointSlice 갱신 → kube-proxy 가 **1초(RULE_SYNC_MS, 학습용)** 뒤 규칙 반영. 이 틈에 그 Pod 로 DNAT 된 요청은 연결 거부. preStop sleep 이 이 틈을 메운다.
+- liveness: 배경 타이머 주기. failureThreshold 연속 실패면 crash 와 같은 길(재시작 백오프 포함). "앱 고장" 은 프로세스 상태라 재시작하면 풀린다.
+- 부하 발생기 (`net/traffic.ts`): 배경 타이머로 요청을 계속 계산, 실패만 트레이스에 남김.
+- PDB·drain: disruption 컨트롤러가 disruptionsAllowed 를 계산, `api.evict` 가 이를 보고 429(TooManyRequests) 또는 허용(허용 수를 줄이고 삭제). `DrainJob` 이 cordon → evict → 5초 재시도 → Pod 가 사라지면 "evicted" → "drained". 출력 줄이 시간이 지나며 늘어난다.
+
 ## 3-1. 노드 장애 (1단계, `controllers/nodelifecycle.ts`)
 - kubelet 은 `kube-node-lease` 의 Lease 를 10초마다 갱신(배경 타이머). Lease 는 Node 가 주인 → Node 를 지우면 GC.
 - node-lifecycle-controller: 5초마다(배경) Lease 를 보고 40초 넘게 갱신이 없으면 Ready=Unknown(`NodeStatusUnknown`), taint `node.kubernetes.io/unreachable` NoSchedule·NoExecute(timeAdded), 그 노드 Pod 의 Ready=False. 다시 갱신되고 kubelet 이 Ready 를 보고하면 taint 제거.

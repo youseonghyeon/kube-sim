@@ -49,7 +49,9 @@
 - 만들 것: CNI(PodCIDR·IP 할당), Service·EndpointSlice 컨트롤러, kube-proxy 규칙(시드 고정 확률 분배), CoreDNS, "요청 보내기" 진단(경로를 단계별로 보여 줌), `iptables-save` 흉내 출력
 - 예제: "Service 로 Pod 3개에 나누기", "readiness 가 실패하는 Pod 하나", "다른 노드의 Pod 로 가는 요청"
 
-## 3. 배포 전략과 헬스
+## 3. 배포 전략과 헬스 ✅ 2026-10-02
+- 된 것: RollingUpdate(maxSurge·maxUnavailable, 기본 25%/25%)·Recreate, 리비전(`deployment.kubernetes.io/revision`)·revisionHistoryLimit, Progressing/Available 조건과 progressDeadlineSeconds, `kubectl rollout status|history|undo|restart`, liveness probe(죽이고 재시작), preStop sleep, SIGTERM 뒤 새 연결 거부 + kube-proxy 규칙 반영 1초 → Pod 삭제·롤아웃 중 요청 실패, 부하 발생기(0.1초마다 curl, 성공·실패 막대), PodDisruptionBudget·disruption 컨트롤러·Eviction API·`kubectl drain`(5초 재시도), 예제 5개(rolling·rollout-stuck·graceful·liveness·drain)
+- 축소판: minReadySeconds·paused·비례 스케일링 없음, drain 은 10분 뒤 포기(실제는 무한 대기), DaemonSet 없음
 - 배우는 것: rolling update(maxSurge·maxUnavailable)와 readiness 가 롤아웃을 멈추는 방식, `kubectl rollout undo`, liveness 실패 → 재시작, 종료 순서(EndpointSlice 에서 빠지는 것과 SIGTERM 의 경합 → 요청 실패, preStop 으로 해결), PodDisruptionBudget 과 `kubectl drain`
 - 예제: "새 버전 롤아웃 (중간에 readiness 실패)", "graceful shutdown 없는 앱의 502", "drain 과 PDB"
 

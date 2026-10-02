@@ -528,6 +528,83 @@ pre {
   font-size: 11px;
 }
 
+/* 부하 발생기 */
+.traffic {
+  margin-bottom: 14px;
+  padding: 8px 12px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.traffic.stopped {
+  opacity: 0.7;
+}
+.traffic-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.traffic-head .lane-title {
+  margin: 0;
+}
+.traffic-count {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+.traffic-count.ok {
+  color: var(--ok);
+}
+.traffic-count.bad {
+  color: var(--bad);
+}
+.traffic-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+}
+.traffic-strip {
+  display: flex;
+  gap: 1px;
+  height: 14px;
+  margin-top: 6px;
+  overflow: hidden;
+}
+.traffic-strip .tick {
+  flex: 0 0 4px;
+  border-radius: 1px;
+  background: var(--ok);
+  opacity: 0.75;
+}
+.traffic-strip .tick.fail {
+  background: var(--bad);
+  opacity: 1;
+}
+.traffic-last {
+  margin-top: 4px;
+  color: var(--bad);
+}
+.pod-rev {
+  flex: none;
+  margin-left: auto;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--surface-2);
+  color: var(--ink-3);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+.pod-rev.new {
+  background: var(--accent);
+  color: #fff;
+}
+.field-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
 /* Service (가상 주소 — 점선) */
 .svcs {
   margin-bottom: 14px;

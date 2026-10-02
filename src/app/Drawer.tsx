@@ -136,6 +136,7 @@ const STEP_LABEL: Record<NetStep["kind"], string> = { dns: "DNS", dnat: "DNAT", 
 const QUICK = ["get pods -o wide", "get svc", "get endpoints", "get deploy", "get nodes", "get events", "help"];
 
 function KubectlView() {
+  simVersion.value; // drain 처럼 시간이 지나며 늘어나는 출력을 다시 그린다
   const input = useSignal("");
   const histIdx = useRef(-1);
   const box = useRef<HTMLDivElement>(null);
@@ -160,7 +161,7 @@ function KubectlView() {
             <div class="term-cmd mono">
               <span class="term-time">{fmtClock(h.t)}</span>$ {h.command}
             </div>
-            <pre class={`term-res${h.result.ok ? "" : " err"}`}>{h.result.output}</pre>
+            <pre class={`term-res${h.result.ok ? "" : " err"}`}>{h.result.drain ? h.result.drain.lines.join("\n") + (h.result.drain.done ? "" : "\n…") : h.result.output}</pre>
             {h.result.net && h.result.net.steps.length > 0 && (
               <ol class="net-steps">
                 {h.result.net.steps.map((s, i) => (

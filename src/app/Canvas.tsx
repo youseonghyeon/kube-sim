@@ -30,6 +30,7 @@ export function Canvas() {
   return (
     <main class="canvas" ref={main} onClick={() => (selection.value = null)}>
       <ControlPlane now={now} windowMs={windowMs} version={version} />
+      <TrafficBar />
       {view.services.length > 0 && (
         <section class="svcs" aria-label="Service">
           <div class="lane-head">
@@ -82,6 +83,40 @@ function focusOf(view: ClusterView, sel: { kind: string; name: string } | null):
     if (s) return { pods: new Set([...s.ready, ...s.notReady]) };
   }
   return {};
+}
+
+/** 부하 발생기의 최근 결과: 칸 하나가 요청 하나 (초록 성공 · 빨강 실패) */
+function TrafficBar() {
+  const t = sim.cluster.traffic;
+  if (!t) return null;
+  const recent = t.samples.slice(-120);
+  const lastFail = [...t.samples].reverse().find((s) => !s.ok);
+  return (
+    <section class={`traffic${t.stopped ? " stopped" : ""}`} aria-label="부하" onClick={(e) => e.stopPropagation()}>
+      <div class="traffic-head">
+        <span class="lane-title">부하</span>
+        <span class="mono small">
+          {t.from} → {t.target} · {t.intervalMs}ms 마다
+        </span>
+        <span class="traffic-count ok">성공 {t.ok}</span>
+        <span class={`traffic-count${t.fail ? " bad" : ""}`}>실패 {t.fail}</span>
+        <span class="traffic-actions">
+          <button class="btn sm ghost" onClick={() => sim.resetTraffic()}>
+            0 으로
+          </button>
+          <button class="btn sm" onClick={() => sim.stopTraffic()}>
+            {t.stopped ? "닫기" : "멈추기"}
+          </button>
+        </span>
+      </div>
+      <div class="traffic-strip" title="최근 요청 (왼쪽이 오래된 것)">
+        {recent.map((s, i) => (
+          <span key={i} class={`tick${s.ok ? "" : " fail"}`} title={s.ok ? `${s.servedBy} 응답` : s.reason} />
+        ))}
+      </div>
+      {lastFail && <div class="traffic-last small">마지막 실패: {lastFail.reason}</div>}
+    </section>
+  );
 }
 
 function ServiceBox({ s, selected }: { s: ServiceView; selected: boolean }) {
@@ -229,6 +264,11 @@ function PodChip({ p, flash, focus }: { p: PodView; flash?: string; focus: Focus
       <span class="pod-top">
         <span class={`dot ${p.tone}`} />
         <span class="pod-name mono">{p.name}</span>
+        {p.revision !== undefined && (
+          <span class={`pod-rev${p.isNew ? " new" : ""}`} title={p.isNew ? "새 템플릿의 Pod (롤아웃 중)" : "옛 템플릿의 Pod (롤아웃 중)"}>
+            r{p.revision}
+          </span>
+        )}
       </span>
       <span class="pod-bottom">
         <span class="pod-status">{p.status}</span>

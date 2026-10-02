@@ -1,5 +1,5 @@
 // 예제: 노드 + 매니페스트 + "해 볼 것"(학습 포인트를 직접 확인하는 행동).
-import { deployment, service, type Manifest } from "../core/cluster";
+import { deployment, pdb, service, type Manifest } from "../core/cluster";
 import type { Pod } from "../core/api/types";
 import type { NodeDef } from "../core/kubelet";
 
@@ -17,7 +17,11 @@ export interface TryStep {
     /** 클러스터 밖에서 그 노드의 NodePort 로 curl */
     | { type: "nodeport"; node: string; service: string }
     /** Deployment 의 첫 Pod 의 앱을 고장 내거나 고침 */
-    | { type: "sick"; deployment: string; healthy: boolean };
+    | { type: "sick"; deployment: string; healthy: boolean }
+    /** client Pod 에서 Service 로 계속 요청 보내기 / 멈추기 */
+    | { type: "traffic"; service: string; on: boolean }
+    /** 매니페스트에 preStop sleep 을 넣는다 (kubectl apply 와 같음) */
+    | { type: "prestop"; deployment: string; seconds: number };
   /** 무엇을 보게 되나 (학습 포인트) */
   expect: string;
   /** 실패하는 것이 학습 포인트인 명령 (예: ClusterIP 로 ping) */
@@ -272,6 +276,136 @@ export const EXAMPLES: Example[] = [
         action: { type: "sick", deployment: "api", healthy: true },
         expect: "다음 probe 가 통과하면 바로 Ready=True → 다시 엔드포인트에 들어갑니다.",
       },
+    ],
+  },
+  {
+    id: "rolling",
+    title: "롤링 업데이트 (maxSurge · maxUnavailable)",
+    summary: "이미지를 바꾸면 새 ReplicaSet 이 늘고 옛 ReplicaSet 이 줄어듭니다. 그동안 Pod 수와 Ready 수가 어디까지 움직이는지 봅니다.",
+    build: () => ({
+      nodes: [node("worker-1"), node("worker-2")],
+      manifests: [
+        deployment("web", { replicas: 4, image: "nginx:1.27", cpu: 200, memory: 128, port: 80, preStop: 5 }),
+        deployment("client", { replicas: 1, image: "curlimages/curl:8.10.1", cpu: 50, memory: 32 }),
+        service("web", { selector: { app: "web" }, port: 80 }),
+      ],
+    }),
+    tries: [
+      { title: "부하 보내기", action: { type: "traffic", service: "web", on: true }, expect: "client 에서 0.1초마다 web 으로 curl 을 보냅니다. 위쪽 '부하' 막대에 성공·실패가 쌓입니다." },
+      {
+        title: "이미지 바꾸기",
+        command: "kubectl set image deployment/web web=nginx:1.28",
+        expect: "replicas 4, 기본 25%/25% → maxSurge 1 · maxUnavailable 1. 전체 Pod 는 5개를 넘지 않고 Ready 는 3개 밑으로 내려가지 않습니다. Pod 칩의 r1·r2 가 옛·새 리비전입니다. 이 Deployment 는 preStop 이 있어 요청 실패가 없습니다.",
+      },
+      { title: "진행 보기", command: "kubectl rollout status deployment/web", expect: "새 Pod 몇 개가 바뀌었는지, 옛 Pod 가 몇 개 남았는지 한 줄로 알려 줍니다." },
+      { title: "이력 보기", command: "kubectl rollout history deployment/web", expect: "리비전마다 ReplicaSet 이 하나씩 남아 있습니다 (그래서 되돌릴 수 있습니다)." },
+      { title: "되돌리기", command: "kubectl rollout undo deployment/web", expect: "옛 ReplicaSet 을 다시 늘리고 리비전 번호를 맨 위(3)로 올립니다. 새 RS 를 만들지 않습니다." },
+    ],
+  },
+  {
+    id: "rollout-stuck",
+    title: "새 버전이 안 뜨면 롤아웃이 멈춘다",
+    summary: "readiness 를 통과하지 못하는 새 버전을 배포합니다. 옛 Pod 를 maxUnavailable 만큼만 줄이고 멈춰, 서비스는 옛 버전으로 계속 됩니다.",
+    build: () => ({
+      nodes: [node("worker-1"), node("worker-2")],
+      manifests: [
+        deployment("api", { replicas: 4, image: "example/api:1.1", cpu: 200, memory: 128, port: 8080, readiness: { httpGet: { path: "/ready", port: 8080 }, periodSeconds: 3 }, preStop: 3 }),
+        deployment("client", { replicas: 1, image: "curlimages/curl:8.10.1", cpu: 50, memory: 32 }),
+        service("api", { selector: { app: "api" }, port: 80, targetPort: 8080 }),
+      ],
+    }),
+    tries: [
+      { title: "부하 보내기", action: { type: "traffic", service: "api", on: true }, expect: "api 로 계속 요청을 보냅니다." },
+      {
+        title: "망가진 2.0 배포",
+        command: "kubectl set image deployment/api api=example/api:2.0",
+        expect: "새 Pod 2개가 생기지만 /ready 가 계속 503 이라 Ready 가 안 됩니다. 옛 Pod 는 1개만 줄고(3개 남음) 거기서 멈춥니다. 요청은 Ready 인 옛 Pod 로만 가서 실패가 없습니다.",
+      },
+      { title: "왜 멈췄나", command: "kubectl rollout status deployment/api", expect: "2 out of 4 new replicas have been updated... 에서 더 나아가지 않습니다. 600초(progressDeadlineSeconds)가 지나면 ProgressDeadlineExceeded 로 바뀝니다 — 속도를 30× 로 올려 보세요." },
+      { title: "조건 보기", command: "kubectl describe deployment api", expect: "Conditions 의 Available·Progressing 과 OldReplicaSets·NewReplicaSet 이 지금 상태를 말해 줍니다." },
+      { title: "되돌리기", command: "kubectl rollout undo deployment/api", expect: "옛 템플릿으로 돌아가 망가진 Pod 를 지우고 4개로 회복합니다. 쿠버네티스는 스스로 되돌리지 않습니다 — 사람(또는 Argo Rollouts 같은 도구)의 몫." },
+    ],
+  },
+  {
+    id: "graceful",
+    title: "Pod 를 지울 때 왜 요청이 실패하나 (preStop)",
+    summary: "Pod 를 지우면 SIGTERM 과 엔드포인트 제거가 동시에 시작됩니다. 앱이 먼저 멈추면, 아직 규칙이 안 바뀐 노드에서 온 요청이 실패합니다.",
+    build: () => ({
+      nodes: [node("worker-1"), node("worker-2")],
+      manifests: [
+        deployment("web", { replicas: 3, image: "nginx:1.27", cpu: 200, memory: 128, port: 80 }),
+        deployment("client", { replicas: 1, image: "curlimages/curl:8.10.1", cpu: 50, memory: 32 }),
+        service("web", { selector: { app: "web" }, port: 80 }),
+      ],
+    }),
+    tries: [
+      { title: "부하 보내기", action: { type: "traffic", service: "web", on: true }, expect: "0.1초마다 curl. 처음에는 모두 성공합니다." },
+      {
+        title: "Pod 하나 지우기",
+        command: "kubectl delete pod {pod:web}",
+        expect: "SIGTERM 을 받은 nginx 는 바로 새 연결을 받지 않는데, kube-proxy 가 규칙을 바꾸기까지 1초쯤 걸려 그사이 그 Pod 로 간 요청이 연결 거부됩니다 (부하 막대의 빨간 칸).",
+      },
+      {
+        title: "preStop sleep 5초 넣기",
+        action: { type: "prestop", deployment: "web", seconds: 5 },
+        expect: "템플릿이 바뀌어 롤링 업데이트가 일어납니다 — 옛 Pod 는 preStop 이 없으니 이번에도 실패가 조금 생깁니다. 끝나면 부하 막대의 '0 으로' 를 누르세요.",
+      },
+      {
+        title: "다시 Pod 하나 지우기",
+        command: "kubectl delete pod {pod:web}",
+        expect: "이번에는 SIGTERM 전에 5초 기다립니다. 그사이 엔드포인트에서 빠지고 모든 노드의 규칙이 바뀌어, 그 Pod 로 가는 요청이 없어진 뒤에 앱이 멈춥니다. 실패 0.",
+      },
+    ],
+  },
+  {
+    id: "liveness",
+    title: "liveness: 멈춘 앱은 재시작으로 살린다",
+    summary: "readiness 는 트래픽을 빼고, liveness 는 컨테이너를 죽였다 다시 띄웁니다. 재시작하면 풀리는 고장(교착)에 쓰는 것입니다.",
+    build: () => ({
+      nodes: [node("worker-1"), node("worker-2")],
+      manifests: [
+        deployment("api", {
+          replicas: 2,
+          image: "example/api:1.1",
+          cpu: 200,
+          memory: 128,
+          port: 8080,
+          readiness: { httpGet: { path: "/ready", port: 8080 }, periodSeconds: 3 },
+          liveness: { httpGet: { path: "/healthz", port: 8080 }, periodSeconds: 5 },
+        }),
+        deployment("client", { replicas: 1, image: "curlimages/curl:8.10.1", cpu: 50, memory: 32 }),
+        service("api", { selector: { app: "api" }, port: 80, targetPort: 8080 }),
+      ],
+    }),
+    tries: [
+      {
+        title: "api Pod 하나 멈추게 하기",
+        action: { type: "sick", deployment: "api", healthy: false },
+        expect: "readiness 가 먼저 실패해 엔드포인트에서 빠지고(3초 주기 × 3번), liveness 도 3번 실패하면(5초 주기) kubelet 이 컨테이너를 죽이고 다시 띄웁니다. 새 프로세스는 멀쩡해 다시 Ready 가 됩니다. RESTARTS 가 1 오릅니다.",
+      },
+      { title: "이벤트 보기", command: "kubectl describe pod {pod:api}", expect: "Unhealthy (Readiness/Liveness probe failed) 와 Killing: Container api failed liveness probe, will be restarted 가 보입니다." },
+    ],
+  },
+  {
+    id: "drain",
+    title: "drain 과 PodDisruptionBudget",
+    summary: "노드 점검 전에 drain 으로 Pod 를 내보냅니다. PDB(minAvailable 2)가 있으면 Ready 가 2개 밑으로 떨어지는 내보내기는 거절되고, 5초 뒤 다시 시도합니다.",
+    build: () => ({
+      // 노드 2대에 3개 → worker-1 에 2개가 가서, 두 번째 내보내기가 PDB 에 막히는 것이 보인다
+      nodes: [node("worker-1"), node("worker-2")],
+      manifests: [
+        deployment("web", { replicas: 3, image: "nginx:1.27", cpu: 300, memory: 128, port: 80 }),
+        pdb("web-pdb", { app: "web" }, { minAvailable: 2 }),
+      ],
+    }),
+    tries: [
+      { title: "PDB 보기", command: "kubectl get pdb", expect: "Ready 3, 최소 2 → 지금 허용되는 중단 1개 (ALLOWED DISRUPTIONS)." },
+      {
+        title: "worker-1 비우기",
+        command: "kubectl drain worker-1 --ignore-daemonsets",
+        expect: "노드를 cordon 하고 Pod 를 Eviction API 로 내보냅니다. 허용 수가 0 이면 'Cannot evict pod as it would violate the pod's disruption budget.' 으로 거절되고 5초 뒤 다시 시도합니다. 대체 Pod 가 Ready 가 되면 다음 것을 내보냅니다.",
+      },
+      { title: "다시 쓰기", command: "kubectl uncordon worker-1", expect: "점검이 끝나면 uncordon 해야 새 Pod 가 다시 갑니다 (옮겨 간 Pod 가 돌아오지는 않습니다)." },
     ],
   },
   {
