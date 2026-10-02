@@ -47,7 +47,10 @@
 - 종료: `deletionTimestamp` → preStop → SIGTERM → grace period → SIGKILL(3단계).
 - 노드 status·heartbeat 를 API 에 올린다(배경 타이머).
 
-## 6. 네트워크 — 요청 단위 (2단계)
+## 6. 네트워크 — 요청 단위 (2단계, `src/core/net/`·`controllers/endpointslice.ts`)
+- 만든 것: ClusterIP 는 API 서버가 10.96.0.0/12 에서(10.96.0.1·.10 예약), NodePort 는 30000-32767 에서 정한다. EndpointSlice 는 Service 하나에 하나(축소판). kube-proxy 는 노드마다 Service·EndpointSlice 를 watch 해 그 노드의 규칙을 다시 쓰고(변화를 0ms 로 모아서), 요청은 **출발 노드의 규칙**으로 DNAT 된다 — 꺼진 노드의 규칙은 멈춰 있고, NotReady 전까지 엔드포인트가 남아 요청 일부가 시간 초과되는 것도 그대로 보인다.
+- 요청 흉내는 시뮬레이션 시간을 쓰지 않고 지금 상태로 한 번에 계산한다. 확률 선택은 Pod 이름 난수와 분리한 `netRng`. 컨테이너 안 도구는 curl·wget·ping·nslookup 만 있다(축소판).
+- readiness probe: kubelet 이 배경 타이머로 주기 실행, failureThreshold 연속 실패면 Ready=False, 한 번 성공하면 Ready=True. 앱의 준비 시간(`warmupMs`)과 "앱 고장"(사용자 동작)으로 실패를 만든다. liveness 는 3단계.
 - 요청 = `{ from: Pod 또는 바깥, to: 이름 또는 IP:포트 }`. 지나는 단계를 순서대로 트레이스에 남긴다:
   1. DNS(CoreDNS: Service 이름 → ClusterIP, headless 면 Pod IP들)
   2. 출발 노드의 kube-proxy 규칙: ClusterIP:포트 → KUBE-SVC 체인 → 확률(시드 고정)로 KUBE-SEP 하나 → DNAT 대상 Pod IP:포트. conntrack 처럼 같은 연결은 같은 대상

@@ -1,5 +1,5 @@
 // 화면에 그릴 모양을 클러스터에서 뽑는다 (순수 함수 — 테스트 가능).
-import { controllerOf, isNodeReady, isPodReady, NODE_LEASE_NS, type Deployment, type Node, type Pod, type ReplicaSet } from "../core/api/types";
+import { controllerOf, isNodeReady, isPodReady, NODE_LEASE_NS, SERVICE_NAME_LABEL, type Deployment, type Node, type Pod, type ReplicaSet, type Service } from "../core/api/types";
 import type { Cluster } from "../core/cluster";
 import { nodeStatusText, podReadyText, podStatusText } from "../core/kubectl";
 import { DEFAULT_TOLERATION_SECONDS } from "../core/api/server";
@@ -16,6 +16,8 @@ export interface PodView {
   ready: string;
   tone: Tone;
   restarts: number;
+  /** 사용자가 앱을 고장 낸 Pod */
+  sick: boolean;
   /** 주인 Deployment (없으면 ReplicaSet, 그것도 없으면 undefined) */
   owner?: string;
   rs?: string;
@@ -47,7 +49,16 @@ export interface DeploymentView {
   replicaSets: ReplicaSet[];
 }
 
+export interface ServiceView {
+  svc: Service;
+  name: string;
+  /** ready 인 엔드포인트의 Pod 이름 */
+  ready: string[];
+  notReady: string[];
+}
+
 export interface ClusterView {
+  services: ServiceView[];
   nodes: NodeView[];
   pending: PodView[];
   deployments: DeploymentView[];
@@ -112,6 +123,7 @@ export function buildView(c: Cluster): ClusterView {
       ready: podReadyText(p),
       tone: toneOf(p, status),
       restarts: p.status.containerStatuses.reduce((n, s) => n + s.restartCount, 0),
+      sick: c.podSick(p.metadata.name),
       owner,
       rs: ref ? rsName.get(ref.uid) : undefined,
       colorIndex: owner !== undefined ? (colorOf.get(owner) ?? hashIndex(owner)) : 0,
@@ -136,7 +148,13 @@ export function buildView(c: Cluster): ClusterView {
       pods: pods.filter((p) => p.pod.spec.nodeName === n.metadata.name).sort(byCreation),
     };
   });
+  const slices = c.api.list("EndpointSlice", "default");
+  const services: ServiceView[] = c.api.list("Service", "default").map((svc) => {
+    const eps = slices.filter((s) => s.metadata.labels[SERVICE_NAME_LABEL] === svc.metadata.name).flatMap((s) => s.endpoints);
+    return { svc, name: svc.metadata.name, ready: eps.filter((e) => e.conditions.ready).map((e) => e.targetRef.name), notReady: eps.filter((e) => !e.conditions.ready).map((e) => e.targetRef.name) };
+  });
   return {
+    services,
     nodes,
     pending: pods.filter((p) => !p.pod.spec.nodeName).sort(byCreation),
     deployments: deps.map((d) => ({
@@ -227,8 +245,9 @@ export const CONTROL_PLANE = [
     id: "controller-manager",
     title: "kube-controller-manager",
     role: "원하는 상태와 지금 상태를 맞추는 컨트롤러들",
-    actors: ["deployment-controller", "replicaset-controller", "garbage-collector", "pod-garbage-collector"],
+    actors: ["deployment-controller", "replicaset-controller", "endpointslice-controller", "garbage-collector", "pod-garbage-collector", "node-lifecycle-controller", "taint-eviction-controller"],
   },
+  { id: "coredns", title: "CoreDNS", role: "Service 이름 → ClusterIP (kube-dns 10.96.0.10). 실제로는 kube-system 의 Pod — 축소판", actors: ["coredns"] },
 ] as const;
 
 export function lastByActor(events: TraceEvent[], actors: readonly string[], skipKinds: (k: string) => boolean = () => false): TraceEvent | undefined {

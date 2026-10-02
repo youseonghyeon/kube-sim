@@ -36,7 +36,10 @@
 - 예제: "Deployment 하나 (replicas 3)", "자리가 모자란 클러스터 (Pending)", "크래시하는 앱 (CrashLoopBackOff)", "노드 하나 죽이기"
 - 완료 기준: 각 예제의 학습 포인트가 트레이스·kubectl 출력으로 재현되고 vitest 로 고정된다
 
-## 2. Service 와 Pod 네트워킹
+## 2. Service 와 Pod 네트워킹 (대부분 됨 2026-10-02)
+- 된 것: Service(ClusterIP·NodePort, API 서버가 주소 할당), EndpointSlice 컨트롤러(ready·terminating), 노드마다 kube-proxy(iptables 규칙 — `iptables-save` 모양, 확률 1/n), CoreDNS(search 도메인·ndots:5), 요청 흉내(`kubectl exec <pod> -- curl|ping|nslookup`, 바깥에서 NodePort), readiness probe(앱 준비 시간·"앱 고장"), 캔버스의 Service 상자·엔드포인트 선·요청 경로 점, 예제 "Service 로 나누기"·"readiness"
+- 결정: 노드 간 Pod 트래픽은 flannel VXLAN(k3s 기본)으로 문구만 보여 준다(패킷 단위 캡슐화는 그리지 않음), kube-proxy 는 iptables 모드만, 요청은 시뮬레이션 시간을 쓰지 않는 즉시 계산(지연·재전송 없음)
+- 남은 것: conntrack(같은 연결은 같은 대상) 표시, headless Service, `externalTrafficPolicy`(4단계로 넘김)
 - 배우는 것
   - Pod IP 는 노드별 PodCIDR 에서, Pod 가 다시 생기면 IP 가 바뀐다 → 그래서 Service
   - ClusterIP 는 어디에도 없는 가상 주소: kube-proxy 가 각 노드에 깐 규칙(KUBE-SERVICES → KUBE-SVC-* → KUBE-SEP-*)으로 DNAT — 그래서 ping 은 안 되고 TCP 는 된다

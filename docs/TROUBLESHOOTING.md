@@ -17,6 +17,16 @@
 | Pod 가 지운 뒤에도 잠깐 `Terminating` | 노드에 있는 Pod 는 kubelet 이 SIGTERM 을 보내고 컨테이너가 끝난 뒤에야 사라진다 (유예 30초) | 정상. 기다리지 않으려면 `--force --grace-period=0` (컨테이너가 계속 돌 수 있어 실무에선 조심) |
 | 인스펙터에 "라이브가 매니페스트와 다릅니다" | kubectl 로 replicas·이미지를 바꿔 매니페스트(왼쪽·설정 탭)와 달라짐 | "매니페스트 다시 적용" 또는 그대로 두기 |
 
+## Service·네트워크 (2단계)
+
+| 증상 / 출력 | 원인 | 고치는 법 |
+|---|---|---|
+| `curl: (6) Could not resolve host: wbe` | 그런 Service 가 없다 (search 도메인을 다 붙여 봐도 NXDOMAIN) | Service 이름·네임스페이스를 확인 (`kubectl get svc`) |
+| ClusterIP 로 `ping` 이 100% packet loss | ClusterIP 는 어떤 장치에도 없는 가상 주소이고 kube-proxy 규칙은 TCP 포트에만 있다 | 정상. TCP 로 접속해 확인 (`curl`) |
+| `curl: (7) … Couldn't connect to server` (Service 로) | ready 인 엔드포인트가 없어 REJECT, 또는 targetPort 가 앱 포트와 다름 | `kubectl get endpoints <svc>`, Service 의 targetPort 와 컨테이너 포트 비교 |
+| `curl: (28) … Connection timed out` | Service 에 없는 포트로 보냄, 또는 꺼진 노드의 Pod 로 DNAT 됨(NotReady 전까지 엔드포인트가 남음) | 포트 확인. 노드 장애면 40초 뒤 엔드포인트에서 빠진다 |
+| Pod 가 `0/1 Running` 이고 트래픽을 안 받음 | readiness probe 가 아직(또는 계속) 실패 — `Readiness probe failed: HTTP probe failed with statuscode: 503` | 앱 준비 시간·상태 확인. Running ≠ Ready |
+
 ## 화면
 
 | 증상 | 원인 | 고치는 법 |

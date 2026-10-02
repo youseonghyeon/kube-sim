@@ -83,6 +83,7 @@ export function App() {
             onPick={(id) => {
               loadExample(id);
               sim.reset();
+              document.querySelector(".canvas")?.scrollTo(0, 0);
             }}
           />
           <button class="btn ghost" onClick={() => sim.reset()} title="지금 구성으로 시계·로그를 0 부터 다시 시작합니다">

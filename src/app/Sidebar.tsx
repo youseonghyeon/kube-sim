@@ -1,5 +1,6 @@
 // 왼쪽: 오브젝트 나무 (Deployment → ReplicaSet → Pod 수) 와 노드 목록. 고르면 인스펙터에 보인다.
-import { deployment } from "../core/cluster";
+import { deployment, service } from "../core/cluster";
+import type { ClusterView } from "../model/view";
 import { currentView, sim } from "../model/sim";
 import { addManifest, addNodeDef, clusterDef, removeNodeDef, selection, uniqueDeploymentName } from "../model/store";
 import { Icon } from "./Icons";
@@ -58,6 +59,37 @@ export function Sidebar() {
       </div>
       <div class="side-section">
         <div class="side-head">
+          <span>Service</span>
+          <button
+            class="icon-btn sm"
+            title="Service 추가 — Service 가 없는 첫 Deployment 를 가리키게 만듭니다 (kubectl expose 와 같음)"
+            aria-label="Service 추가"
+            disabled={!exposable(view)}
+            onClick={() => {
+              const d = exposable(view);
+              if (!d) return;
+              const ct = d.d.spec.template.spec.containers[0];
+              const target = ct?.ports?.[0]?.containerPort ?? 80;
+              const name = uniqueDeploymentName(d.name, "Service");
+              addManifest(service(name, { selector: d.d.spec.selector.matchLabels, port: 80, targetPort: target }));
+              selection.value = { kind: "Service", namespace: "default", name };
+            }}
+          >
+            <Icon name="plus" size={15} />
+          </button>
+        </div>
+        {view.services.map((s) => (
+          <button key={s.name} class={`tree-row${isSel("Service", s.name) ? " sel" : ""}`} data-tree={`service/${s.name}`} onClick={() => (selection.value = { kind: "Service", namespace: "default", name: s.name })}>
+            <span class="svc-swatch" />
+            <span class="tree-name">{s.name}</span>
+            <span class="tree-kind mono">{s.svc.spec.clusterIP}</span>
+            <span class={`tree-count ${s.ready.length ? "ok" : "wait"}`}>{s.ready.length}</span>
+          </button>
+        ))}
+        {!view.services.length && <div class="side-empty">없음. + 또는 kubectl expose</div>}
+      </div>
+      <div class="side-section">
+        <div class="side-head">
           <span>노드</span>
           <button
             class="icon-btn sm"
@@ -105,4 +137,9 @@ export function Sidebar() {
       </div>
     </aside>
   );
+}
+
+/** Service 가 아직 가리키지 않는 첫 Deployment */
+function exposable(view: ClusterView) {
+  return view.deployments.find((d) => !view.services.some((s) => Object.entries(s.svc.spec.selector).every(([k, v]) => d.d.spec.template.metadata.labels[k] === v)));
 }

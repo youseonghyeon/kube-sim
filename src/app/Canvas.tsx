@@ -1,12 +1,13 @@
 // 캔버스: 위에 컨트롤 플레인, 가운데 "스케줄 대기", 아래에 노드 상자들과 그 안의 Pod 칩.
 // 자리 배치는 자동이다 (끌어 놓지 않는다) — 무엇이 어디에 있는지는 스케줄러가 정하는 것이 학습 포인트라서.
 import { computed } from "@preact/signals";
-import { useMemo } from "preact/hooks";
+import { useMemo, useRef } from "preact/hooks";
+import { Overlay } from "./Overlay";
 import { fmtCpu, fmtMem } from "../core/units";
 import { Icon } from "./Icons";
 import { currentView, running, sim, simTime, simVersion, speed } from "../model/sim";
 import { selection } from "../model/store";
-import { CONTROL_PLANE, lastByActor, nodeStory, recentFlashes, refKey, type ClusterView, type NodeView, type PodView } from "../model/view";
+import { CONTROL_PLANE, lastByActor, nodeStory, recentFlashes, refKey, type ClusterView, type NodeView, type PodView, type ServiceView } from "../model/view";
 
 const canvasTick = computed(() => Math.floor(simTime.value / (100 * Math.max(1, speed.value))));
 
@@ -25,9 +26,23 @@ export function Canvas() {
   const sel = selection.value;
   const focus = focusOf(view, sel);
 
+  const main = useRef<HTMLElement>(null);
   return (
-    <main class="canvas" onClick={() => (selection.value = null)}>
+    <main class="canvas" ref={main} onClick={() => (selection.value = null)}>
       <ControlPlane now={now} windowMs={windowMs} version={version} />
+      {view.services.length > 0 && (
+        <section class="svcs" aria-label="Service">
+          <div class="lane-head">
+            <span class="lane-title">Service</span>
+            <span class="lane-sub">어느 노드에도 붙어 있지 않은 가상 주소 — 각 노드의 kube-proxy 가 써 둔 iptables 규칙이 Pod IP 로 바꿉니다</span>
+          </div>
+          <div class="svc-row">
+            {view.services.map((s) => (
+              <ServiceBox key={s.name} s={s} selected={sel?.kind === "Service" && sel.name === s.name} />
+            ))}
+          </div>
+        </section>
+      )}
       <section class={`lane${view.pending.length ? " has" : ""}`} aria-label="스케줄 대기">
         <div class="lane-head">
           <span class="lane-title">스케줄 대기</span>
@@ -46,6 +61,7 @@ export function Canvas() {
         {!view.nodes.length && <div class="empty-note">노드가 없습니다. 왼쪽 '노드' 의 + 로 더하세요.</div>}
       </section>
       {!running.value && <div class="paused-badge">일시정지 — Space 로 재생, → 로 한 단계</div>}
+      <Overlay root={main} view={view} version={version} />
     </main>
   );
 }
@@ -61,7 +77,36 @@ function focusOf(view: ClusterView, sel: { kind: string; name: string } | null):
   if (sel.kind === "Pod") return { pod: sel.name };
   if (sel.kind === "Deployment") return { pods: new Set(view.pods.filter((p) => p.owner === sel.name).map((p) => p.name)) };
   if (sel.kind === "ReplicaSet") return { pods: new Set(view.pods.filter((p) => p.rs === sel.name).map((p) => p.name)) };
+  if (sel.kind === "Service") {
+    const s = view.services.find((x) => x.name === sel.name);
+    if (s) return { pods: new Set([...s.ready, ...s.notReady]) };
+  }
   return {};
+}
+
+function ServiceBox({ s, selected }: { s: ServiceView; selected: boolean }) {
+  const p = s.svc.spec.ports[0];
+  const total = s.ready.length + s.notReady.length;
+  return (
+    <button
+      class={`svc${selected ? " sel" : ""}${s.ready.length ? "" : " empty"}`}
+      data-service={s.name}
+      onClick={(e) => {
+        e.stopPropagation();
+        selection.value = { kind: "Service", namespace: "default", name: s.name };
+      }}
+    >
+      <span class="svc-top">
+        <span class="svc-name">{s.name}</span>
+        <span class="svc-type">{s.svc.spec.type}</span>
+      </span>
+      <span class="svc-addr mono">
+        {s.svc.spec.clusterIP}:{p?.port} → :{p?.targetPort}
+        {p?.nodePort ? ` · NodePort ${p.nodePort}` : ""}
+      </span>
+      <span class={`svc-eps${s.ready.length ? "" : " none"}`}>{total ? `엔드포인트 ready ${s.ready.length}${s.notReady.length ? ` · not ready ${s.notReady.length}` : ""}` : "엔드포인트 없음 (셀렉터에 맞는 Pod 없음)"}</span>
+    </button>
+  );
 }
 
 function ControlPlane({ now, windowMs }: { now: number; windowMs: number; version: number }) {
@@ -187,6 +232,7 @@ function PodChip({ p, flash, focus }: { p: PodView; flash?: string; focus: Focus
       </span>
       <span class="pod-bottom">
         <span class="pod-status">{p.status}</span>
+        {p.sick && <span class="pod-sick" title="앱 고장 (사용자가 만든 상태) — /ready 와 요청이 503">고장</span>}
         {p.restarts > 0 && (
           <span class="pod-restarts" title={`재시작 ${p.restarts}번`}>
             ↻{p.restarts}

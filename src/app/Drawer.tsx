@@ -1,6 +1,7 @@
 // 아래 서랍: 이벤트 로그(트레이스) 와 kubectl 창.
 import { useSignal } from "@preact/signals";
 import { useEffect, useLayoutEffect, useRef } from "preact/hooks";
+import type { NetStep } from "../core/net/request";
 import type { TraceEvent } from "../core/trace";
 import { fmtClock } from "../core/units";
 import { kubectlHistory, sim, simVersion } from "../model/sim";
@@ -130,7 +131,9 @@ function actorGroup(actor: string): string {
   return "ctrl";
 }
 
-const QUICK = ["get pods -o wide", "get deploy", "get rs", "get nodes", "get events", "help"];
+const STEP_LABEL: Record<NetStep["kind"], string> = { dns: "DNS", dnat: "DNAT", route: "경로", response: "응답", fail: "실패" };
+
+const QUICK = ["get pods -o wide", "get svc", "get endpoints", "get deploy", "get nodes", "get events", "help"];
 
 function KubectlView() {
   const input = useSignal("");
@@ -158,6 +161,17 @@ function KubectlView() {
               <span class="term-time">{fmtClock(h.t)}</span>$ {h.command}
             </div>
             <pre class={`term-res${h.result.ok ? "" : " err"}`}>{h.result.output}</pre>
+            {h.result.net && h.result.net.steps.length > 0 && (
+              <ol class="net-steps">
+                {h.result.net.steps.map((s, i) => (
+                  <li key={i} class={`net-step k-${s.kind}`}>
+                    <span class="net-kind">{STEP_LABEL[s.kind]}</span>
+                    <span class="net-actor mono">{s.actor}</span>
+                    <span class="net-text">{s.text}</span>
+                  </li>
+                ))}
+              </ol>
+            )}
           </div>
         ))}
         {!history.length && <div class="log-empty">kubectl 명령을 입력하세요. 예: get pods -o wide · describe pod &lt;이름&gt; · scale deployment/web --replicas=5</div>}

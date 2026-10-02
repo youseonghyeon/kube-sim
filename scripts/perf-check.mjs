@@ -5,7 +5,7 @@ import { chromium } from "playwright";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { build, preview } from "vite";
+import { build, createServer, preview } from "vite";
 
 const args = process.argv.slice(2);
 const headed = args.includes("--headed");
@@ -14,7 +14,10 @@ const throttle = ti >= 0 ? Number(args[ti + 1]) : 4;
 const WINDOW_MS = 6000;
 /** 이 이상이면 실패 (감속 기준). 60fps 한 프레임 16.7ms, 두 프레임 33ms */
 const BUDGET = { p95: 34, longFrames: 3 };
-const EXAMPLES = ["basics", "pending", "crashloop", "imagepull", "nodes", "stress"];
+// 예제 목록은 코드에서 읽는다 (손으로 적으면 새 예제가 빠진다)
+const dev = await createServer({ server: { middlewareMode: true }, appType: "custom", logLevel: "silent" });
+const EXAMPLES = [...(await dev.ssrLoadModule("/src/model/examples.ts")).EXAMPLES.map((e) => e.id), "stress"];
+await dev.close();
 
 const outDir = mkdtempSync(join(tmpdir(), "kube-sim-perf-"));
 await build({ logLevel: "silent", build: { outDir, emptyOutDir: true } });

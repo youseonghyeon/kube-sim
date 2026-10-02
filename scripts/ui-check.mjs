@@ -69,7 +69,7 @@ const early = await statusTexts();
 check(early.some((s) => s === "ContainerCreating"), `처음에는 ContainerCreating 이 보인다 (${early.join(", ")})`, "kubelet 의 SANDBOX_MS·pull 시간, 화면 시계(simClock)가 점프하지 않는지 확인");
 await waitFor(async () => (await statusTexts()).every((s) => s === "Running") && (await pods().count()) === 3, "3개 모두 Running");
 check(true, "3개 모두 Running");
-check((await page.locator(".cp-comp").count()) === 3, "컨트롤 플레인 구성 요소 3개", "Canvas ControlPlane");
+check((await page.locator(".cp-comp").count()) === 4, "컨트롤 플레인 구성 요소 4개 (apiserver·scheduler·controller-manager·CoreDNS)", "Canvas ControlPlane / view.ts CONTROL_PLANE");
 check((await page.locator(".try").count()) >= 3, "예제의 '해 볼 것' 이 인스펙터에 보인다", "Inspector ExamplePanel");
 await page.screenshot({ path: `${OUT}/02-running.png` });
 
@@ -143,6 +143,40 @@ await waitFor(async () => (await page.locator('[data-node="worker-2"] .pod .pod-
 await waitFor(async () => (await page.locator('.node:not([data-node="worker-2"]) .pod .pod-status').allTextContents()).filter((s) => s === "Running").length === 6, "다른 노드에 6개 Running", 20000);
 check(true, "300초 뒤 eviction → 꺼진 노드의 Pod 는 Terminating 에 멈추고 다른 노드에 6개 Running");
 await page.screenshot({ path: `${OUT}/10-node-evicted.png` });
+
+// 7) Service: client 에서 curl → 경로(DNS → DNAT → 경로 → 응답), Service 를 고르면 엔드포인트로 선
+console.log("7) Service 와 요청 경로");
+await page.click(".menu-btn");
+await page.click('.menu-item[data-example="service"]');
+await page.selectOption(".transport .speed", "5");
+await waitFor(async () => (await statusTexts()).length === 4 && (await statusTexts()).every((s) => s === "Running"), "Pod 4개 Running");
+await waitFor(async () => (await page.locator(".svc .svc-eps").textContent())?.includes("ready 3"), "엔드포인트 ready 3");
+check(true, "Service 상자에 엔드포인트 ready 3");
+await page.locator(".try", { hasText: "client 에서 curl" }).locator("button").click();
+await page.waitForTimeout(1500);
+await page.screenshot({ path: `${OUT}/11-request-path.png` });
+const steps = await page.locator(".term-entry").last().locator(".net-step .net-kind").allTextContents();
+check(steps.join(",") === "DNS,DNAT,경로,응답", `요청 단계가 kubectl 창에 보인다 (${steps.join(" → ")})`, "Drawer net-steps / core net/request.ts");
+check((await page.locator(".term-res").last().textContent())?.includes("Welcome to nginx"), "curl 응답 본문이 보인다", "request.ts deliverToIp");
+check((await page.locator(".overlay .req-dot").count()) === 1, "캔버스에 요청 점이 움직인다", "Overlay RequestPath");
+await page.locator(".svc").first().click();
+await page.waitForTimeout(200);
+check((await page.locator(".overlay .ep-link").count()) === 3, "Service 를 고르면 엔드포인트 3개로 선", "Overlay links");
+await page.screenshot({ path: `${OUT}/12-service-selected.png` });
+
+// 8) readiness: 고장 낸 Pod 는 엔드포인트에서 빠진다
+console.log("8) readiness");
+await page.click(".menu-btn");
+await page.click('.menu-item[data-example="readiness"]');
+await page.selectOption(".transport .speed", "10");
+await waitFor(async () => (await page.locator(".svc .svc-eps").textContent())?.includes("ready 3"), "api 엔드포인트 ready 3 (준비 15초 뒤)", 40000);
+check(true, "준비 시간이 지나 ready 3");
+await page.locator(".try", { hasText: "고장 내기" }).locator("button").click();
+await waitFor(async () => (await page.locator(".svc .svc-eps").textContent())?.includes("not ready 1"), "고장 낸 Pod 가 not ready", 40000);
+check(true, "앱을 고장 내면 probe 실패 뒤 엔드포인트 not ready 1");
+await page.locator(".svc").first().click();
+await page.waitForTimeout(200);
+await page.screenshot({ path: `${OUT}/13-readiness.png` });
 
 check(errors.length === 0, `브라우저 오류 없음${errors.length ? `: ${errors.join(" | ")}` : ""}`, "콘솔 오류의 스택을 보고 고치세요");
 console.log(failed ? "ui-check 실패" : "ui-check 통과 — 스크린샷: .shots/");

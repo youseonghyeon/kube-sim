@@ -1,4 +1,4 @@
-// 리뷰 2 — 노드 장애·성능 변경 재현 테스트. 각 test 는 결함 하나를 재현하며, 고치기 전에는 실패한다.
+// 리뷰 2 (2026-10-02, 노드 장애·성능 변경)에서 찾은 결함마다 하나 — 고친 뒤 회귀 방지로 남긴다.
 import { describe, expect, test } from "vitest";
 import { NODE_LEASE_NS } from "../src/core/api/types";
 import { deployment } from "../src/core/cluster";

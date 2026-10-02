@@ -1,19 +1,19 @@
 // 오른쪽 인스펙터: 고른 오브젝트의 개요·설정·describe·YAML. 아무것도 안 골랐으면 예제의 "해 볼 것".
 import { useSignal } from "@preact/signals";
 import { useEffect, useMemo } from "preact/hooks";
-import { controllerOf, isNodeReady, NODE_LEASE_NS, type Deployment, type KObject, type Node, type Pod, type ReplicaSet } from "../core/api/types";
+import { controllerOf, isNodeReady, NODE_LEASE_NS, type Deployment, type KObject, type Node, type Pod, type ReplicaSet, type Service } from "../core/api/types";
 import { eventSource, nodeStatusText, podRestartsText, podStatusText, runKubectl } from "../core/kubectl";
 import { fmtAge, fmtCpu, fmtMem, parseCpu, parseMem } from "../core/units";
 import { IMAGE_NAMES, IMAGES } from "../core/workloads";
 import { NODE_MONITOR_GRACE_MS } from "../core/controllers/nodelifecycle";
 import { exampleById, resolveCommand, type TryAction } from "../model/examples";
 import { sim, simVersion } from "../model/sim";
-import { clusterDef, drawerOpen, drawerTab, exampleId, findManifest, removeManifest, selection, updateManifest, updateNodeDef } from "../model/store";
+import { clusterDef, drawerOpen, drawerTab, exampleId, findManifest, removeManifest, selection, updateManifest, updateNodeDef, updateServiceManifest } from "../model/store";
 import { toneOf } from "../model/view";
 import { toYaml } from "../model/yaml";
 import { Icon } from "./Icons";
 
-type Tab = "overview" | "settings" | "describe" | "yaml";
+type Tab = "overview" | "settings" | "iptables" | "describe" | "yaml";
 
 export function runAndShow(cmd: string): void {
   sim.kubectl(cmd);
@@ -26,10 +26,11 @@ export function Inspector() {
   const sel = selection.value;
   const tab = useSignal<Tab>("overview");
   const obj = sel ? sim.cluster.api.get(sel.kind as KObject["kind"], sel.name, sel.namespace ?? "default") : undefined;
-  const hasSettings = obj?.kind === "Deployment" || obj?.kind === "Node";
+  const hasSettings = obj?.kind === "Deployment" || obj?.kind === "Node" || (obj?.kind === "Service" && !!findManifest("Service", obj.metadata.name));
+  const hasIptables = obj?.kind === "Node";
   useEffect(() => {
-    if (tab.value === "settings" && !hasSettings) tab.value = "overview";
-  }, [sel?.kind, sel?.name, hasSettings]);
+    if ((tab.value === "settings" && !hasSettings) || (tab.value === "iptables" && !hasIptables)) tab.value = "overview";
+  }, [sel?.kind, sel?.name, hasSettings, hasIptables]);
 
   if (!sel) return <aside class="inspector">{<ExamplePanel />}</aside>;
   if (!obj) {
@@ -48,7 +49,13 @@ export function Inspector() {
       </aside>
     );
   }
-  const tabs: [Tab, string][] = [["overview", "개요"], ...(hasSettings ? ([["settings", "설정"]] as [Tab, string][]) : []), ["describe", "describe"], ["yaml", "YAML"]];
+  const tabs: [Tab, string][] = [
+    ["overview", "개요"],
+    ...(hasSettings ? ([["settings", "설정"]] as [Tab, string][]) : []),
+    ...(hasIptables ? ([["iptables", "iptables"]] as [Tab, string][]) : []),
+    ["describe", "describe"],
+    ["yaml", "YAML"],
+  ];
   return (
     <aside class="inspector">
       <div class="insp-head">
@@ -72,6 +79,8 @@ export function Inspector() {
         {tab.value === "overview" && <Overview obj={obj} />}
         {tab.value === "settings" && obj.kind === "Deployment" && <DeploymentSettings d={obj} />}
         {tab.value === "settings" && obj.kind === "Node" && <NodeSettings n={obj} />}
+        {tab.value === "settings" && obj.kind === "Service" && <ServiceSettings name={obj.metadata.name} />}
+        {tab.value === "iptables" && obj.kind === "Node" && <IptablesView node={obj.metadata.name} />}
         {tab.value === "describe" && <pre class="term">{runKubectl(sim.cluster, `describe ${obj.kind.toLowerCase()} ${obj.metadata.name}`).output}</pre>}
         {tab.value === "yaml" && <pre class="term">{toYaml(obj)}</pre>}
       </div>
@@ -106,6 +115,10 @@ function Overview({ obj }: { obj: KObject }) {
       return <ReplicaSetOverview rs={obj} />;
     case "Node":
       return <NodeOverview n={obj} />;
+    case "Service":
+      return <ServiceOverview svc={obj} />;
+    default:
+      return null;
   }
 }
 
@@ -178,6 +191,7 @@ function PodOverview({ p }: { p: Pod }) {
   const ct = p.spec.containers[0];
   const scheduled = p.status.conditions.find((x) => x.type === "PodScheduled");
   const deleting = p.metadata.deletionTimestamp !== undefined;
+  const sick = c.podSick(p.metadata.name);
   return (
     <>
       {!p.spec.nodeName && scheduled?.status === "False" && (
@@ -220,7 +234,20 @@ function PodOverview({ p }: { p: Pod }) {
         <button class="btn ghost" onClick={() => runAndShow(`kubectl delete pod ${p.metadata.name} --force --grace-period=0`)} title="kubelet 을 기다리지 않고 API 에서 바로 지웁니다">
           강제 삭제
         </button>
+        {cs && "running" in cs.state && !deleting && (
+          <button
+            class={`btn${sick ? " danger" : ""}`}
+            onClick={() => {
+              c.setPodHealth(p.metadata.name, sick);
+              sim.touch();
+            }}
+            title="DB 연결이 끊긴 것처럼 앱이 503 을 돌려주게 합니다. readiness probe 가 있으면 Ready 가 빠집니다"
+          >
+            {sick ? "앱 고치기" : "앱 고장 내기"}
+          </button>
+        )}
       </div>
+      {cs && "running" in cs.state && !deleting && <CurlFrom pod={p.metadata.name} />}
       <h3>이벤트</h3>
       <Events uid={p.metadata.uid} />
     </>
@@ -593,5 +620,165 @@ function TryActionRow({ action }: { action: TryAction }) {
         실행
       </button>
     </div>
+  );
+}
+
+// ---------- 네트워크 ----------
+
+function CurlFrom({ pod }: { pod: string }) {
+  const services = sim.cluster.api.list("Service", "default");
+  const target = useSignal("");
+  const first = services[0] ? `http://${services[0].metadata.name}` : "";
+  const value = target.value || first;
+  return (
+    <>
+      <h3>이 Pod 에서 요청 보내기</h3>
+      <form
+        class="curl-form"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (value.trim()) runAndShow(`kubectl exec ${pod} -- curl ${value.trim()}`);
+        }}
+      >
+        <span class="mono small muted">curl</span>
+        <input class="input mono" value={value} placeholder="http://web" list="kube-sim-svc-names" onInput={(e) => (target.value = e.currentTarget.value)} />
+        <datalist id="kube-sim-svc-names">
+          {services.map((s) => (
+            <option key={s.metadata.name} value={`http://${s.metadata.name}`} />
+          ))}
+        </datalist>
+        <button class="btn sm" type="submit">
+          보내기
+        </button>
+      </form>
+      <p class="muted small">Service 이름 · ClusterIP · Pod IP 로 보내 보세요. 경로가 캔버스에 그려집니다.</p>
+    </>
+  );
+}
+
+/** 요청을 보낼 Pod: client 가 있으면 그것, 없으면 이 Service 의 엔드포인트가 아닌 돌고 있는 Pod, 그것도 없으면 아무 돌고 있는 Pod */
+function clientPodFor(svc: string): string | undefined {
+  const c = sim.cluster;
+  const running = c.api
+    .list("Pod", "default")
+    .filter((p) => p.metadata.deletionTimestamp === undefined && p.spec.nodeName && c.nodePowered(p.spec.nodeName) && p.status.containerStatuses[0] && "running" in p.status.containerStatuses[0].state);
+  const sel = c.api.get("Service", svc, "default")?.spec.selector ?? {};
+  const inSvc = (labels: Record<string, string>) => Object.entries(sel).every(([k, v]) => labels[k] === v);
+  return (running.find((p) => p.metadata.labels.app === "client") ?? running.find((p) => !inSvc(p.metadata.labels)) ?? running[0])?.metadata.name;
+}
+
+function ServiceOverview({ svc }: { svc: Service }) {
+  const c = sim.cluster;
+  const slices = c.api.list("EndpointSlice", "default").filter((s) => s.metadata.labels["kubernetes.io/service-name"] === svc.metadata.name);
+  const eps = slices.flatMap((s) => s.endpoints);
+  const client = clientPodFor(svc.metadata.name);
+  const p = svc.spec.ports[0];
+  return (
+    <>
+      <Rows
+        rows={[
+          ["type", svc.spec.type],
+          ["ClusterIP", <span class="mono">{svc.spec.clusterIP}</span>],
+          ["포트", <span class="mono">{svc.spec.ports.map((x) => `${x.port} → ${x.targetPort}${x.nodePort ? ` (NodePort ${x.nodePort})` : ""}`).join(", ")}</span>],
+          ["selector", <span class="mono">{Object.entries(svc.spec.selector).map(([k, v]) => `${k}=${v}`).join(",") || "없음"}</span>],
+          ["DNS", <span class="mono small">{svc.metadata.name}.default.svc.cluster.local</span>],
+        ]}
+      />
+      <h3>엔드포인트 ({slices[0]?.metadata.name ?? "EndpointSlice 없음"})</h3>
+      <ul class="ep-list">
+        {eps.map((e) => (
+          <li key={e.targetRef.uid}>
+            <span class={`dot ${e.conditions.ready ? "ok" : "bad"}`} />
+            <span class="ep-main">
+              <Link kind="Pod" name={e.targetRef.name} />
+              <span class="mono small muted">{`${e.addresses[0]}:${p?.targetPort}`}</span>
+            </span>
+            <span class={e.conditions.ready ? "muted small" : "warn-text"}>{e.conditions.ready ? "ready" : e.conditions.terminating ? "terminating" : "not ready"}</span>
+          </li>
+        ))}
+        {!eps.length && <li class="muted small">셀렉터에 맞고 IP 가 있는 Pod 가 없습니다 → kube-proxy 가 REJECT 규칙을 씁니다</li>}
+      </ul>
+      <p class="muted small">ready 인 것만 kube-proxy 규칙에 들어가 트래픽을 받습니다.</p>
+      <div class="actions">
+        <button class="btn" disabled={!client} onClick={() => client && runAndShow(`kubectl exec ${client} -- curl http://${svc.metadata.name}${p && p.port !== 80 ? `:${p.port}` : ""}`)} title={client ? `${client} 에서 curl` : "요청을 보낼 돌고 있는 Pod 가 없습니다"}>
+          curl 보내기{client ? ` (${client.length > 18 ? `${client.slice(0, 16)}…` : client} 에서)` : ""}
+        </button>
+        <button class="btn ghost" disabled={!client} onClick={() => client && runAndShow(`kubectl exec ${client} -- ping ${svc.metadata.name}`)}>
+          ping
+        </button>
+      </div>
+      {svc.spec.type === "NodePort" && p?.nodePort && (
+        <>
+          <h3>바깥에서 NodePort 로</h3>
+          <div class="actions">
+            {c.api.list("Node").map((n) => (
+              <button
+                key={n.metadata.name}
+                class="btn sm"
+                onClick={() => {
+                  sim.curlNodePort(n.metadata.name, p.nodePort!);
+                  drawerTab.value = "kubectl";
+                  drawerOpen.value = true;
+                }}
+              >
+                {n.metadata.name}:{p.nodePort}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+      <h3>이벤트</h3>
+      <Events uid={svc.metadata.uid} />
+    </>
+  );
+}
+
+function ServiceSettings({ name }: { name: string }) {
+  const m = findManifest("Service", name);
+  if (!m) return <p class="note">이 Service 는 매니페스트에 없습니다 (kubectl 로 만듦).</p>;
+  const p = m.spec.ports[0]!;
+  const num = (v: string) => (/^\d+$/.test(v) && Number(v) > 0 && Number(v) < 65536 ? undefined : "1~65535 사이 숫자");
+  return (
+    <>
+      <p class="note">여기서 바꾸면 매니페스트를 고쳐 kubectl apply 한 것과 같습니다.</p>
+      <Field label="type" hint="NodePort 면 모든 노드의 30000-32767 중 한 포트가 열립니다">
+        <select class="input" value={m.spec.type} onChange={(e) => updateServiceManifest(name, (x) => (x.spec.type = e.currentTarget.value as "ClusterIP" | "NodePort"))}>
+          <option value="ClusterIP">ClusterIP</option>
+          <option value="NodePort">NodePort</option>
+        </select>
+      </Field>
+      <Field label="port" hint="ClusterIP 에서 받는 포트">
+        <TextInput value={String(p.port)} validate={num} onCommit={(v) => updateServiceManifest(name, (x) => (x.spec.ports[0]!.port = Number(v)))} />
+      </Field>
+      <Field label="targetPort" hint="Pod 의 앱이 듣는 포트. 틀리면 연결 거부">
+        <TextInput value={String(p.targetPort)} validate={num} onCommit={(v) => updateServiceManifest(name, (x) => (x.spec.ports[0]!.targetPort = Number(v)))} />
+      </Field>
+      <div class="actions">
+        <button
+          class="btn danger"
+          onClick={() => {
+            removeManifest("Service", name);
+            selection.value = null;
+          }}
+        >
+          <Icon name="trash" size={14} />
+          Service 지우기
+        </button>
+      </div>
+    </>
+  );
+}
+
+function IptablesView({ node }: { node: string }) {
+  const proxy = sim.cluster.kubeProxies.get(node);
+  const powered = sim.cluster.nodePowered(node);
+  return (
+    <>
+      <p class="note">
+        이 노드의 kube-proxy 가 써 둔 nat 테이블 (<span class="mono">iptables-save -t nat | grep KUBE</span>). 이 노드에서 나가는 요청은 이 규칙을 따라 DNAT 됩니다.
+        {!powered && " 노드가 꺼져 있어 마지막으로 쓴 규칙에서 멈춰 있습니다."}
+      </p>
+      <pre class="term">{proxy ? proxy.iptablesSave() : "kube-proxy 없음"}</pre>
+    </>
   );
 }

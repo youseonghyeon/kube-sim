@@ -489,7 +489,7 @@ pre {
 }
 .cp-row {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
 }
 .cp-comp {
@@ -526,6 +526,120 @@ pre {
   color: var(--accent);
   font-family: var(--mono);
   font-size: 11px;
+}
+
+/* Service (가상 주소 — 점선) */
+.svcs {
+  margin-bottom: 14px;
+}
+.svc-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 6px;
+}
+.svc {
+  display: grid;
+  gap: 2px;
+  min-width: 220px;
+  padding: 8px 12px;
+  border: 1.5px dashed var(--accent);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent-soft) 50%, var(--surface));
+  text-align: left;
+}
+.svc.empty {
+  border-color: var(--bad);
+  background: color-mix(in srgb, var(--bad-soft) 60%, var(--surface));
+}
+.svc.sel {
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  border-style: solid;
+}
+.svc-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.svc-name {
+  font-weight: 600;
+}
+.svc-type {
+  color: var(--ink-3);
+  font-size: 11px;
+}
+.svc-addr {
+  font-size: 11px;
+  color: var(--ink-2);
+}
+.svc-eps {
+  font-size: 11px;
+  color: var(--ok);
+}
+.svc-eps.none {
+  color: var(--bad);
+}
+
+/* 겹쳐 그리는 선·요청 경로 */
+.canvas > .overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  overflow: visible;
+}
+.ep-link {
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  opacity: 0.55;
+}
+.ep-link.not-ready {
+  stroke: var(--bad);
+  stroke-dasharray: 4 4;
+}
+.req-trail {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-dasharray: 6 5;
+  opacity: 0.8;
+}
+.req-dot {
+  fill: var(--accent);
+  stroke: var(--surface);
+  stroke-width: 2;
+  transition:
+    cx 0.45s ease-in-out,
+    cy 0.45s ease-in-out;
+}
+.req.fail .req-dot {
+  fill: var(--bad);
+}
+.req.fail .req-trail {
+  stroke: var(--bad);
+}
+.req-label {
+  display: inline-block;
+  max-width: 360px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 11px;
+  line-height: 1.4;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+}
+.req.fail .req-label {
+  border-color: var(--bad);
+}
+.pod-sick {
+  flex: none;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--bad);
+  color: #fff;
+  font-size: 10px;
 }
 
 /* 스케줄 대기 */
@@ -1104,6 +1218,89 @@ pre {
   min-width: 28px;
   text-align: center;
   font-size: 14px;
+}
+
+.ep-list {
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+}
+.ep-list li {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+.ep-main {
+  display: grid;
+  min-width: 0;
+}
+.ep-main .link {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.curl-form {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.curl-form .input {
+  flex: 1;
+  min-width: 0;
+}
+.warn-text {
+  color: var(--bad);
+  font-size: 12px;
+}
+.svc-swatch {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border: 1.5px dashed var(--accent);
+  border-radius: 2px;
+}
+.net-steps {
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 2px;
+  counter-reset: step;
+}
+.net-step {
+  counter-increment: step;
+  display: grid;
+  grid-template-columns: 46px 150px 1fr;
+  gap: 8px;
+  font-size: 12px;
+}
+.net-kind {
+  color: var(--accent);
+  font-weight: 600;
+}
+.net-kind::before {
+  content: counter(step) ". ";
+  color: var(--ink-3);
+  font-weight: 400;
+}
+.net-step.k-fail .net-kind,
+.net-step.k-fail .net-text {
+  color: var(--bad);
+}
+.net-step.k-response .net-kind {
+  color: var(--ok);
+}
+.net-actor {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink-2);
+  font-size: 11px;
+}
+.net-text {
+  color: var(--ink-2);
 }
 
 /* 해 볼 것 */

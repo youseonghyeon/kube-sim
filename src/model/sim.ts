@@ -3,6 +3,7 @@
 import { effect, signal } from "@preact/signals";
 import type { DeploymentManifest } from "../core/cluster";
 import { runKubectl, type KubectlResult } from "../core/kubectl";
+import type { NetResult } from "../core/net/request";
 import { DefSync } from "./defSync";
 import { exampleById, type TryAction } from "./examples";
 import { advanceClock, EVENT_BURST_LIMIT } from "./simClock";
@@ -27,6 +28,16 @@ export interface KubectlEntry {
   result: KubectlResult;
 }
 export const kubectlHistory = signal<KubectlEntry[]>([]);
+
+/** 방금 보낸 요청 (캔버스가 경로를 점으로 그린다) */
+export interface RequestView {
+  id: number;
+  /** 출발: Pod 이름, 또는 클러스터 밖이면 노드 이름 */
+  fromPod?: string;
+  fromOutside?: string;
+  net: NetResult;
+}
+export const lastRequest = signal<RequestView | null>(null);
 
 class SimController {
   private readonly syncer = new DefSync();
@@ -55,6 +66,7 @@ class SimController {
     this.syncer.reset(clusterDef.peek(), this.startMessage());
     simTime.value = 0;
     kubectlHistory.value = [];
+    lastRequest.value = null;
     simNotice.value = null;
     this.bump();
   }
@@ -113,6 +125,7 @@ class SimController {
     }
     const entry: KubectlEntry = { id: ++this.entrySeq, t: this.cluster.now, command: command.trim(), result };
     kubectlHistory.value = [...kubectlHistory.peek(), entry].slice(-200);
+    if (result.net) lastRequest.value = { id: entry.id, fromPod: /exec\s+(\S+)/.exec(command)?.[1], net: result.net };
     if (result.mutated) this.bump();
     return result;
   }
@@ -126,15 +139,7 @@ class SimController {
     else if (a.type === "sick") {
       c.setPodHealth(this.actionPod(a.deployment)!, a.healthy);
       this.bump();
-    } else {
-      const svc = c.api.get("Service", a.service, "default")!;
-      const port = svc.spec.ports[0]!.nodePort!;
-      const ip = c.api.get("Node", a.node)?.status.addresses[0]?.address ?? a.node;
-      const r = c.requestNodePort(a.node, port);
-      const entry: KubectlEntry = { id: ++this.entrySeq, t: c.now, command: `(클러스터 밖에서) curl http://${ip}:${port}`, result: { ok: r.ok, output: r.output, mutated: true, net: r } };
-      kubectlHistory.value = [...kubectlHistory.peek(), entry].slice(-200);
-      this.bump();
-    }
+    } else this.curlNodePort(a.node, c.api.get("Service", a.service, "default")!.spec.ports[0]!.nodePort!);
     return undefined;
   }
 
@@ -159,6 +164,22 @@ class SimController {
     return this.cluster.api
       .list("Pod", "default")
       .find((p) => p.metadata.labels.app === deployment && p.metadata.deletionTimestamp === undefined && p.status.containerStatuses[0] && "running" in p.status.containerStatuses[0].state)?.metadata.name;
+  }
+
+  /** 화면 밖 동작 뒤 다시 그리기 */
+  touch(): void {
+    this.bump();
+  }
+
+  /** 클러스터 밖에서 노드IP:NodePort 로 curl (인스펙터 버튼) */
+  curlNodePort(node: string, port: number): void {
+    const c = this.cluster;
+    const ip = c.api.get("Node", node)?.status.addresses[0]?.address ?? node;
+    const r = c.requestNodePort(node, port);
+    const entry: KubectlEntry = { id: ++this.entrySeq, t: c.now, command: `(클러스터 밖에서) curl http://${ip}:${port}`, result: { ok: r.ok, output: r.output, mutated: true, net: r } };
+    kubectlHistory.value = [...kubectlHistory.peek(), entry].slice(-200);
+    lastRequest.value = { id: entry.id, fromOutside: node, net: r };
+    this.bump();
   }
 
   setNodePower(name: string, on: boolean): void {
