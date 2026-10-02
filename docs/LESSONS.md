@@ -34,4 +34,6 @@
 - 리뷰 worktree 는 결과를 옮긴 뒤 지운다. `git add -A` 금지(worktree 가 gitlink 로 담긴다).
 
 ## kube-sim 에서
-(아직 없음)
+- (2026-10-02) 실제로 영원히 재시도하는 동작(ImagePullBackOff·CrashLoopBackOff)이 있는 시나리오에서 `runToIdle` 을 쓰면 상한까지 돌다 실패한다. 테스트는 `runFor(ms)` 로 시간을 정해 돌린다(ARCHITECTURE 1절 결정).
+- (2026-10-02) 그리드 칸 안의 `white-space: nowrap` 줄은 칸을 넓혀 옆 내용(자원 숫자·IP)을 잘라 먹는다 → 그 칸에 `grid-template-columns: minmax(0, 1fr)`. 테스트는 통과했고 스크린샷에서만 보였다.
+- (2026-10-02) 칩 안 한 줄에 상태·재시작·IP 를 다 넣으면 가장 중요한 상태 문구(CrashLoopBackOff)가 잘린다 → 오류 상태에서는 덜 중요한 것(IP)을 숨긴다.

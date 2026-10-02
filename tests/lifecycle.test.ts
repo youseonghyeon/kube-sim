@@ -179,7 +179,7 @@ describe("스케줄러", () => {
 describe("kubelet 백오프", () => {
   test("CrashLoopBackOff: 첫 재시작은 바로, 그다음 10·20·40초 … 최대 300초", () => {
     const c = cluster([{ name: "n1" }]);
-    c.apply(deployment("crash", { replicas: 1, image: "example/crash-on-start:1.0", cpu: 100, memory: 64 }));
+    c.apply(deployment("crash", { replicas: 1, image: "example/worker:1.0", cpu: 100, memory: 64 }));
     c.runFor(10 * 60_000);
     const starts = c.trace.events.filter((e) => e.kind === "kubelet.start").map((e) => e.t);
     const gaps = starts.slice(1).map((t, i) => t - starts[i]!);
@@ -194,7 +194,7 @@ describe("kubelet 백오프", () => {
 
   test("CrashLoopBackOff 동안 STATUS 와 RESTARTS", () => {
     const c = cluster([{ name: "n1" }]);
-    c.apply(deployment("crash", { replicas: 1, image: "example/crash-on-start:1.0", cpu: 100, memory: 64 }));
+    c.apply(deployment("crash", { replicas: 1, image: "example/worker:1.0", cpu: 100, memory: 64 }));
     // 시작(~3.1s) → 크래시(~5.1) → 바로 재시작(~5.4) → 크래시(~7.4) → 백오프 10초
     c.runFor(9000);
     expect(statuses(c)).toEqual(["CrashLoopBackOff"]);
@@ -219,7 +219,7 @@ describe("kubelet 백오프", () => {
 
   test("크래시 루프 중인 Pod 를 지워도 타이머가 남지 않는다 (runToIdle 이 끝난다)", () => {
     const c = cluster([{ name: "n1" }]);
-    c.apply(deployment("crash", { replicas: 1, image: "example/crash-on-start:1.0", cpu: 100, memory: 64 }));
+    c.apply(deployment("crash", { replicas: 1, image: "example/worker:1.0", cpu: 100, memory: 64 }));
     c.runFor(30_000);
     c.api.delete("Deployment", "crash", "default", "kubectl");
     c.runToIdle();

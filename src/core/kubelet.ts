@@ -60,11 +60,14 @@ export class Kubelet {
   private readonly unwatch: () => void;
   private stopped = false;
 
+  readonly def: NodeDef;
+
   constructor(
     private readonly ctx: ComponentContext,
-    readonly def: NodeDef,
+    def: NodeDef,
     index: number,
   ) {
+    this.def = { ...def };
     this.actor = `kubelet@${def.name}`;
     this.podCIDR = `10.244.${index}.0/24`;
     this.ip = `192.168.0.${10 + index}`;
@@ -99,6 +102,18 @@ export class Kubelet {
       this.actor,
     );
     this.ctx.trace.add(this.actor, "node.register", `노드 ${def.name} 등록 (cpu ${fmtCpu(def.cpu)} · memory ${fmtMem(def.memory)} · PodCIDR ${this.podCIDR}) → Ready`, { kind: "Node", name: def.name });
+  }
+
+  /** 노드 자원을 바꾼다 (실제로는 kubelet 을 새 설정으로 다시 띄우는 것) → Node status 갱신 → 스케줄러가 기다리던 Pod 를 다시 본다 */
+  resize(cpu: number, memory: number): void {
+    if (cpu === this.def.cpu && memory === this.def.memory) return;
+    this.def.cpu = cpu;
+    this.def.memory = memory;
+    this.ctx.api.patch("Node", this.def.name, undefined, this.actor, (n) => {
+      n.status.capacity = { ...n.status.capacity, cpu, memory };
+      n.status.allocatable = { ...n.status.allocatable, cpu, memory };
+    });
+    this.ctx.trace.add(this.actor, "node.register", `노드 ${this.def.name} 자원 변경 → cpu ${fmtCpu(cpu)} · memory ${fmtMem(memory)} 로 다시 보고 (축소판: 이미 올라간 Pod 는 넘쳐도 그대로)`, { kind: "Node", name: this.def.name });
   }
 
   /** 노드를 클러스터에서 뺄 때: 모든 타이머를 멈추고 더 이상 watch 하지 않는다 */

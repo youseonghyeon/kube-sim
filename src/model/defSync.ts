@@ -1,0 +1,88 @@
+// 편집 중인 정의(노드 + 매니페스트)를 살아 있는 클러스터에 반영한다 (net-sim netSync 처럼 diff).
+// 처리 순서가 곧 의미다: 노드를 먼저 더하고(새 Pod 가 갈 곳), 매니페스트를 적용하고, 지운 노드는 마지막에 뺀다.
+// 매니페스트가 바뀌면 kubectl apply 와 같다 — 라이브에서 kubectl 로 바꾼 값은 매니페스트에 있는 필드만 덮인다.
+import { Cluster, type DeploymentManifest } from "../core/cluster";
+import { stableJson } from "../core/rng";
+import type { ClusterDef } from "./examples";
+
+export class DefSync {
+  cluster = new Cluster();
+  private nodes = new Map<string, string>();
+  private manifests = new Map<string, string>();
+
+  /** 처음부터: 새 클러스터에 정의를 그대로 올린다 */
+  reset(def: ClusterDef, why: string): void {
+    this.cluster = new Cluster();
+    this.nodes.clear();
+    this.manifests.clear();
+    this.cluster.trace.add("user", "user", why);
+    this.sync(def);
+  }
+
+  /** 바뀐 것만 반영. 반영한 것이 있으면 true */
+  sync(def: ClusterDef): boolean {
+    const c = this.cluster;
+    let changed = false;
+    const wantNodes = new Map(def.nodes.map((n) => [n.name, n]));
+    for (const n of def.nodes) {
+      const prev = this.nodes.get(n.name);
+      const json = stableJson({ cpu: n.cpu, memory: n.memory });
+      if (prev === json) continue;
+      if (prev === undefined) {
+        c.addNode(n);
+        if (this.nodes.size) c.trace.add("user", "user", `노드 ${n.name} 추가`, { kind: "Node", name: n.name });
+      } else {
+        c.trace.add("user", "user", `노드 ${n.name} 자원 변경`, { kind: "Node", name: n.name });
+        c.resizeNode(n.name, n.cpu, n.memory);
+      }
+      this.nodes.set(n.name, json);
+      changed = true;
+    }
+    const wantManifests = new Map(def.manifests.map((m) => [m.metadata.name, m]));
+    for (const m of def.manifests) {
+      const json = stableJson(m);
+      if (this.manifests.get(m.metadata.name) === json) continue;
+      const r = c.apply(m, "kubectl");
+      c.trace.add("user", "user", `매니페스트 적용 (kubectl apply): deployment.apps/${m.metadata.name} ${r}`, { kind: "Deployment", namespace: "default", name: m.metadata.name });
+      this.manifests.set(m.metadata.name, json);
+      changed = true;
+    }
+    for (const name of [...this.manifests.keys()]) {
+      if (wantManifests.has(name)) continue;
+      this.manifests.delete(name);
+      if (c.api.get("Deployment", name, "default")) {
+        c.trace.add("user", "user", `매니페스트 삭제 (kubectl delete): deployment.apps/${name}`);
+        c.api.delete("Deployment", name, "default", "kubectl");
+      }
+      changed = true;
+    }
+    for (const name of [...this.nodes.keys()]) {
+      if (wantNodes.has(name)) continue;
+      this.nodes.delete(name);
+      c.trace.add("user", "user", `노드 ${name} 빼기 (kubelet 멈춤 → Node 삭제)`);
+      c.removeNode(name, "user");
+      changed = true;
+    }
+    return changed;
+  }
+
+  /** 매니페스트와 라이브 Deployment 의 replicas·이미지가 다른지 (kubectl 로 바꾼 흔적) */
+  drift(m: DeploymentManifest): string[] {
+    const live = this.cluster.api.get("Deployment", m.metadata.name, "default");
+    if (!live) return ["라이브에 없음 (kubectl 로 지워짐)"];
+    const out: string[] = [];
+    if (live.spec.replicas !== m.spec.replicas) out.push(`replicas: 매니페스트 ${m.spec.replicas} · 라이브 ${live.spec.replicas}`);
+    const mi = m.spec.template.spec.containers[0]?.image;
+    const li = live.spec.template.spec.containers[0]?.image;
+    if (mi !== li) out.push(`image: 매니페스트 ${mi} · 라이브 ${li}`);
+    const mr = m.spec.template.spec.containers[0]?.resources.requests;
+    const lr = live.spec.template.spec.containers[0]?.resources.requests;
+    if (mr && lr && (mr.cpu !== lr.cpu || mr.memory !== lr.memory)) out.push("requests 가 다름");
+    return out;
+  }
+
+  /** 다음 sync 가 이 매니페스트를 다시 적용하게 (드리프트를 매니페스트로 되돌리기) */
+  forget(name: string): void {
+    this.manifests.delete(name);
+  }
+}

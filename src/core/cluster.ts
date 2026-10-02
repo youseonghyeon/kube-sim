@@ -73,6 +73,10 @@ export class Cluster {
     if (this.api.get("Node", name)) this.api.delete("Node", name, undefined, actor);
   }
 
+  resizeNode(name: string, cpu: number, memory: number): void {
+    this.kubelets.get(name)?.resize(cpu, memory);
+  }
+
   /** kubectl apply: 없으면 만들고 있으면 spec·labels 를 바꾼다 */
   apply(m: Manifest, actor = "kubectl"): "created" | "configured" | "unchanged" {
     const ns = m.metadata.namespace ?? "default";

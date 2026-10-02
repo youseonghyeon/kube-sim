@@ -19,8 +19,7 @@ export const IMAGES: Record<string, ImageSpec> = {
   "nginx:1.28": { pullMs: 3000, sizeMB: 73, termMs: 300, description: "웹 서버 새 버전" },
   "ghcr.io/youseonghyeon/net-sim:latest": { pullMs: 4000, sizeMB: 25, termMs: 300, description: "정적 사이트 (nginx 위 net-sim)" },
   "redis:7": { pullMs: 2500, sizeMB: 45, termMs: 500, description: "인메모리 DB" },
-  "busybox:1.36": { pullMs: 1000, sizeMB: 4, termMs: 100, description: "작은 셸 이미지" },
-  "example/crash-on-start:1.0": {
+  "example/worker:1.0": {
     pullMs: 2000,
     sizeMB: 30,
     crashAfterMs: 2000,
@@ -28,6 +27,7 @@ export const IMAGES: Record<string, ImageSpec> = {
     termMs: 100,
     description: "시작 2초 뒤 설정 파일을 못 찾아 exit 1 — CrashLoopBackOff 연습용",
   },
+  "example/worker:1.1": { pullMs: 2000, sizeMB: 30, termMs: 100, description: "설정 파일 문제를 고친 버전" },
 };
 
 export function imageSpec(image: string): ImageSpec | undefined {

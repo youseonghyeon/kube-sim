@@ -1,20 +1,24 @@
 # kube-sim 코어 설계
 
-0·1단계를 시작하기 전의 설계안이다. 만들면서 바뀌면 이 문서를 먼저 고친다. "열린 결정" 은 그 단계를 시작할 때 정한다.
+0·1단계를 만들며 고친 설계다. 바뀌면 이 문서를 먼저 고친다. "열린 결정" 은 그 단계를 시작할 때 정한다.
 
 ## 1. 시계와 이벤트 큐
 - 이벤트 = `{ at(ms), seq, actor, run() }`. `at` 다음 `seq`(넣은 순서) 로 정렬 → 결정론.
 - 일반 타이머: 시계를 그 시각으로 점프시킬 수 있다. 끝이 있는 기다림(이미지 pull 3초, 재시작 백오프)에 쓴다. 핸들로 취소한다 — 끝난 일의 타이머가 남으면 시계가 엉뚱하게 뛴다(net-sim LESSONS 1).
 - 배경 타이머: 그 자체로는 시계를 움직이지 않고, 다른 일로 시간이 그 시각을 지날 때만 발화한다. 끝나지 않는 주기 동작(probe 주기, 노드 heartbeat, 컨트롤러 resync)은 반드시 이것으로. 일반 이벤트가 없으면 `runToIdle` 은 멈춘다.
-- `runToIdle(maxEvents)`, `runUntil(t)`, `step()`. 화면 애니메이션 시계는 net-sim `simClock.ts` 의 `advanceClock` 방식.
+- `runToIdle(maxEvents)`, `runUntil(t)`, `step()`.
+- **화면 시계 (결정 2026-10-02)**: 일반 이벤트가 남아 있으면 재생 속도(1× = 실제 시간)로 흐르고, 없으면 멈춘다. net-sim 처럼 다음 이벤트로 **점프하지 않는다** — 기다림 자체(pull 3초, 백오프 10초)가 배울 거리라서. 긴 기다림은 속도(최대 30×)와 "+10초"·"+1분" 으로. (`src/model/simClock.ts`)
+- **끝없는 일반 타이머 사슬 (결정)**: 크래시·이미지 pull 재시도는 실제 kubelet 처럼 영원히 계속된다. 간격이 10초부터 최대 300초라 폭주하지 않으므로 배경 타이머가 아니라 일반 타이머로 둔다(배경이면 화면 시계가 멈춰 재시작이 안 보인다). 대신 크래시 루프가 있는 구성에서는 `runToIdle` 이 끝나지 않는다 → 테스트는 `runFor(ms)` 를 쓴다.
 - 같은 순간의 여러 변화(노드를 지워 Pod 여럿이 동시에 사라짐)를 보고 판단해야 하는 곳은 0ms 타이머로 미뤄 모두 본 뒤 정한다(net-sim LESSONS 4v).
 
 ## 2. API 서버 흉내
 - 오브젝트 = `{ apiVersion, kind, metadata: { namespace, name, uid, resourceVersion, generation, labels, ownerReferences, deletionTimestamp }, spec, status }`. 필요한 필드만 둔다(학습에 쓰이는 것만).
 - 저장소: `Map<"kind/ns/name", Obj>`, 전역 `resourceVersion` 카운터. 쓰기마다 +1. `spec` 이 바뀌면 `generation` +1.
-- watch: 구독자에게 `ADDED/MODIFIED/DELETED` 를 **이벤트 큐로** 전달한다(짧은 고정 지연 — informer 지연이 보이도록, 값은 열린 결정). 콜백을 즉시 동기 호출하지 않는다(재진입 사고 방지 — net-sim LESSONS 4h·4k).
+- watch: 구독자에게 `ADDED/MODIFIED/DELETED` 를 **이벤트 큐로** 전달한다. 지연은 **100ms (결정 — 학습용, 실제는 수 ms)**: 1× 화면에서 "쓰기 → 다른 컴포넌트가 알아챔" 의 순서가 보이게. 콜백을 즉시 동기 호출하지 않는다(재진입 사고 방지 — net-sim LESSONS 4h·4k).
+- 내용이 같은 update 는 쓰지 않는다(resourceVersion·watch 없음) — 상태 갱신이 서로를 끝없이 깨우지 않게.
+- 컨트롤러는 informer 캐시 대신 API 를 직접 읽는다(축소판 — 캐시 지연·expectations 를 흉내 내지 않음).
 - 낙관적 동시성: `update` 는 받은 `resourceVersion` 이 현재와 다르면 `Conflict` → 컨트롤러가 다시 읽고 재시도.
-- 삭제: `deletionTimestamp` → (finalizer 는 나중) → 실제 삭제. ownerReference 를 따라 가비지 컬렉션(foreground/background 는 열린 결정).
+- 삭제: 노드에 올라간 Pod 는 `deletionTimestamp`(Terminating) → kubelet 이 SIGTERM·정리 후 최종 삭제. 나머지는 바로 삭제. ownerReference 가비지 컬렉션은 **background (결정)** — 주인이 사라진 뒤 watch 지연만큼 뒤에 종속물을 지운다. finalizer 는 나중.
 
 ## 3. 컨트롤러
 - 공통 틀: watch → 워크큐(같은 키는 합침) → `reconcile(key)` → 실패면 지수 백오프 재큐잉(배경이 아니라 일반 타이머 — 끝이 있다). 주기 resync 는 배경 타이머.
@@ -48,8 +52,7 @@
 - kubectl 흉내는 코어 API 위의 얇은 층(문자열 명령 → API 호출 + 실제와 같은 출력 형식). 출력 형식은 테스트로 고정한다.
 
 ## 열린 결정 (해당 단계 시작 때 사용자와)
-- watch 전달 지연 값(0ms vs 수 ms), 컨트롤러 처리 지연을 보여 줄지
-- 가비지 컬렉션 방식(background 기본 / foreground 를 보여 줄지)
+- 가비지 컬렉션 foreground 를 따로 보여 줄지
 - 노드 간 Pod 트래픽: 단순 라우팅 vs VXLAN 오버레이 시각화
 - kube-proxy 모드: iptables 만 / IPVS 비교
-- 시간 상수(이미지 pull·컨테이너 시작·heartbeat 주기)를 실제값으로 할지 학습용으로 줄일지 — 실제값이면 "+10초" 가 자주 필요하다
+- 시간 상수: **결정 (2026-10-02)** — 백오프(10초~300초)·유예 30초는 실제값, 샌드박스 0.5초·pull 2~4초·컨테이너 시작 0.3초는 학습용으로 줄임(`kubelet.ts`·`workloads.ts`). heartbeat 주기는 노드 장애를 만들 때 정한다

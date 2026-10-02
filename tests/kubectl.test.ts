@@ -90,7 +90,7 @@ describe("kubectl 으로 바꾸기", () => {
 
   test("describe pod 에 Events 가 (xN over …) 로 모인다", () => {
     const c = cluster([{ name: "n1" }]);
-    c.apply(deployment("crash", { replicas: 1, image: "example/crash-on-start:1.0", cpu: 100, memory: 64 }));
+    c.apply(deployment("crash", { replicas: 1, image: "example/worker:1.0", cpu: 100, memory: 64 }));
     c.runFor(120_000);
     const out = k(c, `describe pod ${pods(c)[0]!.metadata.name}`).output;
     expect(out).toContain("Controlled By:    ReplicaSet/crash-");
