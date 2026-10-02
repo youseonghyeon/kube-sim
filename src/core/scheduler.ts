@@ -4,6 +4,7 @@
 import { refOf } from "./api/server";
 import { isNodeReady, isPodTerminal, podRequests, type Node, type Pod, type Resources, type Taint, type Toleration } from "./api/types";
 import { nsKey, splitKey, type ComponentContext } from "./controllers/base";
+import { stableJson } from "./rng";
 import { fmtCpu, fmtMem } from "./units";
 
 export const SCHEDULER = "kube-scheduler";
@@ -33,6 +34,10 @@ export class Scheduler {
   /** 자리가 없어 기다리는 Pod (클러스터가 바뀌면 다시 큐로) */
   private readonly unschedulable = new Set<string>();
   private scheduled = false;
+  /** 기다리던 Pod 를 다시 시도하게 만든 클러스터 변화 (트레이스에 이유로 남긴다) */
+  private readonly retryWhy = new Map<string, string>();
+  /** 노드마다 스케줄에 영향을 주는 속성의 요약 — 이것이 바뀔 때만 다시 시도 (status.images 같은 변화는 무시) */
+  private readonly nodeProps = new Map<string, string>();
 
   constructor(private readonly ctx: ComponentContext) {
     ctx.api.watch("Pod", (ev) => {
@@ -50,7 +55,16 @@ export class Scheduler {
       this.enqueue(key);
     });
     ctx.api.watch("Node", (ev) => {
-      if (ev.type !== "DELETED") this.retryUnschedulable(`노드 ${ev.object.metadata.name} 이(가) 추가·변경됨`);
+      const n = ev.object;
+      if (ev.type === "DELETED") {
+        this.nodeProps.delete(n.metadata.name);
+        return;
+      }
+      const props = stableJson({ a: n.status.allocatable, u: n.spec.unschedulable ?? false, t: n.spec.taints ?? [], l: n.metadata.labels, r: isNodeReady(n) });
+      const prev = this.nodeProps.get(n.metadata.name);
+      this.nodeProps.set(n.metadata.name, props);
+      if (prev === props) return;
+      this.retryUnschedulable(prev === undefined ? `노드 ${n.metadata.name} 추가됨` : `노드 ${n.metadata.name} 의 자원·cordon·taint·라벨이 바뀜`);
     });
   }
 
@@ -61,11 +75,14 @@ export class Scheduler {
     this.ctx.clock.after(0, SCHEDULER, () => this.drain());
   }
 
-  private retryUnschedulable(_why: string): void {
+  private retryUnschedulable(why: string): void {
     if (!this.unschedulable.size) return;
     const keys = [...this.unschedulable];
     this.unschedulable.clear();
-    for (const k of keys) this.enqueue(k);
+    for (const k of keys) {
+      this.retryWhy.set(k, why);
+      this.enqueue(k);
+    }
   }
 
   private drain(): void {
@@ -79,7 +96,10 @@ export class Scheduler {
     const [ns, name] = splitKey(key);
     const api = this.ctx.api;
     const pod = api.get("Pod", name, ns);
+    const why = this.retryWhy.get(key);
+    this.retryWhy.delete(key);
     if (!pod || pod.spec.nodeName || pod.metadata.deletionTimestamp !== undefined) return;
+    const again = why ? ` (다시 시도: ${why})` : "";
     const req = podRequests(pod.spec);
     const nodes = api.list("Node");
     const pods = api.list("Pod");
@@ -100,7 +120,7 @@ export class Scheduler {
       this.ctx.trace.add(
         SCHEDULER,
         "scheduler.fail",
-        `${name} ${reqText} → 맞는 노드 없음${rejected.length ? ` (${rejected.join(" · ")})` : ""} → Pending 으로 대기, 클러스터가 바뀌면 다시 시도`,
+        `${name}${again} ${reqText} → 맞는 노드 없음${rejected.length ? ` (${rejected.join(" · ")})` : ""} → Pending 으로 대기, 클러스터가 바뀌면 다시 시도`,
         refOf(pod),
       );
       api.recordEvent(pod, "Warning", "FailedScheduling", msg, SCHEDULER);
@@ -120,7 +140,7 @@ export class Scheduler {
     this.ctx.trace.add(
       SCHEDULER,
       "scheduler.bind",
-      `${name} ${reqText} → 후보 ${fits.length}/${nodes.length}${rejected.length ? ` (제외 ${rejected.join(" · ")})` : ""} → 점수 ${ranking} → ${nodeName} 에 바인딩`,
+      `${name}${again} ${reqText} → 후보 ${fits.length}/${nodes.length}${rejected.length ? ` (제외 ${rejected.join(" · ")})` : ""} → 점수 ${ranking} → ${nodeName} 에 바인딩`,
       refOf(pod),
     );
     api.recordEvent(pod, "Normal", "Scheduled", `Successfully assigned ${ns}/${name} to ${nodeName}`, SCHEDULER);

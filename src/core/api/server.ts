@@ -50,7 +50,8 @@ export function refOf(o: KObject): { kind: Kind; namespace?: string; name: strin
   return { kind: o.kind, namespace: o.metadata.namespace, name: o.metadata.name };
 }
 
-const NAME_RE = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
+/** 이름은 DNS subdomain 규칙 (Pod·Deployment·ReplicaSet·Node): 소문자·숫자·'-'·'.', 253자 이하 */
+const NAME_RE = /^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/;
 
 export class ApiServer {
   private readonly store = new Map<string, KObject>();
@@ -92,8 +93,8 @@ export class ApiServer {
   create<K extends Kind>(draft: Draft<K>, actor: string): ObjectOf<K> {
     const kind = draft.kind as K;
     const name = draft.metadata.name;
-    if (!NAME_RE.test(name) || name.length > 63)
-      throw new ApiError("Invalid", `${kind} "${name}" is invalid: metadata.name: 소문자·숫자·'-' 만, 63자 이하여야 합니다`);
+    if (!NAME_RE.test(name) || name.length > 253)
+      throw new ApiError("Invalid", `${kind} "${name}" is invalid: metadata.name: 소문자·숫자·'-'·'.' 만, 253자 이하여야 합니다 (RFC 1123 subdomain)`);
     const namespace = CLUSTER_SCOPED.has(kind) ? undefined : (draft.metadata.namespace ?? "default");
     const key = objKey(kind, name, namespace);
     if (this.store.has(key)) throw new ApiError("AlreadyExists", `${lower(kind)} "${name}" already exists`);

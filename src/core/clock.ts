@@ -129,6 +129,12 @@ export class Clock {
     return true;
   }
 
+  private hasEventUntil(time: number): boolean {
+    const next = this.peekNextTime();
+    const bg = this.peekBackgroundTime();
+    return (next !== undefined && next <= time) || (bg !== undefined && bg <= time);
+  }
+
   /** 다음 일반 이벤트까지 (그 사이 배경 타이머 포함) 하나 처리 */
   step(): boolean {
     const next = this.peekNextTime();
@@ -140,7 +146,7 @@ export class Clock {
   runUntil(time: number, maxEvents = 100_000): number {
     let n = 0;
     while (this.stepUntil(time)) {
-      if (++n >= maxEvents) throw new Error(`runUntil: 이벤트 ${maxEvents}개 초과 — 컨트롤러가 서로를 계속 고치는 구성인지 확인하세요`);
+      if (++n >= maxEvents && this.hasEventUntil(time)) throw new Error(`runUntil: 이벤트 ${maxEvents}개 초과 — 컨트롤러가 서로를 계속 고치는 구성인지 확인하세요`);
     }
     if (time > this.now) this.now = time;
     return n;
@@ -150,7 +156,7 @@ export class Clock {
   runToIdle(maxEvents = 100_000): number {
     let n = 0;
     while (this.step()) {
-      if (++n >= maxEvents) throw new Error(`runToIdle: 이벤트 ${maxEvents}개 초과 — 끝나지 않는 일반 타이머 사슬이 있는지 확인하세요`);
+      if (++n >= maxEvents && this.peekNextTime() !== undefined) throw new Error(`runToIdle: 이벤트 ${maxEvents}개 초과 — 끝나지 않는 일반 타이머 사슬이 있는지 확인하세요`);
     }
     return n;
   }

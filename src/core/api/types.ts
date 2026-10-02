@@ -122,6 +122,8 @@ export interface Deployment {
     readyReplicas: number;
     availableReplicas: number;
     observedGeneration: number;
+    /** 새 ReplicaSet 이름이 남아 있는 다른 것과 겹치면 올려서 해시를 바꾼다 */
+    collisionCount?: number;
   };
 }
 

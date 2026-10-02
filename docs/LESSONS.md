@@ -37,3 +37,7 @@
 - (2026-10-02) 실제로 영원히 재시도하는 동작(ImagePullBackOff·CrashLoopBackOff)이 있는 시나리오에서 `runToIdle` 을 쓰면 상한까지 돌다 실패한다. 테스트는 `runFor(ms)` 로 시간을 정해 돌린다(ARCHITECTURE 1절 결정).
 - (2026-10-02) 그리드 칸 안의 `white-space: nowrap` 줄은 칸을 넓혀 옆 내용(자원 숫자·IP)을 잘라 먹는다 → 그 칸에 `grid-template-columns: minmax(0, 1fr)`. 테스트는 통과했고 스크린샷에서만 보였다.
 - (2026-10-02) 칩 안 한 줄에 상태·재시작·IP 를 다 넣으면 가장 중요한 상태 문구(CrashLoopBackOff)가 잘린다 → 오류 상태에서는 덜 중요한 것(IP)을 숨긴다.
+- (2026-10-02) 첫 리뷰(재현 테스트 13건, 높음 0)는 대부분 "실제 출력과 다른 문구·표기" 였다: YAML 의 자원 단위(250 → 250m), `status: True` 따옴표, AGE 의 긴 구간, `delete` 출력·플래그, describe 의 NewReplicaSet. kubectl 흉내를 넓힐 때는 실제 kubectl 소스의 문구·규칙(HumanDuration, delete 의 --force/--grace-period 규칙, generateName 58자)을 먼저 확인한다.
+- (2026-10-02) "모든 Node 변경에 스케줄 재시도" 는 kubelet 의 status.images 갱신에도 깨어나 이유 없는 FailedScheduling 을 또 찍었다 → 스케줄에 영향을 주는 속성(allocatable·cordon·taint·라벨·Ready)이 바뀔 때만, 그리고 트레이스에 재시도 이유를 남긴다.
+- (2026-10-02) 예제의 "해 볼 것" 순서가 학습 포인트를 지운다(앞 단계가 Pending 을 없애 뒤 단계에서 볼 게 없음) → 예제 테스트는 순서대로 실행하며 각 단계의 전제(예: Pending 이 있는지)도 단언한다.
+

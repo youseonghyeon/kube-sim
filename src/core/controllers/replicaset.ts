@@ -54,7 +54,8 @@ export class ReplicaSetController extends Controller {
   private createPod(rs: ReplicaSet): string {
     const ns = rs.metadata.namespace;
     for (;;) {
-      const name = `${rs.metadata.name}-${randomSuffix(this.rng)}`;
+      // generateName 처럼: 앞부분을 58자로 잘라 접미사 5자를 붙인다 (maxGeneratedNameLength)
+      const name = `${`${rs.metadata.name}-`.slice(0, 58)}${randomSuffix(this.rng)}`;
       if (this.api.get("Pod", name, ns)) continue;
       const spec = structuredClone(rs.spec.template.spec);
       delete spec.nodeName;

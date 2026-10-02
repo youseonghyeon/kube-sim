@@ -3,6 +3,12 @@
 import { refOf } from "../api/server";
 import { controllerOf, type Deployment, type ReplicaSet } from "../api/types";
 import { templateHash } from "../rng";
+
+/** 실제 ComputeHash(template, collisionCount) 처럼: 충돌 횟수가 있으면 해시에 섞는다 */
+export function deploymentHash(d: Deployment): string {
+  const n = d.status.collisionCount ?? 0;
+  return templateHash(n ? { template: d.spec.template, collisionCount: n } : d.spec.template);
+}
 import { Controller, nsKey, splitKey, type ComponentContext } from "./base";
 
 export const HASH_LABEL = "pod-template-hash";
@@ -21,10 +27,25 @@ export class DeploymentController extends Controller {
     const [ns, name] = splitKey(key);
     const d = this.api.get("Deployment", name, ns);
     if (!d || d.metadata.deletionTimestamp !== undefined) return;
-    const hash = templateHash(d.spec.template);
+    const hash = deploymentHash(d);
     const owned = this.api.list("ReplicaSet", ns).filter((rs) => controllerOf(rs.metadata)?.uid === d.metadata.uid);
     let cur = owned.find((rs) => rs.metadata.labels[HASH_LABEL] === hash);
     if (!cur) {
+      const taken = this.api.get("ReplicaSet", `${d.metadata.name}-${hash}`, ns);
+      if (taken && controllerOf(taken.metadata)?.uid !== d.metadata.uid) {
+        // 같은 이름의 ReplicaSet 이 아직 남아 있음 (예: 지운 Deployment 의 것을 가비지 컬렉터가 아직 안 지움) → collisionCount 를 올려 다른 해시로
+        const count = (d.status.collisionCount ?? 0) + 1;
+        this.ctx.trace.add(
+          this.name,
+          "controller.reconcile",
+          `${d.metadata.name} 새 ReplicaSet 이름 ${taken.metadata.name} 이(가) 다른 주인의 것으로 남아 있음 → collisionCount ${count} 로 해시를 바꿔 다시`,
+          refOf(d),
+        );
+        this.api.patch("Deployment", d.metadata.name, ns, this.name, (o) => {
+          o.status.collisionCount = count;
+        });
+        return; // 바뀐 Deployment 의 watch 로 다시 깨어난다
+      }
       cur = this.createReplicaSet(d, hash);
       this.ctx.trace.add(
         this.name,
@@ -32,7 +53,7 @@ export class DeploymentController extends Controller {
         `${d.metadata.name} 템플릿 해시 ${hash} 의 ReplicaSet 이 없음 → ReplicaSet ${cur.metadata.name} 생성 (replicas ${d.spec.replicas})`,
         refOf(d),
       );
-      this.api.recordEvent(d, "Normal", "ScalingReplicaSet", `Scaled up replica set ${cur.metadata.name} from 0 to ${d.spec.replicas}`, this.name);
+      if (d.spec.replicas > 0) this.api.recordEvent(d, "Normal", "ScalingReplicaSet", `Scaled up replica set ${cur.metadata.name} from 0 to ${d.spec.replicas}`, this.name);
     } else if (cur.spec.replicas !== d.spec.replicas) {
       const from = cur.spec.replicas;
       cur = this.scale(cur, d.spec.replicas);
@@ -92,6 +113,7 @@ export class DeploymentController extends Controller {
         readyReplicas: sum((rs) => rs.status.readyReplicas),
         availableReplicas: sum((rs) => rs.status.availableReplicas),
         observedGeneration: cur.metadata.generation,
+        collisionCount: cur.status.collisionCount,
       };
     });
   }

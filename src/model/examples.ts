@@ -74,18 +74,19 @@ export const EXAMPLES: Example[] = [
         expect: "FailedScheduling: 0/3 nodes are available: 3 Insufficient cpu. — 노드마다 cpu 1 중 600m 가 이미 찼고, 600m 를 더 넣을 곳이 없습니다.",
       },
       {
-        title: "requests 줄이기",
-        command: "kubectl set resources deployment/api --requests=cpu=400m",
-        expect: "새 템플릿의 ReplicaSet 이 생기고, 400m × 4 는 노드 3대(각 1 cpu)에 들어갑니다. 옛 Pod 가 사라지며 자리가 나는 순서도 보세요.",
-      },
-      {
         title: "replicas 줄이기",
         command: "kubectl scale deployment/api --replicas=3",
-        expect: "ReplicaSet 은 지울 Pod 로 아직 안 뜬 것(Pending)부터 고릅니다.",
+        expect: "ReplicaSet 은 지울 Pod 로 아직 안 뜬 것(Pending)부터 고릅니다 — Running 3개는 그대로입니다.",
       },
       {
-        title: "노드 하나 더",
-        expect: "왼쪽 '노드' 의 + 로 노드를 더하면 스케줄러가 클러스터 변화를 보고 기다리던 Pod 를 다시 시도합니다.",
+        title: "다시 4 로 늘리고 노드 하나 더",
+        command: "kubectl scale deployment/api --replicas=4",
+        expect: "새 Pod 는 다시 Pending 입니다. 왼쪽 '노드' 의 + 로 노드를 더하면 스케줄러가 클러스터 변화를 보고 기다리던 Pod 를 다시 시도합니다.",
+      },
+      {
+        title: "requests 줄이기",
+        command: "kubectl set resources deployment/api --requests=cpu=400m",
+        expect: "템플릿이 바뀌어 새 ReplicaSet 이 생깁니다. 옛 Pod 가 Terminating 으로 자리를 비우는 대로 400m Pod 가 들어갑니다.",
       },
     ],
   },

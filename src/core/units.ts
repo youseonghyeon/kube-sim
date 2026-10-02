@@ -34,7 +34,12 @@ export function fmtAge(ms: number): string {
   const h = Math.floor(m / 60);
   if (h < 8) return m % 60 ? `${h}h${m % 60}m` : `${h}h`;
   if (h < 48) return `${h}h`;
-  return `${Math.floor(h / 24)}d`;
+  if (h < 24 * 8) return h % 24 ? `${Math.floor(h / 24)}d${h % 24}h` : `${Math.floor(h / 24)}d`;
+  if (h < 24 * 365 * 2) return `${Math.floor(h / 24)}d`;
+  const y = Math.floor(h / 24 / 365);
+  const dy = Math.floor(h / 24) % 365;
+  if (h < 24 * 365 * 8) return dy ? `${y}y${dy}d` : `${y}y`;
+  return `${y}y`;
 }
 
 /** 로그의 시각: 0:12.3 */

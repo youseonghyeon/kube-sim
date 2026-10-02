@@ -101,3 +101,9 @@ describe("YAML", () => {
     );
   });
 });
+
+test("YAML: 숫자로 읽히는 문자열만 따옴표 (실제 kubectl -o yaml 처럼 cpu: \"1\", cpu: 250m)", async () => {
+  const { toYaml } = await import("../src/model/yaml");
+  expect(toYaml({ requests: { cpu: 1000, memory: 1024 } })).toBe('requests:\n  cpu: "1"\n  memory: 1Gi');
+  expect(toYaml({ v: "1.5", w: "nginx:1.27", x: "True" })).toBe('v: "1.5"\nw: nginx:1.27\nx: "True"');
+});

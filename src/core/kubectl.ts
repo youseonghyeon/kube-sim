@@ -3,7 +3,7 @@
 import { ApiError } from "./api/server";
 import { controllerOf, isNodeReady, isPodReady, podRequests, type KEvent, type Kind, type Node, type Pod } from "./api/types";
 import { deployment, type Cluster } from "./cluster";
-import { HASH_LABEL } from "./controllers/deployment";
+import { deploymentHash, HASH_LABEL } from "./controllers/deployment";
 import { nodeUsage } from "./scheduler";
 import { fmtAge, fmtClock, fmtCpu, fmtMem, parseCpu, parseMem } from "./units";
 
@@ -56,6 +56,12 @@ export function runKubectl(cluster: Cluster, line: string): KubectlResult {
   if (!args.length) return fail("kubectl 다음에 명령을 쓰세요. 예: kubectl get pods\n\n" + KUBECTL_HELP);
   const { pos, flags } = parseFlags(args);
   const cmd = pos.shift()!;
+  const ns = flags.get("n");
+  if (ns !== undefined && ns !== "default") {
+    // 축소판: 네임스페이스는 default 하나. 다른 이름은 조용히 무시하지 않고 비어 있다고 답한다 (노드는 클러스터 범위라 그대로)
+    if (cmd === "get" && !/^(no|node|nodes)$/.test(pos[0] ?? "")) return ok(`No resources found in ${ns} namespace.`);
+    if (cmd !== "get") return fail(`error: 이 시뮬레이터에는 default 네임스페이스만 있습니다 (축소판). -n ${ns} 를 빼고 다시 하세요`);
+  }
   try {
     switch (cmd) {
       case "get":
@@ -251,7 +257,9 @@ function describe(c: Cluster, pos: string[]): string {
       return describeNode(c, o);
     case "Deployment": {
       const rss = c.api.list("ReplicaSet", "default").filter((r) => controllerOf(r.metadata)?.uid === o.metadata.uid);
-      const cur = rss.find((r) => r.spec.replicas > 0 || r.status.replicas > 0) ?? rss[0];
+      // NewReplicaSet = 지금 템플릿 해시의 것 (replicas 와 상관없이)
+      const hash = deploymentHash(o);
+      const cur = rss.find((r) => r.metadata.labels[HASH_LABEL] === hash);
       const s = o.status;
       return kv([
         ["Name", o.metadata.name],
@@ -476,12 +484,22 @@ function del(c: Cluster, pos: string[], flags: Map<string, string>, line: string
   if (!names.length) throw new KubectlError(`error: 지울 이름이 필요합니다. 예: kubectl delete ${k.toLowerCase()} <이름>`);
   for (const n of names) if (!c.api.get(k, n, "default")) throw new ApiError("NotFound", `${KIND_PLURAL[k]} "${n}" not found`);
   userTrace(c, line);
-  const force = flags.get("force") === "true" && flags.get("grace-period") === "0";
+  // 실제 kubectl 처럼: --force 만 주면 유예 0, --grace-period=0 만 주면 1(즉시 아님), 그 외는 준 값 또는 Pod 의 기본값
+  const forceFlag = flags.get("force") === "true";
+  let grace: number | undefined;
+  if (flags.has("grace-period")) {
+    const g = Number(flags.get("grace-period"));
+    if (!Number.isInteger(g) || g < 0) throw new KubectlError(`error: --grace-period 는 0 이상 정수여야 합니다 (받은 값 "${flags.get("grace-period")}")`);
+    grace = g;
+  }
+  if (forceFlag && grace === undefined) grace = 0;
+  if (grace === 0 && !forceFlag) grace = 1;
+  const force = grace === 0;
   const out: string[] = [];
   if (force) out.push("Warning: Immediate deletion does not wait for confirmation that the running resource has been terminated. The resource may continue to run on the cluster indefinitely.");
   for (const n of names) {
-    c.api.delete(k, n, "default", "kubectl", force ? { gracePeriodSeconds: 0 } : {});
-    out.push(`${KIND_PREFIX[k].split(".")[0]} "${n}" ${force ? "force deleted" : "deleted"}${k !== "Pod" ? ` from default namespace` : ""}`);
+    c.api.delete(k, n, "default", "kubectl", grace !== undefined ? { gracePeriodSeconds: grace } : {});
+    out.push(`${KIND_PREFIX[k]} "${n}" ${force ? "force deleted" : "deleted"}`);
   }
   return ok(out.join("\n"), true);
 }
