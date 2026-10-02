@@ -8,7 +8,7 @@ const onNode = (c: ReturnType<typeof cluster>, n: string) => pods(c).filter((p) 
 describe("노드 장애: Lease → NotReady → taint → 300초 → eviction", () => {
   test("kubelet 은 10초마다 Lease 를 갱신한다 (kube-node-lease)", () => {
     const c = cluster();
-    c.runFor(35_000);
+    c.runFor(35_000 - c.now); // 시각 35초 (헬퍼의 runToIdle 이 kube-proxy 첫 동기화까지 시계를 움직임)
     const l = c.api.get("Lease", "worker-1", NODE_LEASE_NS)!;
     expect(l.spec.renewTime).toBe(30_000);
     expect(runKubectl(c, "get leases -n kube-node-lease").output).toMatch(/^NAME\s+HOLDER\s+AGE\s+RENEWED\nworker-1\s+worker-1\s+35s\s+5s ago/);

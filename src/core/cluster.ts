@@ -11,6 +11,7 @@ import { ReplicaSetController } from "./controllers/replicaset";
 import { Kubelet, type NodeDef } from "./kubelet";
 import { KubeProxy } from "./net/kubeproxy";
 import { simulateFromPod, simulateNodePort, type NetResult, type StepKind, type Tool } from "./net/request";
+import { Traffic } from "./net/traffic";
 import { Rng } from "./rng";
 import { Scheduler } from "./scheduler";
 import { Trace } from "./trace";
@@ -114,6 +115,24 @@ export class Cluster {
     this.kubelets.get(name)?.resize(cpu, memory);
   }
 
+  /** 지금 돌고 있는 부하 발생기 (하나만) */
+  traffic?: Traffic;
+
+  /** fromPod 에서 intervalMs 마다 curl target */
+  startTraffic(fromPod: string, target: string, intervalMs = 200): Traffic {
+    this.traffic?.stop();
+    this.trace.add("user", "user", `부하 시작: ${fromPod} 에서 ${intervalMs}ms 마다 curl ${target}`, { kind: "Pod", namespace: "default", name: fromPod });
+    this.traffic = new Traffic(this, fromPod, target, intervalMs);
+    return this.traffic;
+  }
+
+  stopTraffic(): void {
+    if (!this.traffic) return;
+    this.trace.add("user", "user", `부하 멈춤 (성공 ${this.traffic.ok} · 실패 ${this.traffic.fail})`);
+    this.traffic.stop();
+    this.traffic = undefined;
+  }
+
   /** 앱 고장 흉내 (readiness 와 요청이 503) — kubelet 이 아는 사실 */
   setPodHealth(podName: string, healthy: boolean): boolean {
     const p = this.api.get("Pod", podName, "default");
@@ -208,7 +227,19 @@ export function service(name: string, opts: { selector: Record<string, string>; 
 /** 예제·폼에서 쓰는 단순 Deployment */
 export function deployment(
   name: string,
-  opts: { replicas: number; image: string; cpu: number; memory: number; labels?: Record<string, string>; nodeSelector?: Record<string, string>; port?: number; readiness?: Probe },
+  opts: {
+    replicas: number;
+    image: string;
+    cpu: number;
+    memory: number;
+    labels?: Record<string, string>;
+    nodeSelector?: Record<string, string>;
+    port?: number;
+    readiness?: Probe;
+    liveness?: Probe;
+    /** preStop sleep 초 */
+    preStop?: number;
+  },
 ): DeploymentManifest {
   const labels = opts.labels ?? { app: name };
   const spec: PodSpec = {
@@ -219,6 +250,8 @@ export function deployment(
         resources: { requests: { cpu: opts.cpu, memory: opts.memory } },
         ...(opts.port ? { ports: [{ containerPort: opts.port }] } : {}),
         ...(opts.readiness ? { readinessProbe: opts.readiness } : {}),
+        ...(opts.liveness ? { livenessProbe: opts.liveness } : {}),
+        ...(opts.preStop ? { lifecycle: { preStop: { sleep: { seconds: opts.preStop } } } } : {}),
       },
     ],
     restartPolicy: "Always",

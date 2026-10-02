@@ -52,6 +52,11 @@ interface PodRt {
   startedAt?: number;
   /** readiness probe 주기 (배경 타이머) */
   probe?: TimerHandle;
+  /** liveness probe 주기 (배경 타이머) */
+  live?: TimerHandle;
+  liveFailures: number;
+  /** SIGTERM 을 받아 새 연결을 받지 않음 (nginx 의 SIGTERM 은 빠른 종료) */
+  sigterm: boolean;
   probeFailures: number;
   probeReady: boolean;
   /** 사용자가 "앱 고장" 으로 만든 상태 — /ready 와 요청에 503 */
@@ -163,7 +168,7 @@ export class Kubelet {
     this.heartbeat?.cancel();
     for (const rt of this.pods.values()) {
       rt.timer?.cancel();
-      rt.probe?.cancel();
+      this.stopProbes(rt);
     }
     const n = this.pods.size;
     this.pods.clear();
@@ -237,7 +242,7 @@ export class Kubelet {
     this.unwatch();
     for (const rt of this.pods.values()) {
       rt.timer?.cancel();
-      rt.probe?.cancel();
+      this.stopProbes(rt);
     }
     this.pods.clear();
   }
@@ -251,7 +256,7 @@ export class Kubelet {
     if (ev.type === "DELETED") {
       if (rt) {
         rt.timer?.cancel();
-        rt.probe?.cancel();
+        this.stopProbes(rt);
         this.pods.delete(p.metadata.uid);
       }
       return;
@@ -283,6 +288,8 @@ export class Kubelet {
       probeFailures: 0,
       probeReady: false,
       sick: false,
+      liveFailures: 0,
+      sigterm: false,
     };
     this.pods.set(rt.uid, rt);
     const now = this.ctx.clock.now;
@@ -419,6 +426,9 @@ export class Kubelet {
       }
     });
     if (probe) this.scheduleProbe(rt, (probe.initialDelaySeconds ?? 0) * 1000 || (probe.periodSeconds ?? 10) * 1000);
+    const live = c.livenessProbe;
+    rt.liveFailures = 0;
+    if (live) this.scheduleLiveness(rt, (live.initialDelaySeconds ?? 0) * 1000 || (live.periodSeconds ?? 10) * 1000);
     if (spec?.crashAfterMs !== undefined) rt.timer = this.ctx.clock.after(spec.crashAfterMs, this.actor, () => this.crash(rt, spec.exitCode ?? 1));
   }
 
@@ -468,6 +478,49 @@ export class Kubelet {
     this.scheduleProbe(rt, (probe.periodSeconds ?? 10) * 1000);
   }
 
+  /** liveness: 앱이 살아 있는가 (준비 시간과는 상관없이 /healthz 는 답한다). 연속 실패면 컨테이너를 죽이고 다시 띄운다 */
+  private scheduleLiveness(rt: PodRt, delay: number): void {
+    rt.live?.cancel();
+    const epoch = this.epoch;
+    rt.live = this.ctx.clock.background(delay, this.actor, () => {
+      if (epoch !== this.epoch || rt.stage !== "running" || !this.pods.has(rt.uid)) return;
+      this.runLiveness(rt);
+    });
+  }
+
+  private runLiveness(rt: PodRt): void {
+    const p = this.livePod(rt);
+    if (!p) return;
+    const c = p.spec.containers[0]!;
+    const probe = c.livenessProbe;
+    if (!probe) return;
+    const spec = imageSpec(c.image);
+    const url = `http://${rt.ip}:${probe.httpGet.port}${probe.httpGet.path}`;
+    let fail: string | undefined;
+    if (spec?.port !== probe.httpGet.port) fail = `Get "${url}": dial tcp ${rt.ip}:${probe.httpGet.port}: connect: connection refused`;
+    else if (rt.sick) fail = "HTTP probe failed with statuscode: 503";
+    const threshold = probe.failureThreshold ?? 3;
+    if (!fail) {
+      rt.liveFailures = 0;
+      this.scheduleLiveness(rt, (probe.periodSeconds ?? 10) * 1000);
+      return;
+    }
+    rt.liveFailures++;
+    this.event(p, "Warning", "Unhealthy", `Liveness probe failed: ${fail}`);
+    if (rt.liveFailures < threshold) {
+      this.scheduleLiveness(rt, (probe.periodSeconds ?? 10) * 1000);
+      return;
+    }
+    this.event(p, "Normal", "Killing", `Container ${c.name} failed liveness probe, will be restarted`);
+    this.ctx.trace.add(this.actor, "kubelet.probe", `${rt.name} liveness probe ${threshold}번 연속 실패 (${fail}) → 컨테이너를 죽이고 다시 띄움 (재시작하면 풀리는 고장이면 이것으로 낫는다)`, refOf(p));
+    this.crash(rt, 137);
+  }
+
+  private stopProbes(rt: PodRt): void {
+    rt.probe?.cancel();
+    rt.live?.cancel();
+  }
+
   private setReady(rt: PodRt, ready: boolean, now: number): void {
     this.patchPod(rt, (o) => {
       const cs = o.status.containerStatuses[0];
@@ -491,7 +544,8 @@ export class Kubelet {
     if (!this.powered) return undefined;
     const rt = this.pods.get(podUid);
     if (!rt) return undefined;
-    const running = rt.stage === "running" || rt.stage === "terminating";
+    // 지워지는 중이라도 SIGTERM 전(preStop 중)에는 계속 요청을 받는다
+    const running = rt.stage === "running" || (rt.stage === "terminating" && !rt.sigterm);
     const p = this.ctx.api.peekList("Pod").find((x) => x.metadata.uid === podUid);
     const warmup = p ? (imageSpec(p.spec.containers[0]!.image)?.warmupMs ?? 0) : 0;
     return { running, sick: rt.sick, warm: this.ctx.clock.now - (rt.startedAt ?? 0) >= warmup };
@@ -500,7 +554,7 @@ export class Kubelet {
   private crash(rt: PodRt, exitCode: number): void {
     const p = this.livePod(rt);
     if (!p) return;
-    rt.probe?.cancel();
+    this.stopProbes(rt);
     const c = p.spec.containers[0]!;
     const now = this.ctx.clock.now;
     const ran = now - (rt.startedAt ?? now);
@@ -549,6 +603,7 @@ export class Kubelet {
     const p = this.livePod(rt);
     if (!p) return;
     rt.restarts++;
+    rt.sick = false; // 새 프로세스 — 멈춰 있던 앱은 재시작으로 풀린다
     this.event(p, "Normal", "Pulled", `Container image "${p.spec.containers[0]!.image}" already present on machine`);
     this.patchPod(rt, (o) => {
       const cs = o.status.containerStatuses[0];
@@ -559,7 +614,7 @@ export class Kubelet {
 
   private terminate(rt: PodRt, p: Pod): void {
     rt.timer?.cancel();
-    rt.probe?.cancel();
+    this.stopProbes(rt);
     const wasRunning = rt.stage === "running";
     rt.stage = "terminating";
     const c = p.spec.containers[0]!;
@@ -570,13 +625,36 @@ export class Kubelet {
       return;
     }
     this.event(p, "Normal", "Killing", `Stopping container ${c.name}`);
-    const termMs = imageSpec(c.image)?.termMs ?? 300;
-    if (termMs <= grace) {
-      this.ctx.trace.add(this.actor, "kubelet.kill", `${rt.name} 삭제 요청 → 컨테이너 ${c.name} 에 SIGTERM → 앱이 ${termMs / 1000}초 만에 종료 (유예 ${grace / 1000}초 안)`, refOf(p));
+    const preStopMs = Math.max(0, (c.lifecycle?.preStop?.sleep.seconds ?? 0) * 1000);
+    if (preStopMs > 0) {
+      if (preStopMs >= grace) {
+        this.ctx.trace.add(this.actor, "kubelet.kill", `${rt.name} 삭제 요청 → preStop sleep ${preStopMs / 1000}초가 유예 ${grace / 1000}초를 다 씀 → SIGKILL`, refOf(p));
+        rt.timer = this.ctx.clock.after(grace, this.actor, () => this.finish(rt, 137));
+        return;
+      }
+      this.ctx.trace.add(
+        this.actor,
+        "kubelet.kill",
+        `${rt.name} 삭제 요청 → preStop sleep ${preStopMs / 1000}초 — 그동안 앱은 계속 요청을 받고, 그사이 엔드포인트가 빠져 모든 노드의 규칙이 바뀐다`,
+        refOf(p),
+      );
+      rt.timer = this.ctx.clock.after(preStopMs, this.actor, () => this.sigterm(rt, c.name, c.image, grace - preStopMs));
+      return;
+    }
+    this.sigterm(rt, c.name, c.image, grace);
+  }
+
+  /** SIGTERM: 앱이 새 연결을 받지 않고 termMs 뒤 끝난다. 남은 유예 안에 안 끝나면 SIGKILL */
+  private sigterm(rt: PodRt, container: string, image: string, remaining: number): void {
+    rt.sigterm = true;
+    const termMs = imageSpec(image)?.termMs ?? 300;
+    const ref = { kind: "Pod", namespace: rt.ns, name: rt.name };
+    if (termMs <= remaining) {
+      this.ctx.trace.add(this.actor, "kubelet.kill", `${rt.name} 컨테이너 ${container} 에 SIGTERM → 앱이 새 연결을 받지 않고 ${termMs / 1000}초 만에 종료 (남은 유예 ${remaining / 1000}초 안)`, ref);
       rt.timer = this.ctx.clock.after(termMs, this.actor, () => this.finish(rt, 0));
     } else {
-      this.ctx.trace.add(this.actor, "kubelet.kill", `${rt.name} 삭제 요청 → SIGTERM → 유예 ${grace / 1000}초 안에 안 끝남 → SIGKILL`, refOf(p));
-      rt.timer = this.ctx.clock.after(grace, this.actor, () => this.finish(rt, 137));
+      this.ctx.trace.add(this.actor, "kubelet.kill", `${rt.name} SIGTERM → 남은 유예 ${remaining / 1000}초 안에 안 끝남 → SIGKILL`, ref);
+      rt.timer = this.ctx.clock.after(remaining, this.actor, () => this.finish(rt, 137));
     }
   }
 

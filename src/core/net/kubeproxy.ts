@@ -6,6 +6,13 @@ import { NODE_LEASE_NS, type EndpointSlice, type Service } from "../api/types";
 import type { ComponentContext } from "../controllers/base";
 import { stableJson } from "../rng";
 
+/**
+ * 엔드포인트가 바뀐 뒤 이 노드의 규칙에 반영되기까지 (학습용 값, 축소판).
+ * 실제로는 watch 전달 + minSyncPeriod(기본 1초) + iptables-restore 시간이 겹쳐 큰 클러스터에서 1~수 초가 걸린다.
+ * 이 틈 때문에 Pod 를 지우면 SIGTERM 으로 앱이 먼저 멈추고, 아직 남은 규칙으로 온 요청이 실패한다 (preStop sleep 으로 해결).
+ */
+export const RULE_SYNC_MS = 1000;
+
 export interface SepRule {
   chain: string;
   ip: string;
@@ -60,8 +67,8 @@ export class KubeProxy {
   private requestSync(): void {
     if (!this.powered || this.scheduled) return;
     this.scheduled = true;
-    // 같은 순간의 변화를 모아 한 번에 (실제 kube-proxy 도 minSyncPeriod 로 모아서 iptables-restore)
-    this.ctx.clock.after(0, this.actor, () => {
+    // 변화를 모아 RULE_SYNC_MS 뒤에 한 번에 iptables-restore (그사이 노드의 규칙은 옛것 그대로)
+    this.ctx.clock.after(RULE_SYNC_MS, this.actor, () => {
       this.scheduled = false;
       if (this.powered) this.sync();
     });

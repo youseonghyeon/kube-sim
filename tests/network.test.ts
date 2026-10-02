@@ -102,6 +102,9 @@ describe("Service · EndpointSlice · kube-proxy", () => {
     const slice = c.api.list("EndpointSlice")[0]!;
     const e = slice.endpoints.find((x) => x.targetRef.name === victim.metadata.name);
     expect(e?.conditions).toMatchObject({ ready: false, terminating: true });
+    // 규칙은 RULE_SYNC_MS(1초) 뒤에 바뀐다 — 그 전에는 아직 옛 규칙
+    expect(c.kubeProxies.get("worker-1")!.currentRules[0]!.seps.map((s) => s.pod)).toContain(victim.metadata.name);
+    c.runFor(1000);
     expect(c.kubeProxies.get("worker-1")!.currentRules[0]!.seps.map((s) => s.pod)).not.toContain(victim.metadata.name);
     c.runFor(10_000);
     expect(c.kubeProxies.get("worker-1")!.currentRules[0]!.seps).toHaveLength(3);

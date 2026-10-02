@@ -23,7 +23,7 @@ describe("Service 주소 할당 (API 서버)", () => {
   test("ClusterIP → NodePort 로 apply 하면 nodePort 가 할당된다", () => {
     const c = webWithService();
     c.apply(service("web", { selector: { app: "web" }, port: 80, type: "NodePort" }));
-    c.runFor(1000);
+    c.runFor(1500); // kube-proxy 규칙 반영 1초 (RULE_SYNC_MS)
     const np = c.api.get("Service", "web")!.spec.ports[0]!.nodePort;
     expect(np).toBeGreaterThanOrEqual(30000);
     expect(np).toBeLessThanOrEqual(32767);
