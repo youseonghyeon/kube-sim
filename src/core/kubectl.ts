@@ -1,10 +1,10 @@
 // kubectl 흉내: 문자열 명령 → API 호출 + 실제와 같은 모양의 출력. 코어 API 위의 얇은 층이다.
 // 축소판: default 네임스페이스만, 자주 쓰는 하위 명령·플래그만.
 import { ApiError } from "./api/server";
-import { controllerOf, isNodeReady, NODE_LEASE_NS, podRequests, SERVICE_NAME_LABEL, type KEvent, type Kind, type Node, type Pod } from "./api/types";
+import { controllerOf, isNodeReady, NODE_LEASE_NS, podRequests, SERVICE_NAME_LABEL, type Deployment, type KEvent, type Kind, type Node, type Pod } from "./api/types";
 import { deployment, service, type Cluster } from "./cluster";
 import type { NetResult } from "./net/request";
-import { deploymentHash, HASH_LABEL } from "./controllers/deployment";
+import { deploymentHash, HASH_LABEL, revisionOf } from "./controllers/deployment";
 import { nodeUsage } from "./scheduler";
 import { fmtAge, fmtClock, fmtCpu, fmtMem, parseCpu, parseMem } from "./units";
 
@@ -77,6 +77,7 @@ export const KUBECTL_HELP = [
   "  kubectl create deployment <이름> --image=<이미지> [--replicas=N]",
   "  kubectl scale deployment/<이름> --replicas=N",
   "  kubectl set image deployment/<이름> <컨테이너>=<이미지>",
+  "  kubectl rollout status|history|undo|restart deployment/<이름>   (undo 는 --to-revision=N)",
   "  kubectl set resources deployment/<이름> --requests=cpu=500m,memory=256Mi",
   "  kubectl delete pod|deploy|rs|svc <이름>   (pod 는 --force --grace-period=0 로 강제)",
   "  kubectl cordon|uncordon <노드>",
@@ -117,6 +118,8 @@ export function runKubectl(cluster: Cluster, line: string): KubectlResult {
       case "cordon":
       case "uncordon":
         return cordon(cluster, cmd, pos, line);
+      case "rollout":
+        return rollout(cluster, pos, flags, line);
       case "expose":
         return expose(cluster, pos, flags, line);
       case "exec":
@@ -159,7 +162,7 @@ function parseFlags(args: string[]): { pos: string[]; flags: Map<string, string>
     } else if (a.startsWith("--")) {
       const eq = a.indexOf("=");
       if (eq > 0) flags.set(a.slice(2, eq), a.slice(eq + 1));
-      else if (["replicas", "image", "requests", "grace-period", "port", "target-port", "type", "name"].includes(a.slice(2)) && args[i + 1] && !args[i + 1]!.startsWith("-")) flags.set(a.slice(2), args[++i]!);
+      else if (["replicas", "image", "requests", "grace-period", "port", "target-port", "type", "name", "to-revision"].includes(a.slice(2)) && args[i + 1] && !args[i + 1]!.startsWith("-")) flags.set(a.slice(2), args[++i]!);
       else flags.set(a.slice(2), "true");
     } else if (a.startsWith("-o")) flags.set("o", a.slice(2));
     else pos.push(a);
@@ -376,13 +379,23 @@ function describe(c: Cluster, pos: string[]): string {
         ["CreationTimestamp", fmtClock(o.metadata.creationTimestamp)],
         ["Labels", labelsText(o.metadata.labels)],
         ["Selector", Object.entries(o.spec.selector.matchLabels).map(([a, b]) => `${a}=${b}`).join(",")],
-        ["Replicas", `${o.spec.replicas} desired | ${s.updatedReplicas} updated | ${s.replicas} total | ${s.availableReplicas} available | ${Math.max(0, s.replicas - s.availableReplicas)} unavailable`],
-        ["StrategyType", "Recreate (축소판 — 롤링 업데이트는 3단계)"],
+        ["Replicas", `${o.spec.replicas} desired | ${s.updatedReplicas} updated | ${s.replicas} total | ${s.availableReplicas} available | ${s.unavailableReplicas ?? 0} unavailable`],
+        ["StrategyType", o.spec.strategy?.type ?? "RollingUpdate"],
+        ["MinReadySeconds", "0"],
+        ...(o.spec.strategy?.type === "Recreate"
+          ? []
+          : ([["RollingUpdateStrategy", `${o.spec.strategy?.rollingUpdate?.maxUnavailable ?? "25%"} max unavailable, ${o.spec.strategy?.rollingUpdate?.maxSurge ?? "25%"} max surge`]] as [string, string][])),
         ["Pod Template", ""],
         ...templateLines(o.spec.template.spec.containers[0]),
-        ["OldReplicaSets", rss.filter((r) => r !== cur).map((r) => `${r.metadata.name} (${r.status.replicas}/${r.spec.replicas} replicas created)`).join(", ") || "<none>"],
-        ["NewReplicaSet", cur ? `${cur.metadata.name} (${cur.status.replicas}/${cur.spec.replicas} replicas created)` : "<none>"],
-      ]) + eventsBlock(c, o.metadata.uid);
+      ]) +
+        "\nConditions:\n" +
+        table(["  Type", "Status", "Reason"], [["  ----", "------", "------"], ...(s.conditions ?? []).map((x) => [`  ${x.type}`, x.status, x.reason ?? ""])]) +
+        "\n" +
+        kv([
+          ["OldReplicaSets", rss.filter((r) => r !== cur && (r.spec.replicas > 0 || r.status.replicas > 0)).map((r) => `${r.metadata.name} (${r.status.replicas}/${r.spec.replicas} replicas created)`).join(", ") || "<none>"],
+          ["NewReplicaSet", cur ? `${cur.metadata.name} (${cur.status.replicas}/${cur.spec.replicas} replicas created)` : "<none>"],
+        ]) +
+        eventsBlock(c, o.metadata.uid);
     }
     case "Lease":
       throw new KubectlError("error: describe lease 는 아직 없습니다 — kubectl get leases -n kube-node-lease");
@@ -657,6 +670,63 @@ function cordon(c: Cluster, cmd: "cordon" | "uncordon", pos: string[], line: str
   return ok(`node/${name} ${cmd}ed`, true);
 }
 
+/** 실제 kubectl rollout status 의 한 줄 (축소판: 끝날 때까지 기다리지 않고 지금 상태만) */
+export function rolloutStatusLine(d: Deployment): { done: boolean; text: string } {
+  const n = d.metadata.name;
+  const s = d.status;
+  const prog = s.conditions?.find((x) => x.type === "Progressing");
+  if (prog?.reason === "ProgressDeadlineExceeded") return { done: true, text: `error: deployment "${n}" exceeded its progress deadline` };
+  if (s.observedGeneration < d.metadata.generation) return { done: false, text: "Waiting for deployment spec update to be observed..." };
+  if (s.updatedReplicas < d.spec.replicas) return { done: false, text: `Waiting for deployment "${n}" rollout to finish: ${s.updatedReplicas} out of ${d.spec.replicas} new replicas have been updated...` };
+  if (s.replicas > s.updatedReplicas) return { done: false, text: `Waiting for deployment "${n}" rollout to finish: ${s.replicas - s.updatedReplicas} old replicas are pending termination...` };
+  if (s.availableReplicas < s.updatedReplicas) return { done: false, text: `Waiting for deployment "${n}" rollout to finish: ${s.availableReplicas} of ${s.updatedReplicas} updated replicas are available...` };
+  return { done: true, text: `deployment "${n}" successfully rolled out` };
+}
+
+function rollout(c: Cluster, pos: string[], flags: Map<string, string>, line: string): KubectlResult {
+  const sub = pos.shift();
+  if (!sub || !["status", "history", "undo", "restart"].includes(sub)) throw new KubectlError("error: rollout 다음에 status · history · undo · restart 중 하나를 쓰세요 (축소판). 예: kubectl rollout status deployment/web");
+  const { kind, names } = resourceArgs(pos);
+  needWorkload(kind, ["Deployment"], `rollout ${sub}`);
+  const name = names[0];
+  if (!name) throw new KubectlError(`error: 이름이 필요합니다. 예: kubectl rollout ${sub} deployment/web`);
+  const d = c.api.get("Deployment", name, "default");
+  if (!d) throw new ApiError("NotFound", `deployments.apps "${name}" not found`);
+  const rss = c.api
+    .list("ReplicaSet", "default")
+    .filter((r) => controllerOf(r.metadata)?.uid === d.metadata.uid)
+    .sort((a, b) => revisionOf(a) - revisionOf(b));
+  switch (sub) {
+    case "status": {
+      const st = rolloutStatusLine(d);
+      return { ok: !st.text.startsWith("error"), output: st.done ? st.text : `${st.text}\n(축소판: 실제 kubectl 은 끝날 때까지 기다리며 줄을 더 찍습니다 — 다시 실행해 보세요)`, mutated: false };
+    }
+    case "history":
+      return ok(`deployment.apps/${name} \n${table(["REVISION", "CHANGE-CAUSE"], rss.map((r) => [String(revisionOf(r)), r.metadata.annotations?.["kubernetes.io/change-cause"] ?? "<none>"]))}`);
+    case "undo": {
+      const cur = Math.max(0, ...rss.map(revisionOf));
+      const toRev = flags.has("to-revision") ? Number(flags.get("to-revision")) : undefined;
+      const target = toRev !== undefined && toRev !== 0 ? rss.find((r) => revisionOf(r) === toRev) : [...rss].reverse().find((r) => revisionOf(r) < cur);
+      if (!target) throw new KubectlError(toRev ? `error: unable to find specified revision ${toRev} in history` : `error: no rollout history found for deployment "${name}"`);
+      if (revisionOf(target) === cur) return ok(`deployment.apps/${name} skipped rollback (current template already matches revision ${cur})`);
+      userTrace(c, line);
+      c.api.patch("Deployment", name, "default", "kubectl", (o) => {
+        const labels = { ...target.spec.template.metadata.labels };
+        delete labels[HASH_LABEL];
+        o.spec.template = { metadata: { labels, ...(target.spec.template.metadata.annotations ? { annotations: { ...target.spec.template.metadata.annotations } } : {}) }, spec: structuredClone(target.spec.template.spec) };
+      });
+      return ok(`deployment.apps/${name} rolled back`, true);
+    }
+    default: {
+      userTrace(c, line);
+      c.api.patch("Deployment", name, "default", "kubectl", (o) => {
+        o.spec.template.metadata.annotations = { ...(o.spec.template.metadata.annotations ?? {}), "kubectl.kubernetes.io/restartedAt": `sim-${fmtClock(c.now)}` };
+      });
+      return ok(`deployment.apps/${name} restarted`, true);
+    }
+  }
+}
+
 function expose(c: Cluster, pos: string[], flags: Map<string, string>, line: string): KubectlResult {
   const { kind, names } = resourceArgs(pos);
   const k = needWorkload(kind, ["Deployment"], "expose");
@@ -803,6 +873,6 @@ export function table(head: string[], rows: string[][]): string {
 
 function kv(rows: [string, string][], indent = 0): string {
   const pad = " ".repeat(indent);
-  return rows.map(([k, v]) => (v === "" ? `${pad}${k}:` : `${pad}${(k + ":").padEnd(18)}${v}`)).join("\n");
+  return rows.map(([k, v]) => (v === "" ? `${pad}${k}:` : `${pad}${(k + ":").padEnd(Math.max(18, k.length + 2))}${v}`)).join("\n");
 }
 

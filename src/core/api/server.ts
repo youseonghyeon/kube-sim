@@ -3,7 +3,7 @@
 import type { Clock } from "../clock";
 import { stableJson } from "../rng";
 import type { Trace } from "../trace";
-import { CLUSTER_SCOPED, type KEvent, type KObject, type Kind, type ObjectMeta, type ObjectOf, type Pod, type Service } from "./types";
+import { CLUSTER_SCOPED, type Deployment, type KEvent, type KObject, type Kind, type ObjectMeta, type ObjectOf, type Pod, type Service } from "./types";
 
 export type WatchType = "ADDED" | "MODIFIED" | "DELETED";
 
@@ -31,7 +31,7 @@ export const WATCH_DELAY_MS = 100;
 
 /** 만들 때 채우는 메타데이터 외의 부분 */
 export type Draft<K extends Kind> = Omit<ObjectOf<K>, "metadata" | "status"> & {
-  metadata: Pick<ObjectMeta, "name"> & Partial<Pick<ObjectMeta, "namespace" | "labels" | "ownerReferences">>;
+  metadata: Pick<ObjectMeta, "name"> & Partial<Pick<ObjectMeta, "namespace" | "labels" | "annotations" | "ownerReferences">>;
   status?: ObjectOf<K>["status"];
 };
 
@@ -121,8 +121,10 @@ export class ApiServer {
       generation: 1,
       creationTimestamp: this.clock.now,
       labels: { ...(draft.metadata.labels ?? {}) },
+      ...(draft.metadata.annotations ? { annotations: { ...draft.metadata.annotations } } : {}),
       ownerReferences: clone(draft.metadata.ownerReferences ?? []),
     };
+    if (obj.kind === "Deployment") defaultDeployment(obj as Deployment);
     if (!obj.status) obj.status = emptyStatus(kind) as ObjectOf<K>["status"];
     if (obj.kind === "Pod") addDefaultTolerations(obj as Pod);
     if (obj.kind === "Service") this.allocateServiceAddresses(obj as Service);
@@ -154,6 +156,7 @@ export class ApiServer {
     next.metadata.deletionGracePeriodSeconds = cur.metadata.deletionGracePeriodSeconds;
     next.metadata.generation = cur.metadata.generation;
     if (next.kind === "Service") this.allocateServiceAddresses(next as Service, cur as Service);
+    if (next.kind === "Deployment") defaultDeployment(next as Deployment);
     if (stableJson(next) === stableJson(cur)) return clone(cur);
     const specChanged = stableJson(next.spec) !== stableJson(cur.spec);
     if (specChanged && obj.kind !== "Lease") next.metadata.generation = cur.metadata.generation + 1;
@@ -352,6 +355,15 @@ export class ApiServer {
     const n = (++this.uidSeq).toString(16).padStart(12, "0");
     return `0000a1b2-c3d4-4e5f-8a9b-${n}`;
   }
+}
+
+/** API 서버의 기본값 채우기 (Deployment): 전략 RollingUpdate 25%/25%, progressDeadlineSeconds 600, revisionHistoryLimit 10 */
+function defaultDeployment(d: Deployment): void {
+  d.spec.strategy ??= { type: "RollingUpdate" };
+  if (d.spec.strategy.type === "RollingUpdate") d.spec.strategy.rollingUpdate ??= { maxSurge: "25%", maxUnavailable: "25%" };
+  else delete d.spec.strategy.rollingUpdate;
+  d.spec.progressDeadlineSeconds ??= 600;
+  d.spec.revisionHistoryLimit ??= 10;
 }
 
 /** 어드미션 플러그인 DefaultTolerationSeconds: 노드가 not-ready·unreachable 이 돼도 300초는 버티도록 toleration 을 붙인다 */

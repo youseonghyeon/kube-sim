@@ -17,6 +17,7 @@ export interface ObjectMeta {
   generation: number;
   creationTimestamp: number;
   labels: Record<string, string>;
+  annotations?: Record<string, string>;
   ownerReferences: OwnerReference[];
   deletionTimestamp?: number;
   deletionGracePeriodSeconds?: number;
@@ -42,6 +43,10 @@ export interface Container {
   resources: { requests: Resources };
   ports?: { containerPort: number; protocol?: "TCP" }[];
   readinessProbe?: Probe;
+  /** 실패하면 kubelet 이 컨테이너를 죽이고 다시 띄운다 */
+  livenessProbe?: Probe;
+  /** 종료 전에 실행 — SIGTERM 보다 먼저 (유예 시간에 포함) */
+  lifecycle?: { preStop?: { sleep: { seconds: number } } };
 }
 
 export interface Toleration {
@@ -84,6 +89,8 @@ export interface Condition {
   reason?: string;
   message?: string;
   lastTransitionTime: number;
+  /** Deployment 조건: 마지막으로 진전이 있던 때 */
+  lastUpdateTime?: number;
 }
 
 export type PodPhase = "Pending" | "Running" | "Succeeded" | "Failed";
@@ -106,8 +113,16 @@ export interface Pod {
 }
 
 export interface PodTemplate {
-  metadata: { labels: Record<string, string> };
+  metadata: { labels: Record<string, string>; annotations?: Record<string, string> };
   spec: PodSpec;
+}
+
+/** 25% 같은 퍼센트 문자열 또는 개수 */
+export type IntOrPercent = number | string;
+
+export interface DeploymentStrategy {
+  type: "RollingUpdate" | "Recreate";
+  rollingUpdate?: { maxSurge: IntOrPercent; maxUnavailable: IntOrPercent };
 }
 
 export interface LabelSelector {
@@ -126,10 +141,22 @@ export interface Deployment {
   apiVersion: "apps/v1";
   kind: "Deployment";
   metadata: ObjectMeta;
-  spec: { replicas: number; selector: LabelSelector; template: PodTemplate };
+  spec: {
+    replicas: number;
+    selector: LabelSelector;
+    template: PodTemplate;
+    /** 비우면 API 서버가 RollingUpdate 25%/25% 로 채운다 */
+    strategy?: DeploymentStrategy;
+    /** 이만큼 진전이 없으면 Progressing=False (ProgressDeadlineExceeded). 기본 600 */
+    progressDeadlineSeconds?: number;
+    /** 남겨 둘 옛 ReplicaSet 수. 기본 10 */
+    revisionHistoryLimit?: number;
+  };
   status: {
     replicas: number;
     updatedReplicas: number;
+    unavailableReplicas?: number;
+    conditions?: Condition[];
     readyReplicas: number;
     availableReplicas: number;
     observedGeneration: number;

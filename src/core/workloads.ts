@@ -34,6 +34,16 @@ export const IMAGES: Record<string, ImageSpec> = {
     warmupMs: 15_000,
     description: "API 서버 (포트 8080). 시작 후 15초 동안 캐시를 데우느라 /ready 가 503 — readiness probe 연습용",
   },
+  "example/api:1.1": { pullMs: 2500, sizeMB: 41, termMs: 300, port: 8080, body: '{"status":"ok","version":"1.1"}', warmupMs: 5_000, description: "API 새 버전 (포트 8080). 준비 시간 5초" },
+  "example/api:2.0": {
+    pullMs: 2500,
+    sizeMB: 42,
+    termMs: 300,
+    port: 8080,
+    body: '{"status":"ok","version":"2.0"}',
+    warmupMs: Number.POSITIVE_INFINITY,
+    description: "API 망가진 새 버전: 설정 오류로 /ready 가 계속 503 — 롤아웃이 멈추는 것을 보는 용도",
+  },
   "curlimages/curl:8.10.1": { pullMs: 1500, sizeMB: 12, termMs: 100, description: "클라이언트: sleep 으로 떠 있다가 kubectl exec 로 curl 을 보냅니다" },
   "example/worker:1.0": {
     pullMs: 2000,
