@@ -1,0 +1,26 @@
+{
+  "name": "kube-sim",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "ui-check": "node scripts/ui-check.mjs",
+    "perf-check": "node scripts/perf-check.mjs"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "^2.10.6",
+    "playwright": "^1.63.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.0",
+    "vitest": "^5.0.1"
+  },
+  "dependencies": {
+    "@preact/signals": "^2.11.2",
+    "preact": "^10.29.8"
+  }
+}
