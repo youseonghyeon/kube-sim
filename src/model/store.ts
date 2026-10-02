@@ -1,7 +1,7 @@
 // 앱 상태: 사용자가 고치는 원본(노드 + 매니페스트), 선택, 화면 설정. localStorage 에 저장한다.
 // 클러스터의 "라이브" 상태는 sim.ts 의 Cluster 가 가진다 — kubectl 로 바꾼 것은 여기(매니페스트)에 돌아오지 않는다 (실제와 같다).
 import { effect, signal } from "@preact/signals";
-import type { DeploymentManifest } from "../core/cluster";
+import type { DeploymentManifest, Manifest, ServiceManifest } from "../core/cluster";
 import type { NodeDef } from "../core/kubelet";
 import type { ObjRef } from "../core/trace";
 import { DEFAULT_EXAMPLE, exampleById, type ClusterDef } from "./examples";
@@ -86,20 +86,32 @@ export function loadExample(id: string): void {
 
 export function updateManifest(name: string, mutate: (m: DeploymentManifest) => void): void {
   const def = structuredClone(clusterDef.value);
-  const m = def.manifests.find((x) => x.metadata.name === name);
+  const m = def.manifests.find((x): x is DeploymentManifest => x.kind === "Deployment" && x.metadata.name === name);
   if (!m) return;
   mutate(m);
   clusterDef.value = def;
 }
 
-export function addManifest(m: DeploymentManifest): void {
+export function updateServiceManifest(name: string, mutate: (m: ServiceManifest) => void): void {
+  const def = structuredClone(clusterDef.value);
+  const m = def.manifests.find((x): x is ServiceManifest => x.kind === "Service" && x.metadata.name === name);
+  if (!m) return;
+  mutate(m);
+  clusterDef.value = def;
+}
+
+export function findManifest<K extends Manifest["kind"]>(kind: K, name: string): Extract<Manifest, { kind: K }> | undefined {
+  return clusterDef.value.manifests.find((x) => x.kind === kind && x.metadata.name === name) as Extract<Manifest, { kind: K }> | undefined;
+}
+
+export function addManifest(m: Manifest): void {
   const def = structuredClone(clusterDef.value);
   def.manifests.push(m);
   clusterDef.value = def;
 }
 
-export function removeManifest(name: string): void {
-  clusterDef.value = { ...clusterDef.value, manifests: clusterDef.value.manifests.filter((m) => m.metadata.name !== name) };
+export function removeManifest(kind: Manifest["kind"], name: string): void {
+  clusterDef.value = { ...clusterDef.value, manifests: clusterDef.value.manifests.filter((m) => !(m.kind === kind && m.metadata.name === name)) };
 }
 
 export function addNodeDef(): NodeDef {
@@ -120,8 +132,8 @@ export function removeNodeDef(name: string): void {
   clusterDef.value = { ...clusterDef.value, nodes: clusterDef.value.nodes.filter((n) => n.name !== name) };
 }
 
-export function uniqueDeploymentName(base: string): string {
-  const names = new Set(clusterDef.value.manifests.map((m) => m.metadata.name));
+export function uniqueDeploymentName(base: string, kind: Manifest["kind"] = "Deployment"): string {
+  const names = new Set(clusterDef.value.manifests.filter((m) => m.kind === kind).map((m) => m.metadata.name));
   if (!names.has(base)) return base;
   let i = 2;
   while (names.has(`${base}-${i}`)) i++;

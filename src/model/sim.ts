@@ -1,9 +1,10 @@
 // 편집 중인 정의를 살아 있는 클러스터에 동기화하고, 시뮬레이션 시계를 화면 프레임마다 돌린다.
 // 순수 로직은 defSync.ts(동기화) · simClock.ts(시계) 에 있고, 여기는 신호와 rAF 만 다룬다.
 import { effect, signal } from "@preact/signals";
+import type { DeploymentManifest } from "../core/cluster";
 import { runKubectl, type KubectlResult } from "../core/kubectl";
 import { DefSync } from "./defSync";
-import { exampleById } from "./examples";
+import { exampleById, type TryAction } from "./examples";
 import { advanceClock, EVENT_BURST_LIMIT } from "./simClock";
 import { buildView, type ClusterView } from "./view";
 import { clusterDef, exampleId } from "./store";
@@ -87,7 +88,7 @@ class SimController {
 
   /** 일시정지 상태에서 이벤트 하나 */
   step(): void {
-    if (!this.cluster.clock.step()) return;
+    if (!this.cluster.clock.stepAny()) return;
     simTime.value = this.cluster.now;
     this.bump();
   }
@@ -116,19 +117,63 @@ class SimController {
     return result;
   }
 
+  /** 예제 "해 볼 것" 의 kubectl 아닌 동작. 지금 할 수 없으면 이유를, 했으면 undefined */
+  runAction(a: TryAction): string | undefined {
+    const why = this.actionBlocked(a);
+    if (why) return why;
+    const c = this.cluster;
+    if (a.type === "power") this.setNodePower(a.node, a.on);
+    else if (a.type === "sick") {
+      c.setPodHealth(this.actionPod(a.deployment)!, a.healthy);
+      this.bump();
+    } else {
+      const svc = c.api.get("Service", a.service, "default")!;
+      const port = svc.spec.ports[0]!.nodePort!;
+      const ip = c.api.get("Node", a.node)?.status.addresses[0]?.address ?? a.node;
+      const r = c.requestNodePort(a.node, port);
+      const entry: KubectlEntry = { id: ++this.entrySeq, t: c.now, command: `(클러스터 밖에서) curl http://${ip}:${port}`, result: { ok: r.ok, output: r.output, mutated: true, net: r } };
+      kubectlHistory.value = [...kubectlHistory.peek(), entry].slice(-200);
+      this.bump();
+    }
+    return undefined;
+  }
+
+  actionBlocked(a: TryAction): string | undefined {
+    const c = this.cluster;
+    if (a.type === "power") {
+      if (!c.kubelets.has(a.node)) return `노드 ${a.node} 이(가) 없습니다`;
+      return c.nodePowered(a.node) === a.on ? (a.on ? "이미 켜져 있습니다" : "이미 꺼져 있습니다") : undefined;
+    }
+    if (a.type === "sick") {
+      const pod = this.actionPod(a.deployment);
+      if (!pod) return `${a.deployment} 의 Pod 가 아직 돌고 있지 않습니다`;
+      return c.podSick(pod) === !a.healthy ? (a.healthy ? "고장 난 Pod 가 없습니다" : "이미 고장 냈습니다") : undefined;
+    }
+    const svc = c.api.get("Service", a.service, "default");
+    if (!svc?.spec.ports[0]?.nodePort) return `NodePort Service ${a.service} 가 아직 없습니다 (앞 단계를 먼저)`;
+    return c.kubelets.has(a.node) ? undefined : `노드 ${a.node} 이(가) 없습니다`;
+  }
+
+  /** sick 동작의 대상: 그 Deployment 의 Pod 중 컨테이너가 도는 첫 번째 (이름순) */
+  private actionPod(deployment: string): string | undefined {
+    return this.cluster.api
+      .list("Pod", "default")
+      .find((p) => p.metadata.labels.app === deployment && p.metadata.deletionTimestamp === undefined && p.status.containerStatuses[0] && "running" in p.status.containerStatuses[0].state)?.metadata.name;
+  }
+
   setNodePower(name: string, on: boolean): void {
     this.cluster.setNodePower(name, on);
     this.bump();
   }
 
   drift(name: string): string[] {
-    const m = clusterDef.peek().manifests.find((x) => x.metadata.name === name);
+    const m = clusterDef.peek().manifests.find((x): x is DeploymentManifest => x.kind === "Deployment" && x.metadata.name === name);
     return m ? this.syncer.drift(m) : [];
   }
 
   /** 매니페스트를 다시 적용해 kubectl 로 바꾼 것을 되돌린다 */
   reapply(name: string): void {
-    this.syncer.forget(name);
+    this.syncer.forget("Deployment", name);
     if (this.syncer.sync(clusterDef.peek())) this.bump();
   }
 

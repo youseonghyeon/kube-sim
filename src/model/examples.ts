@@ -1,20 +1,27 @@
 // 예제: 노드 + 매니페스트 + "해 볼 것"(학습 포인트를 직접 확인하는 행동).
-import { deployment, type DeploymentManifest } from "../core/cluster";
+import { deployment, service, type Manifest } from "../core/cluster";
 import type { Pod } from "../core/api/types";
 import type { NodeDef } from "../core/kubelet";
 
 export interface ClusterDef {
   nodes: NodeDef[];
-  manifests: DeploymentManifest[];
+  manifests: Manifest[];
 }
 
 export interface TryStep {
   /** 무엇을 해 보나 */
   title: string;
-  /** kubectl 이 아닌 동작 (노드 전원) */
-  action?: { type: "power"; node: string; on: boolean };
+  /** kubectl 이 아닌 동작 */
+  action?:
+    | { type: "power"; node: string; on: boolean }
+    /** 클러스터 밖에서 그 노드의 NodePort 로 curl */
+    | { type: "nodeport"; node: string; service: string }
+    /** Deployment 의 첫 Pod 의 앱을 고장 내거나 고침 */
+    | { type: "sick"; deployment: string; healthy: boolean };
   /** 무엇을 보게 되나 (학습 포인트) */
   expect: string;
+  /** 실패하는 것이 학습 포인트인 명령 (예: ClusterIP 로 ping) */
+  expectFail?: boolean;
   /** 눌러서 실행할 kubectl 명령. {pod:<deploy>} 는 그 Deployment 의 첫 Pod 이름, {node:<n>} 는 n 번째 노드 이름으로 바뀐다 */
   command?: string;
 }
@@ -177,6 +184,97 @@ export const EXAMPLES: Example[] = [
     ],
   },
   {
+    id: "service",
+    title: "Service 로 Pod 3개에 나누기",
+    summary: "Pod IP 는 바뀌므로 Service 의 고정 주소(ClusterIP)로 부릅니다. 요청 하나가 DNS → iptables DNAT → 노드 간 경로 → Pod 로 가는 길을 봅니다.",
+    build: () => ({
+      nodes: [node("worker-1"), node("worker-2")],
+      manifests: [
+        deployment("web", { replicas: 3, image: "nginx:1.27", cpu: 250, memory: 128, port: 80 }),
+        deployment("client", { replicas: 1, image: "curlimages/curl:8.10.1", cpu: 50, memory: 32 }),
+        service("web", { selector: { app: "web" }, port: 80 }),
+      ],
+    }),
+    tries: [
+      {
+        title: "엔드포인트 보기",
+        command: "kubectl get endpoints web",
+        expect: "EndpointSlice 컨트롤러가 app=web 이고 Ready 인 Pod 의 IP 를 모았습니다. Service 는 이 목록을 가리키는 이름표입니다.",
+      },
+      {
+        title: "client 에서 curl (여러 번)",
+        command: "kubectl exec {pod:client} -- curl http://web",
+        expect: "DNS 가 web → ClusterIP 로 풀고, client 가 있는 노드의 iptables 규칙(kube-proxy 가 써 둔 것)이 엔드포인트 하나를 골라 DNAT 합니다. 여러 번 누르면 응답하는 Pod 가 바뀌고, 다른 노드의 Pod 면 flannel VXLAN 단계가 보입니다.",
+      },
+      {
+        title: "ClusterIP 로 ping",
+        command: "kubectl exec {pod:client} -- ping web",
+        expectFail: true,
+        expect: "실패합니다. ClusterIP 는 어떤 장치에도 없는 가상 주소이고, 규칙은 TCP 포트에만 있어 ICMP 에 답할 곳이 없습니다.",
+      },
+      {
+        title: "nslookup 으로 이름 풀기",
+        command: "kubectl exec {pod:client} -- nslookup web",
+        expect: "web 은 web.default.svc.cluster.local 로 풀립니다. Pod 의 resolv.conf 에 search 도메인이 있어서입니다 (짧은 이름은 search 를 먼저 붙여 봄 — ndots:5).",
+      },
+      {
+        title: "web Pod 하나 지우기",
+        command: "kubectl delete pod {pod:web}",
+        expect: "지운 Pod 는 엔드포인트에서 곧 빠지고, 새 Pod 가 Ready 가 되면 새 IP 로 들어갑니다. Service 주소는 그대로라 client 는 몰라도 됩니다.",
+      },
+      {
+        title: "NodePort 로 바깥에 열기",
+        command: "kubectl expose deployment web --port=80 --type=NodePort --name=web-np",
+        expect: "모든 노드의 30000-32767 중 한 포트가 열립니다.",
+      },
+      {
+        title: "바깥에서 worker-1 의 NodePort 로",
+        action: { type: "nodeport", node: "worker-1", service: "web-np" },
+        expect: "worker-1 의 규칙이 아무 노드의 Pod 로 보냅니다. 다른 노드로 갈 때 출발지 IP 가 노드 IP 로 바뀌어(SNAT) 원래 클라이언트 IP 는 사라집니다.",
+      },
+    ],
+  },
+  {
+    id: "readiness",
+    title: "readiness: Running 인데 왜 트래픽이 안 가나",
+    summary: "Running 은 컨테이너가 돈다는 뜻일 뿐입니다. readiness probe 를 통과해 Ready 가 돼야 EndpointSlice 에 들어가 트래픽을 받습니다.",
+    build: () => ({
+      nodes: [node("worker-1"), node("worker-2")],
+      manifests: [
+        deployment("api", { replicas: 3, image: "example/api:1.0", cpu: 200, memory: 128, port: 8080, readiness: { httpGet: { path: "/ready", port: 8080 }, periodSeconds: 5 } }),
+        deployment("client", { replicas: 1, image: "curlimages/curl:8.10.1", cpu: 50, memory: 32 }),
+        service("api", { selector: { app: "api" }, port: 80, targetPort: 8080 }),
+      ],
+    }),
+    tries: [
+      {
+        title: "준비 시간 지켜보기",
+        command: "kubectl get pods",
+        expect: "api Pod 는 15초 동안 캐시를 데우느라 /ready 가 503 입니다. 그동안 READY 0/1 · STATUS Running 입니다. 이때 curl 하면 has no endpoints 로 거부됩니다.",
+      },
+      {
+        title: "Ready 뒤 curl",
+        command: "kubectl exec {pod:client} -- curl http://api",
+        expect: "Ready 가 된 Pod 만 엔드포인트에 있어 요청을 받습니다.",
+      },
+      {
+        title: "api Pod 하나 고장 내기",
+        action: { type: "sick", deployment: "api", healthy: false },
+        expect: "DB 연결이 끊긴 것처럼 /ready 가 503 이 됩니다. probe 가 3번 연속 실패하면(5초 주기) Ready=False → EndpointSlice 에서 빠집니다. 컨테이너는 계속 Running 이고 재시작도 하지 않습니다 (그건 liveness 의 일).",
+      },
+      {
+        title: "엔드포인트 확인",
+        command: "kubectl get endpointslices",
+        expect: "고장 난 Pod 의 IP 는 목록에는 있지만 ready=false 입니다 (인스펙터의 Service 개요에서 보입니다). curl 을 여러 번 보내도 그 Pod 는 받지 않습니다.",
+      },
+      {
+        title: "고치기",
+        action: { type: "sick", deployment: "api", healthy: true },
+        expect: "다음 probe 가 통과하면 바로 Ready=True → 다시 엔드포인트에 들어갑니다.",
+      },
+    ],
+  },
+  {
     id: "nodes",
     title: "노드 비우기와 빼기",
     summary: "cordon 으로 새 Pod 를 막고, 노드를 빼면 그 위의 Pod 가 다른 노드로 다시 생기는 것을 봅니다.",
@@ -205,6 +303,8 @@ export const EXAMPLES: Example[] = [
 
 
 export const DEFAULT_EXAMPLE = "basics";
+
+export type TryAction = NonNullable<TryStep["action"]>;
 
 export function exampleById(id: string): Example | undefined {
   return EXAMPLES.find((e) => e.id === id);

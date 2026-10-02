@@ -1,7 +1,7 @@
 // 편집 중인 정의(노드 + 매니페스트)를 살아 있는 클러스터에 반영한다 (net-sim netSync 처럼 diff).
 // 처리 순서가 곧 의미다: 노드를 먼저 더하고(새 Pod 가 갈 곳), 매니페스트를 적용하고, 지운 노드는 마지막에 뺀다.
 // 매니페스트가 바뀌면 kubectl apply 와 같다 — 라이브에서 kubectl 로 바꾼 값은 매니페스트에 있는 필드만 덮인다.
-import { Cluster, type DeploymentManifest } from "../core/cluster";
+import { Cluster, type DeploymentManifest, type Manifest } from "../core/cluster";
 import { stableJson } from "../core/rng";
 import type { ClusterDef } from "./examples";
 
@@ -38,21 +38,24 @@ export class DefSync {
       this.nodes.set(n.name, json);
       changed = true;
     }
-    const wantManifests = new Map(def.manifests.map((m) => [m.metadata.name, m]));
-    for (const m of def.manifests) {
+    const wantManifests = new Map(def.manifests.map((m) => [manifestKey(m), m]));
+    // Deployment 를 먼저 (Service 가 가리킬 Pod 가 먼저 생기게 — 순서가 바뀌어도 결과는 같지만 로그가 읽기 쉽다)
+    for (const m of [...def.manifests].sort((a, b) => (a.kind === b.kind ? 0 : a.kind === "Deployment" ? -1 : 1))) {
+      const key = manifestKey(m);
       const json = stableJson(m);
-      if (this.manifests.get(m.metadata.name) === json) continue;
+      if (this.manifests.get(key) === json) continue;
       const r = c.apply(m, "kubectl");
-      c.trace.add("user", "user", `매니페스트 적용 (kubectl apply): deployment.apps/${m.metadata.name} ${r}`, { kind: "Deployment", namespace: "default", name: m.metadata.name });
-      this.manifests.set(m.metadata.name, json);
+      c.trace.add("user", "user", `매니페스트 적용 (kubectl apply): ${resourceName(m.kind)}/${m.metadata.name} ${r}`, { kind: m.kind, namespace: "default", name: m.metadata.name });
+      this.manifests.set(key, json);
       changed = true;
     }
-    for (const name of [...this.manifests.keys()]) {
-      if (wantManifests.has(name)) continue;
-      this.manifests.delete(name);
-      if (c.api.get("Deployment", name, "default")) {
-        c.trace.add("user", "user", `매니페스트 삭제 (kubectl delete): deployment.apps/${name}`);
-        c.api.delete("Deployment", name, "default", "kubectl");
+    for (const key of [...this.manifests.keys()]) {
+      if (wantManifests.has(key)) continue;
+      this.manifests.delete(key);
+      const [kind, name] = key.split("/") as ["Deployment" | "Service", string];
+      if (c.api.get(kind, name, "default")) {
+        c.trace.add("user", "user", `매니페스트 삭제 (kubectl delete): ${resourceName(kind)}/${name}`);
+        c.api.delete(kind, name, "default", "kubectl");
       }
       changed = true;
     }
@@ -82,7 +85,15 @@ export class DefSync {
   }
 
   /** 다음 sync 가 이 매니페스트를 다시 적용하게 (드리프트를 매니페스트로 되돌리기) */
-  forget(name: string): void {
-    this.manifests.delete(name);
+  forget(kind: Manifest["kind"], name: string): void {
+    this.manifests.delete(`${kind}/${name}`);
   }
+}
+
+export function manifestKey(m: Manifest): string {
+  return `${m.kind}/${m.metadata.name}`;
+}
+
+function resourceName(kind: Manifest["kind"]): string {
+  return kind === "Deployment" ? "deployment.apps" : "service";
 }

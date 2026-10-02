@@ -453,9 +453,11 @@ function describePod(c: Cluster, p: Pod): string {
     const cond = p.status.conditions.find((x) => x.type === t);
     return cond ? [[`  ${t}`, cond.status]] : [];
   }));
+  const tols = (p.spec.tolerations ?? []).map((t) => `${t.key}${t.effect ? `:${t.effect}` : ""} op=${t.operator ?? "Equal"}${t.value ? ` value=${t.value}` : ""}${t.tolerationSeconds !== undefined ? ` for ${t.tolerationSeconds}s` : ""}`);
   const reqs = podRequests(p.spec);
   out += `\nQoS Class:        Burstable (requests 만 있음 — cpu ${fmtCpu(reqs.cpu)}, memory ${fmtMem(reqs.memory)})`;
-  if (p.spec.nodeSelector) out += `\nNode-Selectors:   ${labelsText(p.spec.nodeSelector)}`;
+  out += `\nNode-Selectors:   ${p.spec.nodeSelector ? labelsText(p.spec.nodeSelector) : "<none>"}`;
+  out += `\nTolerations:      ${tols.join("\n                  ") || "<none>"}`;
   return out + eventsBlock(c, p.metadata.uid);
 }
 
@@ -469,7 +471,7 @@ function describeNode(c: Cluster, n: Node): string {
     ["Roles", "<none>"],
     ["Labels", labelsText(n.metadata.labels)],
     ["CreationTimestamp", fmtClock(n.metadata.creationTimestamp)],
-    ["Taints", (n.spec.taints ?? []).map((t) => `${t.key}${t.value ? `=${t.value}` : ""}:${t.effect}`).join(", ") || (n.spec.unschedulable ? "node.kubernetes.io/unschedulable:NoSchedule" : "<none>")],
+    ["Taints", nodeTaints(n).join("\n                  ") || "<none>"],
     ["Unschedulable", n.spec.unschedulable ? "true" : "false"],
   ]);
   out += "\nConditions:\n" + table(["  Type", "Status", "Reason", "Message"], n.status.conditions.map((x) => [`  ${x.type}`, x.status, x.reason ?? "", x.message ?? ""]));
@@ -492,6 +494,13 @@ function describeNode(c: Cluster, n: Node): string {
     ["  memory", `${fmtMem(usage.requested.memory)} (${pct(usage.requested.memory, a.memory)})`],
   ]);
   return out + eventsBlock(c, n.metadata.uid);
+}
+
+/** describe node 의 Taints: spec.taints + cordon 이면 unschedulable (실제로는 컨트롤러가 taint 로 붙인다) */
+function nodeTaints(n: Node): string[] {
+  const out = (n.spec.taints ?? []).map((t) => `${t.key}${t.value ? `=${t.value}` : ""}:${t.effect}`);
+  if (n.spec.unschedulable && !out.some((t) => t.startsWith("node.kubernetes.io/unschedulable"))) out.push("node.kubernetes.io/unschedulable:NoSchedule");
+  return out.sort();
 }
 
 function stateLines(label: string, s: Pod["status"]["containerStatuses"][number]["state"]): [string, string][] {

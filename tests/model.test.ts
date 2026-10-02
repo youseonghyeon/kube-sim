@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { Clock } from "../src/core/clock";
+import type { DeploymentManifest } from "../src/core/cluster";
 import { DefSync } from "../src/model/defSync";
 import { EXAMPLES, resolveCommand } from "../src/model/examples";
 import { advanceClock } from "../src/model/simClock";
@@ -50,7 +51,7 @@ describe("예제", () => {
       for (const t of ex.tries) {
         if (!t.command) continue;
         const r = runKubectl(s.cluster, resolveCommand(s.cluster.api.list("Pod"), t.command)!);
-        expect(r.ok, `${t.command}\n${r.output}`).toBe(true);
+        expect(r.ok, `${t.command}\n${r.output}`).toBe(!t.expectFail);
         s.cluster.runFor(60_000);
       }
     });
@@ -74,7 +75,7 @@ describe("정의 → 클러스터 동기화", () => {
     expect(s.sync(def)).toBe(false);
     expect(s.cluster.api.resourceVersion).toBe(rv);
     const next = structuredClone(def);
-    next.manifests[0]!.spec.replicas = 5;
+    (next.manifests[0] as DeploymentManifest).spec.replicas = 5;
     next.nodes.push({ name: "worker-3", cpu: 2000, memory: 4096 });
     expect(s.sync(next)).toBe(true);
     s.cluster.runFor(10_000);
@@ -89,11 +90,11 @@ describe("정의 → 클러스터 동기화", () => {
     s.cluster.runFor(10_000);
     runKubectl(s.cluster, "scale deployment/web --replicas=1");
     s.cluster.runFor(10_000);
-    expect(s.drift(def.manifests[0]!)).toEqual(["replicas: 매니페스트 3 · 라이브 1"]);
-    s.forget("web");
+    expect(s.drift(def.manifests[0] as DeploymentManifest)).toEqual(["replicas: 매니페스트 3 · 라이브 1"]);
+    s.forget("Deployment", "web");
     s.sync(def);
     s.cluster.runFor(10_000);
-    expect(s.drift(def.manifests[0]!)).toEqual([]);
+    expect(s.drift(def.manifests[0] as DeploymentManifest)).toEqual([]);
     expect(s.cluster.api.list("Pod")).toHaveLength(3);
   });
 });

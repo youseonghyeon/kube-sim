@@ -63,6 +63,8 @@ export class Cluster {
     // pod-garbage-collector: 사라진 노드에 바인딩돼 있던 Pod 는 강제로 지운다
     this.api.watch("Node", (ev) => {
       if (ev.type !== "DELETED") return;
+      // 같은 이름의 노드가 이미 다시 생겼으면 그 노드의 Pod 는 건드리지 않는다 (늦게 온 DELETED)
+      if (this.api.get("Node", ev.object.metadata.name)) return;
       for (const p of this.api.list("Pod")) {
         if (p.spec.nodeName !== ev.object.metadata.name) continue;
         this.trace.add("pod-garbage-collector", "gc.delete", `${p.metadata.name} 이(가) 바인딩된 노드 ${ev.object.metadata.name} 이(가) 없음 → 강제 삭제`, { kind: "Pod", namespace: p.metadata.namespace, name: p.metadata.name });

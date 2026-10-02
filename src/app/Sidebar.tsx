@@ -8,7 +8,7 @@ export function Sidebar() {
   const view = currentView();
   const sel = selection.value;
   const isSel = (kind: string, name: string) => sel?.kind === kind && sel.name === name;
-  const manifestNames = new Set(clusterDef.value.manifests.map((m) => m.metadata.name));
+  const manifestNames = new Set(clusterDef.value.manifests.filter((m) => m.kind === "Deployment").map((m) => m.metadata.name));
 
   return (
     <aside class="sidebar">

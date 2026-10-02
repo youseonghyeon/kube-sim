@@ -101,7 +101,7 @@ export class Scheduler {
     if (!pod || pod.spec.nodeName || pod.metadata.deletionTimestamp !== undefined) return;
     const again = why ? ` (다시 시도: ${why})` : "";
     const req = podRequests(pod.spec);
-    const nodes = api.peekList("Node");
+    const nodes = [...api.peekList("Node")].sort((a, b) => (a.metadata.name < b.metadata.name ? -1 : 1));
     const pods = api.peekList("Pod");
     const reasons = new Map<string, number>();
     const fits: { node: Readonly<Node>; score: number }[] = [];

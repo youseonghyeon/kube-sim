@@ -142,6 +142,13 @@ export class Clock {
     return this.stepUntil(next);
   }
 
+  /** 화면의 "한 단계": 일반이든 배경이든 다음 이벤트 하나 (배경 타이머만 남아도 나아간다 — runToIdle 은 이것을 쓰지 않는다) */
+  stepAny(): boolean {
+    if (this.step()) return true;
+    const bg = this.peekBackgroundTime();
+    return bg !== undefined && this.stepUntil(bg);
+  }
+
   /** time 까지 진행. 배경 타이머도 그 사이에 발화한다 */
   runUntil(time: number, maxEvents = 100_000): number {
     let n = 0;

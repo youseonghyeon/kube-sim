@@ -6,9 +6,9 @@ import { eventSource, nodeStatusText, podRestartsText, podStatusText, runKubectl
 import { fmtAge, fmtCpu, fmtMem, parseCpu, parseMem } from "../core/units";
 import { IMAGE_NAMES, IMAGES } from "../core/workloads";
 import { NODE_MONITOR_GRACE_MS } from "../core/controllers/nodelifecycle";
-import { exampleById, resolveCommand } from "../model/examples";
+import { exampleById, resolveCommand, type TryAction } from "../model/examples";
 import { sim, simVersion } from "../model/sim";
-import { clusterDef, drawerOpen, drawerTab, exampleId, removeManifest, selection, updateManifest, updateNodeDef } from "../model/store";
+import { clusterDef, drawerOpen, drawerTab, exampleId, findManifest, removeManifest, selection, updateManifest, updateNodeDef } from "../model/store";
 import { toneOf } from "../model/view";
 import { toYaml } from "../model/yaml";
 import { Icon } from "./Icons";
@@ -231,7 +231,7 @@ function DeploymentOverview({ d }: { d: Deployment }) {
   const c = sim.cluster;
   const rss = c.api.list("ReplicaSet", "default").filter((r) => controllerOf(r.metadata)?.uid === d.metadata.uid);
   const drift = sim.drift(d.metadata.name);
-  const inManifest = clusterDef.value.manifests.some((m) => m.metadata.name === d.metadata.name);
+  const inManifest = !!findManifest("Deployment", d.metadata.name);
   return (
     <>
       {inManifest && drift.length > 0 && <DriftNote name={d.metadata.name} drift={drift} />}
@@ -379,7 +379,7 @@ function NodeOverview({ n }: { n: Node }) {
 // ---------- 설정 (매니페스트) ----------
 
 function DeploymentSettings({ d }: { d: Deployment }) {
-  const m = clusterDef.value.manifests.find((x) => x.metadata.name === d.metadata.name);
+  const m = findManifest("Deployment", d.metadata.name);
   if (!m) {
     return <p class="note">이 Deployment 는 매니페스트에 없습니다 (kubectl 로 만듦). kubectl scale · set image 로 바꾸세요.</p>;
   }
@@ -430,7 +430,7 @@ function DeploymentSettings({ d }: { d: Deployment }) {
         <button
           class="btn danger"
           onClick={() => {
-            removeManifest(name);
+            removeManifest("Deployment", name);
             selection.value = null;
           }}
         >
@@ -546,22 +546,11 @@ function ExamplePanel() {
             return (
               <li key={i} class="try">
                 <div class="try-title">{t.title}</div>
-                {t.action && (
-                  <div class="try-cmd">
-                    <code class="mono">{t.action.on ? `노드 ${t.action.node} 다시 켜기` : `노드 ${t.action.node} 끄기`}</code>
-                    <button
-                      class="btn sm"
-                      disabled={sim.cluster.nodePowered(t.action.node) === t.action.on || !sim.cluster.kubelets.has(t.action.node)}
-                      onClick={() => t.action && sim.setNodePower(t.action.node, t.action.on)}
-                    >
-                      실행
-                    </button>
-                  </div>
-                )}
+                {t.action && <TryActionRow action={t.action} />}
                 {t.command && (
                   <div class="try-cmd">
                     <code class="mono">{cmd ?? t.command}</code>
-                    <button class="btn sm" disabled={!cmd} onClick={() => cmd && runAndShow(cmd)} title={cmd ? "kubectl 창에서 실행" : "지금은 대상이 없습니다"}>
+                    <button class="btn sm" disabled={!cmd} onClick={() => cmd && runAndShow(cmd)} title={cmd ? `kubectl 창에서 실행${t.expectFail ? " (실패하는 것이 정상입니다)" : ""}` : "지금은 대상이 없습니다"}>
                       실행
                     </button>
                   </div>
@@ -574,5 +563,35 @@ function ExamplePanel() {
         <p class="muted small">캔버스의 Pod·노드나 왼쪽 목록을 고르면 개요·describe·YAML 을 볼 수 있습니다.</p>
       </div>
     </>
+  );
+}
+
+function actionLabel(a: TryAction): string {
+  if (a.type === "power") return a.on ? `노드 ${a.node} 다시 켜기` : `노드 ${a.node} 끄기`;
+  if (a.type === "sick") return a.healthy ? `${a.deployment} 의 고장 난 Pod 고치기` : `${a.deployment} Pod 하나의 앱 고장 내기`;
+  return `(클러스터 밖에서) curl ${a.node}:<${a.service} 의 NodePort>`;
+}
+
+function TryActionRow({ action }: { action: TryAction }) {
+  simVersion.value;
+  const blocked = sim.actionBlocked(action);
+  return (
+    <div class="try-cmd">
+      <code class="mono">{actionLabel(action)}</code>
+      <button
+        class="btn sm"
+        disabled={!!blocked}
+        title={blocked ?? "실행"}
+        onClick={() => {
+          sim.runAction(action);
+          if (action.type === "nodeport") {
+            drawerTab.value = "kubectl";
+            drawerOpen.value = true;
+          }
+        }}
+      >
+        실행
+      </button>
+    </div>
   );
 }

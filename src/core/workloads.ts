@@ -34,6 +34,7 @@ export const IMAGES: Record<string, ImageSpec> = {
     warmupMs: 15_000,
     description: "API 서버 (포트 8080). 시작 후 15초 동안 캐시를 데우느라 /ready 가 503 — readiness probe 연습용",
   },
+  "curlimages/curl:8.10.1": { pullMs: 1500, sizeMB: 12, termMs: 100, description: "클라이언트: sleep 으로 떠 있다가 kubectl exec 로 curl 을 보냅니다" },
   "example/worker:1.0": {
     pullMs: 2000,
     sizeMB: 30,

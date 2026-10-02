@@ -64,12 +64,15 @@ export function nodeStory(n: NodeView, now: number): { tone: Tone; text: string 
     const s = sec(ms);
     return s >= 60 ? `${Math.floor(s / 60)}분 ${s % 60}초` : `${s}초`;
   };
+  if (n.unreachableSince !== undefined && n.powered) {
+    return { tone: "wait", text: "다시 켜짐 — kubelet 이 Ready 를 보고함. node-lifecycle-controller 가 다음 확인(5초 주기) 때 taint 를 뗍니다" };
+  }
   if (n.unreachableSince !== undefined) {
     const left = n.unreachableSince + DEFAULT_TOLERATION_SECONDS * 1000 - now;
     const stuck = n.pods.filter((p) => p.pod.metadata.deletionTimestamp !== undefined).length;
     if (left > 0) return { tone: "bad", text: `NotReady — ${mmss(left)} 뒤 이 노드의 Pod 를 eviction (기본 toleration ${DEFAULT_TOLERATION_SECONDS}초)` };
     if (!n.powered && stuck) return { tone: "bad", text: `Pod ${stuck}개가 Terminating 에 멈춤 — 컨테이너를 멈추고 확인해 줄 kubelet 이 없음` };
-    return { tone: "bad", text: n.powered ? "다시 켜짐 — node-lifecycle-controller 가 다음 확인(5초 주기) 때 taint 를 뗍니다" : "NotReady — 이 노드의 Pod 는 다른 노드로 옮겨졌습니다" };
+    return { tone: "bad", text: "NotReady — 이 노드의 Pod 는 다른 노드로 옮겨졌습니다" };
   }
   if (!n.powered) {
     const since = n.renewTime ?? 0;

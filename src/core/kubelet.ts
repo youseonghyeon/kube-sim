@@ -118,15 +118,24 @@ export class Kubelet {
     this.ctx.trace.add(this.actor, "node.register", `노드 ${def.name} 등록 (cpu ${fmtCpu(def.cpu)} · memory ${fmtMem(def.memory)} · PodCIDR ${this.podCIDR}) → Ready`, { kind: "Node", name: def.name });
     const node = this.ctx.api.get("Node", def.name)!;
     // heartbeat: kube-node-lease 의 Lease 를 10초마다 갱신. Node 가 주인이라 Node 를 지우면 가비지 컬렉터가 함께 지운다
-    this.ctx.api.create<"Lease">(
-      {
-        apiVersion: "coordination.k8s.io/v1",
-        kind: "Lease",
-        metadata: { name: def.name, namespace: NODE_LEASE_NS, ownerReferences: [{ apiVersion: "v1", kind: "Node", name: def.name, uid: node.metadata.uid, controller: false }] },
-        spec: { holderIdentity: def.name, leaseDurationSeconds: LEASE_DURATION_S, renewTime: this.ctx.clock.now },
-      },
-      this.actor,
-    );
+    const owner = [{ apiVersion: "v1", kind: "Node", name: def.name, uid: node.metadata.uid, controller: false }];
+    if (this.ctx.api.get("Lease", def.name, NODE_LEASE_NS)) {
+      // 같은 이름의 옛 노드 Lease 가 아직 남아 있음 (가비지 컬렉터가 지우기 전) → 새 노드가 이어받는다
+      this.ctx.api.patch("Lease", def.name, NODE_LEASE_NS, this.actor, (l) => {
+        l.metadata.ownerReferences = owner;
+        l.spec.renewTime = this.ctx.clock.now;
+      });
+    } else {
+      this.ctx.api.create<"Lease">(
+        {
+          apiVersion: "coordination.k8s.io/v1",
+          kind: "Lease",
+          metadata: { name: def.name, namespace: NODE_LEASE_NS, ownerReferences: owner },
+          spec: { holderIdentity: def.name, leaseDurationSeconds: LEASE_DURATION_S, renewTime: this.ctx.clock.now },
+        },
+        this.actor,
+      );
+    }
     this.scheduleHeartbeat();
   }
 
@@ -176,6 +185,8 @@ export class Kubelet {
     this.ctx.api.patch("Node", this.def.name, undefined, this.actor, (n) => {
       setCondition(n, "Ready", "True", now, "KubeletReady", "kubelet is posting ready status");
     });
+    const reported = this.ctx.api.get("Node", this.def.name)?.status.capacity;
+    if (reported && (reported.cpu !== this.def.cpu || reported.memory !== this.def.memory)) this.reportCapacity();
     this.ctx.api.patch("Lease", this.def.name, NODE_LEASE_NS, this.actor, (l) => {
       l.spec.renewTime = now;
     });
@@ -190,7 +201,12 @@ export class Kubelet {
       { kind: "Node", name: this.def.name },
     );
     for (const p of gone) this.ctx.api.finalizePod(p.metadata.name, p.metadata.namespace, p.metadata.uid, this.actor);
-    for (const p of rerun) this.admit(p, Math.max(0, ...p.status.containerStatuses.map((c) => c.restartCount)) + (p.status.containerStatuses.length ? 1 : 0));
+    for (const p of rerun) {
+      const cs = p.status.containerStatuses[0];
+      // 한 번이라도 시작했던 컨테이너만 재시작으로 센다 (pull 중에 꺼졌으면 그대로)
+      const everStarted = !!cs && (cs.restartCount > 0 || "running" in cs.state || "terminated" in cs.state || !!cs.lastState);
+      this.admit(p, (cs?.restartCount ?? 0) + (everStarted ? 1 : 0));
+    }
   }
 
   /** 노드 자원을 바꾼다 (실제로는 kubelet 을 새 설정으로 다시 띄우는 것) → Node status 갱신 → 스케줄러가 기다리던 Pod 를 다시 본다 */
@@ -198,6 +214,15 @@ export class Kubelet {
     if (cpu === this.def.cpu && memory === this.def.memory) return;
     this.def.cpu = cpu;
     this.def.memory = memory;
+    if (!this.powered) {
+      this.ctx.trace.add(this.actor, "node.register", `노드 ${this.def.name} 자원 변경 — kubelet 이 꺼져 있어 API 에 보고하지 못함 (켜면 보고)`, { kind: "Node", name: this.def.name });
+      return;
+    }
+    this.reportCapacity();
+  }
+
+  private reportCapacity(): void {
+    const { cpu, memory } = this.def;
     this.ctx.api.patch("Node", this.def.name, undefined, this.actor, (n) => {
       n.status.capacity = { ...n.status.capacity, cpu, memory };
       n.status.allocatable = { ...n.status.allocatable, cpu, memory };
