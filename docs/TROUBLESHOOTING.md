@@ -10,7 +10,9 @@
 | Pod 가 `Pending`, 이벤트 `FailedScheduling: 0/3 nodes are available: 3 Insufficient cpu.` | requests 를 채울 자리가 있는 노드가 없음 | requests 를 줄이거나 노드를 늘리거나 다른 Pod 를 줄인다 |
 | `ImagePullBackOff` / `ErrImagePull` | 이미지 이름·태그가 틀렸거나 레지스트리에 없음 | 이미지 이름·태그를 고친다 (kubelet 은 백오프하며 다시 시도) |
 | `CrashLoopBackOff`, 이벤트 `Back-off restarting failed container` | 컨테이너가 시작 직후 계속 종료됨 — 재시작 간격이 10초부터 두 배씩(최대 5분) 늘어난다 | 앱의 시작 실패 원인을 고친다. 고친 뒤에도 남은 백오프 시간만큼 기다린다 |
-| 노드를 끊었는데 Pod 가 5분 동안 그대로 `Running` 으로 보임 (1단계 남은 것) | 노드가 NotReady 가 되면 taint 가 붙고, Pod 의 기본 toleration(300초)이 끝나야 eviction 된다 | 정상. 빨리 옮기려면 toleration 을 줄이거나 `kubectl drain` |
+| 노드를 끊었는데 Pod 가 5분 동안 그대로 `Running` 으로 보임 | Lease 가 40초 넘게 끊겨야 NotReady·taint, 그 뒤 Pod 의 기본 toleration(300초)이 끝나야 eviction 된다 | 정상. 빨리 옮기려면 Pod 의 `tolerationSeconds` 를 줄이거나, 미리 아는 작업이면 `kubectl drain` |
+| 노드가 꺼진 뒤 Pod 가 `Terminating` 에서 안 사라짐 | 컨테이너를 멈추고 확인해 줄 kubelet 이 없다. 새 Pod 는 이미 다른 노드에 생겼다 | 노드를 다시 켜면 kubelet 이 정리한다. 노드가 영영 안 돌아오면 Node 를 지운다(pod-garbage-collector 가 강제 삭제) |
+| `node(s) had untolerated taint {node.kubernetes.io/unreachable: }` | 응답 없는 노드에는 새 Pod 를 두지 않는다 (NoSchedule) | 노드가 돌아오면 taint 가 빠진다 |
 | `0/3 nodes are available: 3 node(s) were unschedulable.` | 모든 노드가 cordon 됨 | `kubectl uncordon <노드>` |
 | Pod 가 지운 뒤에도 잠깐 `Terminating` | 노드에 있는 Pod 는 kubelet 이 SIGTERM 을 보내고 컨테이너가 끝난 뒤에야 사라진다 (유예 30초) | 정상. 기다리지 않으려면 `--force --grace-period=0` (컨테이너가 계속 돌 수 있어 실무에선 조심) |
 | 인스펙터에 "라이브가 매니페스트와 다릅니다" | kubectl 로 replicas·이미지를 바꿔 매니페스트(왼쪽·설정 탭)와 달라짐 | "매니페스트 다시 적용" 또는 그대로 두기 |

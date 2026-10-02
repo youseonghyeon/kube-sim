@@ -2,7 +2,7 @@
 
 쿠버네티스가 "왜 이렇게 동작하는지" 를 직접 구성하고 한 단계씩 보며 익히는 학습 시뮬레이터. 자매 프로젝트 `../net-sim`(네트워크 시뮬레이터)과 같은 방식이다: 브라우저에서 돌고, 실제 클러스터에 연결하지 않으며, 모든 시뮬레이션은 결정론적. 디자인 품질이 최우선(`DESIGN.md`).
 
-지금 상태: **0단계 골격 + 1단계 앞부분 (2026-10-02).** Deployment·ReplicaSet·스케줄러·kubelet(pull·크래시 백오프·종료)·kubectl 흉내·캔버스 UI. 다음 할 일은 `docs/ROADMAP.md` 1단계의 남은 것(노드 heartbeat·NotReady·eviction).
+지금 상태: **0·1단계 (2026-10-02).** Deployment·ReplicaSet·스케줄러·kubelet(pull·크래시 백오프·종료·heartbeat)·노드 장애(NotReady·taint·eviction)·kubectl 흉내·캔버스 UI. 다음 할 일은 `docs/ROADMAP.md` 2단계(Service 와 Pod 네트워킹).
 저장소: https://github.com/youseonghyeon/kube-sim (public). 배포는 아직 없다.
 
 ## 목적 — 누구의 어떤 이해를 바꾸나
@@ -29,9 +29,9 @@
   - `clock.ts` 시계·이벤트 큐(일반 타이머 + 배경 타이머) — net-sim `src/core/network.ts` 의 큐 개념
   - `trace.ts` `TraceKind` 목록. 새 이벤트 종류는 여기에 먼저 등록한다
   - `api/` API 서버 흉내: 오브젝트 저장소(kind·namespace·name, `metadata.resourceVersion`·`generation`·`ownerReferences`·`labels`), watch, 낙관적 동시성, ownerReference 가비지 컬렉션, 이벤트(`kubectl get events`)
-  - `controllers/` 공통 워크큐(`base.ts`) + Deployment·ReplicaSet (계획: EndpointSlice·Node lifecycle, 나중에 HPA·StatefulSet)
+  - `controllers/` 공통 워크큐(`base.ts`) + Deployment·ReplicaSet + `nodelifecycle.ts`(node-lifecycle·taint-eviction) (계획: EndpointSlice, 나중에 HPA·StatefulSet)
   - `scheduler.ts` 필터 → 점수 → 바인딩, FailedScheduling 문구
-  - `kubelet.ts` 노드마다 Pod 수명주기: 샌드박스·IP → 이미지 pull → 시작 → 크래시 백오프 → SIGTERM·정리 (계획: probe·heartbeat)
+  - `kubelet.ts` 노드마다 Pod 수명주기: 샌드박스·IP → 이미지 pull → 시작 → 크래시 백오프 → SIGTERM·정리, Lease heartbeat, 전원 끄기·켜기 (계획: probe)
   - `cluster.ts` 위 컴포넌트를 묶은 한 벌 + pod-garbage-collector. 바깥은 여기로만 클러스터를 바꾼다
   - `kubectl.ts` 문자열 명령 → API 호출 + 실제 모양의 출력 (`podStatusText` 등 표시 도우미는 UI 도 쓴다)
   - `workloads.ts` 이미지 카탈로그 = 컨테이너 안 앱 흉내(pull 시간, 크래시 조건, SIGTERM 반응). 카탈로그에 없는 이미지는 pull 실패
@@ -44,7 +44,7 @@
 
 ## 모델링 원칙
 - **결정론**: 코어에 `Math.random`·`Date.now` 금지. 확률이 필요하면(kube-proxy 의 확률 분배 등) 시드 고정 의사난수(net-sim 의 xorshift). 같은 입력 → 같은 트레이스.
-- **시계**: 시뮬레이션 시각(ms). 일반 이벤트가 남아 있을 때만 재생 속도(1× = 실제 시간)로 흐르고, 없으면 멈춘다. net-sim 과 달리 다음 이벤트로 점프하지 않는다 — 기다림(pull·백오프)이 배울 거리라서(ARCHITECTURE 1절). 끝나지 않는 주기 동작(컨트롤러 resync·probe·노드 heartbeat)은 **배경 타이머**(그 자체로는 시계를 움직이지 않음)로만 넣는다 — 일반 타이머로 넣으면 `runToIdle` 이 끝나지 않는다(net-sim LESSONS 4s). 상단바에 시간 흘려보내기("+10초"·"+1분") 버튼을 둔다. 실제로 영원히 재시도하는 kubelet 백오프는 예외로 일반 타이머다(간격 최대 300초) — 그런 시나리오의 테스트는 `runFor`.
+- **시계**: 시뮬레이션 시각(ms). 화면 시계는 타이머(일반·배경)가 걸려 있으면 재생 속도(1× = 실제 시간)로 흐르고, 하나도 없으면 멈춘다 — 노드가 있으면 heartbeat 가 있으니 실제처럼 계속 흐른다. net-sim 과 달리 다음 이벤트로 점프하지 않는다 — 기다림(pull·백오프·노드 장애 40초·300초)이 배울 거리라서(ARCHITECTURE 1절). 끝나지 않는 주기 동작(컨트롤러 resync·probe·노드 heartbeat)은 **배경 타이머**(그 자체로는 시계를 움직이지 않음)로만 넣는다 — 일반 타이머로 넣으면 `runToIdle` 이 끝나지 않는다(net-sim LESSONS 4s). 상단바에 시간 흘려보내기("+10초"·"+1분") 버튼을 둔다. 실제로 영원히 재시도하는 kubelet 백오프는 예외로 일반 타이머다(간격 최대 300초) — 그런 시나리오의 테스트는 `runFor`.
 - **컨트롤 루프가 주인공**: 쿠버네티스의 핵심은 선언(desired)과 관찰(observed)을 맞추는 reconcile 이다. 컨트롤러는 watch 이벤트로 깨어나 reconcile 하고 실패하면 백오프로 다시 시도한다. 트레이스는 이 루프를 그대로 보여 준다.
 - **트레이스 문구**: "무엇을 보고 → 어떤 결정 → 결과" 가 한 줄에 드러나게. 예: `replicaset-controller: web-7d9 원하는 3 · 있는 2 → Pod 1개 생성 (web-7d9-x2k)`.
 - **네트워킹 깊이**: 처음에는 요청(연결) 단위로 그린다 — 요청 하나가 DNS → Service VIP → kube-proxy 규칙 → Pod IP → 노드 간 경로를 어떻게 지나는지 단계별로. net-sim 같은 프레임 단위는 필요해질 때(오버레이 캡슐화를 보여 줄 때 등) 정한다.

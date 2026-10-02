@@ -1,19 +1,25 @@
 // 캔버스: 위에 컨트롤 플레인, 가운데 "스케줄 대기", 아래에 노드 상자들과 그 안의 Pod 칩.
 // 자리 배치는 자동이다 (끌어 놓지 않는다) — 무엇이 어디에 있는지는 스케줄러가 정하는 것이 학습 포인트라서.
+import { computed } from "@preact/signals";
 import { useMemo } from "preact/hooks";
 import { fmtCpu, fmtMem } from "../core/units";
-import { running, sim, simTime, simVersion, speed } from "../model/sim";
+import { Icon } from "./Icons";
+import { currentView, running, sim, simTime, simVersion, speed } from "../model/sim";
 import { selection } from "../model/store";
-import { buildView, CONTROL_PLANE, lastByActor, recentFlashes, refKey, type ClusterView, type NodeView, type PodView } from "../model/view";
+import { CONTROL_PLANE, lastByActor, nodeStory, recentFlashes, refKey, type ClusterView, type NodeView, type PodView } from "../model/view";
+
+const canvasTick = computed(() => Math.floor(simTime.value / (100 * Math.max(1, speed.value))));
 
 /** 이름표가 떠 있는 시간 (실제 시간 ms — 재생 속도를 곱해 시뮬레이션 시간으로) */
 const FLASH_REAL_MS = 1800;
 
 export function Canvas() {
   const version = simVersion.value;
-  const now = simTime.value;
+  // 이름표·카운트다운만 시간에 따라 바뀌므로 매 프레임이 아니라 실제 시간 약 0.1초마다 다시 그린다 (Pod 60개에서 긴 프레임 방지)
+  canvasTick.value;
+  const now = simTime.peek();
   const c = sim.cluster;
-  const view = useMemo(() => buildView(c), [version, c]);
+  const view = currentView();
   const windowMs = FLASH_REAL_MS * Math.max(1, speed.value);
   const flashes = useMemo(() => recentFlashes(c.trace.events, now, windowMs), [version, now, windowMs, c]);
   const sel = selection.value;
@@ -35,7 +41,7 @@ export function Canvas() {
       </section>
       <section class="nodes">
         {view.nodes.map((n) => (
-          <NodeCard key={n.name} n={n} flashes={flashes} focus={focus} selected={sel?.kind === "Node" && sel.name === n.name} />
+          <NodeCard key={n.name} n={n} now={now} flashes={flashes} focus={focus} selected={sel?.kind === "Node" && sel.name === n.name} />
         ))}
         {!view.nodes.length && <div class="empty-note">노드가 없습니다. 왼쪽 '노드' 의 + 로 더하세요.</div>}
       </section>
@@ -89,10 +95,11 @@ function ControlPlane({ now, windowMs }: { now: number; windowMs: number; versio
   );
 }
 
-function NodeCard({ n, flashes, focus, selected }: { n: NodeView; flashes: Map<string, string>; focus: Focus; selected: boolean }) {
-  const kubelet = lastByActor(sim.cluster.trace.events, [`kubelet@${n.name}`]);
+function NodeCard({ n, now, flashes, focus, selected }: { n: NodeView; now: number; flashes: Map<string, string>; focus: Focus; selected: boolean }) {
+  const kubelet = lastByActor(sim.cluster.trace.events, [`kubelet@${n.name}`], (k) => k.startsWith("api."));
+  const story = nodeStory(n, now);
   return (
-    <div class={`node${selected ? " sel" : ""}${n.cordoned ? " cordoned" : ""}`} data-node={n.name}>
+    <div class={`node${selected ? " sel" : ""}${n.cordoned ? " cordoned" : ""}${n.powered ? "" : " off"}${n.ready ? "" : " notready"}`} data-node={n.name}>
       <button
         class="node-head"
         onClick={(e) => {
@@ -104,7 +111,28 @@ function NodeCard({ n, flashes, focus, selected }: { n: NodeView; flashes: Map<s
         <span class="node-name">{n.name}</span>
         <span class="node-status">{n.status}</span>
         <span class="node-ip mono">{n.ip}</span>
+        <span
+          role="button"
+          tabIndex={0}
+          class={`node-power${n.powered ? "" : " is-off"}`}
+          title={n.powered ? "노드 끄기 — kubelet 이 멈추고 heartbeat 가 끊깁니다" : "노드 다시 켜기"}
+          aria-label={n.powered ? `${n.name} 끄기` : `${n.name} 켜기`}
+          onClick={(e) => {
+            e.stopPropagation();
+            sim.setNodePower(n.name, !n.powered);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              e.stopPropagation();
+              sim.setNodePower(n.name, !n.powered);
+            }
+          }}
+        >
+          <Icon name="power" size={14} />
+        </span>
       </button>
+      {story && <div class={`node-story t-${story.tone}`}>{story.text}</div>}
       <div class="node-res">
         <ResBar label="cpu" used={n.cpu.used} total={n.cpu.total} fmt={fmtCpu} />
         <ResBar label="memory" used={n.memory.used} total={n.memory.total} fmt={fmtMem} />
@@ -117,7 +145,7 @@ function NodeCard({ n, flashes, focus, selected }: { n: NodeView; flashes: Map<s
       </div>
       <div class="node-foot" title={kubelet?.msg}>
         <span class="mono">kubelet</span>
-        <span class="node-foot-msg">{kubelet ? kubelet.msg : "대기 중"}</span>
+        <span class="node-foot-msg">{!n.powered ? "응답 없음 (꺼짐)" : kubelet ? kubelet.msg : "대기 중"}</span>
       </div>
     </div>
   );

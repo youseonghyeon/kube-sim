@@ -3,7 +3,7 @@
 import type { Clock } from "../clock";
 import { stableJson } from "../rng";
 import type { Trace } from "../trace";
-import { CLUSTER_SCOPED, type KEvent, type KObject, type Kind, type ObjectMeta, type ObjectOf } from "./types";
+import { CLUSTER_SCOPED, type KEvent, type KObject, type Kind, type ObjectMeta, type ObjectOf, type Pod } from "./types";
 
 export type WatchType = "ADDED" | "MODIFIED" | "DELETED";
 
@@ -88,6 +88,20 @@ export class ApiServer {
     return out.sort((a, b) => cmp(a.metadata.namespace ?? "", b.metadata.namespace ?? "") || cmp(a.metadata.name, b.metadata.name));
   }
 
+  /**
+   * 복사 없이 저장된 오브젝트를 그대로 본다 — 읽기 전용 (고치면 저장소가 바뀐다).
+   * 컴포넌트 안의 반복 조회(스케줄러가 Pod 하나마다 전체 Pod 를 훑는 것 등)가 복사로 느려지지 않게 쓴다. 고칠 것은 get/patch 로.
+   */
+  peekList<K extends Kind>(kind: K, namespace?: string): readonly ObjectOf<K>[] {
+    const out: ObjectOf<K>[] = [];
+    for (const o of this.store.values()) {
+      if (o.kind !== kind) continue;
+      if (namespace !== undefined && (o.metadata.namespace ?? "default") !== namespace) continue;
+      out.push(o as ObjectOf<K>);
+    }
+    return out;
+  }
+
   // ---------- 쓰기 ----------
 
   create<K extends Kind>(draft: Draft<K>, actor: string): ObjectOf<K> {
@@ -110,6 +124,7 @@ export class ApiServer {
       ownerReferences: clone(draft.metadata.ownerReferences ?? []),
     };
     if (!obj.status) obj.status = emptyStatus(kind) as ObjectOf<K>["status"];
+    if (obj.kind === "Pod") addDefaultTolerations(obj as Pod);
     this.store.set(key, obj);
     this.trace.add("kube-apiserver", "api.create", `${actor} 의 요청 → ${kind} ${name} 저장 (resourceVersion ${obj.metadata.resourceVersion})`, refOf(obj));
     this.notify("ADDED", obj);
@@ -139,10 +154,10 @@ export class ApiServer {
     next.metadata.generation = cur.metadata.generation;
     if (stableJson(next) === stableJson(cur)) return clone(cur);
     const specChanged = stableJson(next.spec) !== stableJson(cur.spec);
-    if (specChanged) next.metadata.generation = cur.metadata.generation + 1;
+    if (specChanged && obj.kind !== "Lease") next.metadata.generation = cur.metadata.generation + 1;
     next.metadata.resourceVersion = ++this.rv;
     this.store.set(key, next);
-    const what = specChanged ? `spec 변경 (generation ${next.metadata.generation})` : stableJson(next.status) !== stableJson(cur.status) ? "status 갱신" : "metadata 변경";
+    const what = obj.kind === "Lease" ? "heartbeat 갱신 (renewTime)" : specChanged ? `spec 변경 (generation ${next.metadata.generation})` : stableJson(next.status) !== stableJson(cur.status) ? "status 갱신" : "metadata 변경";
     this.trace.add("kube-apiserver", "api.update", `${actor} 의 요청 → ${obj.kind} ${obj.metadata.name} ${what} (resourceVersion ${next.metadata.resourceVersion})`, refOf(next));
     this.notify("MODIFIED", next);
     return clone(next);
@@ -232,11 +247,12 @@ export class ApiServer {
   }
 
   private notify(type: WatchType, obj: KObject): void {
-    const snapshot = clone(obj);
+    // 복사본 하나를 모든 구독자가 같이 본다 — watch 이벤트의 object 는 읽기 전용 (고칠 것은 get 으로 새로 읽는다).
+    // 구독자마다 복사하면 Pod 수십 개를 한꺼번에 만들 때 복사가 구독자 수만큼 늘어 긴 프레임이 생겼다
+    const ev = { type, object: clone(obj) } as WatchEvent;
     for (const w of this.watchers) {
       if (w.kind !== obj.kind) continue;
-      // 구독자마다 자기 복사본 (한쪽이 고쳐도 다른 쪽이 영향받지 않게). 전달 전에 구독을 끊으면 받지 않는다
-      const ev = { type, object: clone(snapshot) } as WatchEvent;
+      // 전달 전에 구독을 끊으면 받지 않는다
       this.clock.after(this.watchDelay, "watch", () => {
         if (this.watchers.includes(w)) w.fn(ev);
       });
@@ -281,6 +297,16 @@ export class ApiServer {
   }
 }
 
+/** 어드미션 플러그인 DefaultTolerationSeconds: 노드가 not-ready·unreachable 이 돼도 300초는 버티도록 toleration 을 붙인다 */
+export const DEFAULT_TOLERATION_SECONDS = 300;
+function addDefaultTolerations(p: Pod): void {
+  const tols = (p.spec.tolerations ??= []);
+  for (const key of ["node.kubernetes.io/not-ready", "node.kubernetes.io/unreachable"]) {
+    if (tols.some((t) => t.key === key && (!t.effect || t.effect === "NoExecute"))) continue;
+    tols.push({ key, operator: "Exists", effect: "NoExecute", tolerationSeconds: DEFAULT_TOLERATION_SECONDS });
+  }
+}
+
 function emptyStatus(kind: Kind): unknown {
   switch (kind) {
     case "Pod":
@@ -291,11 +317,16 @@ function emptyStatus(kind: Kind): unknown {
       return { replicas: 0, updatedReplicas: 0, readyReplicas: 0, availableReplicas: 0, observedGeneration: 0 };
     case "Node":
       return { capacity: { cpu: 0, memory: 0, pods: 0 }, allocatable: { cpu: 0, memory: 0, pods: 0 }, conditions: [], addresses: [], images: [] };
+    case "Lease":
+      return {};
   }
 }
 
 function lower(kind: Kind): string {
-  return kind.toLowerCase() === "replicaset" ? "replicasets.apps" : kind === "Deployment" ? "deployments.apps" : `${kind.toLowerCase()}s`;
+  if (kind === "ReplicaSet") return "replicasets.apps";
+  if (kind === "Deployment") return "deployments.apps";
+  if (kind === "Lease") return "leases.coordination.k8s.io";
+  return `${kind.toLowerCase()}s`;
 }
 
 function cmp(a: string, b: string): number {

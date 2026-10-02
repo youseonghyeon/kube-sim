@@ -131,6 +131,8 @@ export interface Taint {
   key: string;
   value?: string;
   effect: "NoSchedule" | "NoExecute" | "PreferNoSchedule";
+  /** NoExecute taint 가 붙은 시각 — tolerationSeconds 를 여기서부터 센다 */
+  timeAdded?: number;
 }
 
 export interface Node {
@@ -148,7 +150,18 @@ export interface Node {
   };
 }
 
-export type KObject = Pod | ReplicaSet | Deployment | Node;
+/** kubelet 의 heartbeat: kube-node-lease 네임스페이스에 노드마다 하나, 10초마다 renewTime 을 갱신한다 */
+export interface Lease {
+  apiVersion: "coordination.k8s.io/v1";
+  kind: "Lease";
+  metadata: ObjectMeta;
+  spec: { holderIdentity: string; leaseDurationSeconds: number; renewTime: number };
+  status: Record<string, never>;
+}
+
+export const NODE_LEASE_NS = "kube-node-lease";
+
+export type KObject = Pod | ReplicaSet | Deployment | Node | Lease;
 export type Kind = KObject["kind"];
 
 export type ObjectOf<K extends Kind> = Extract<KObject, { kind: K }>;

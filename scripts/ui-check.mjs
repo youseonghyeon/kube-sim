@@ -123,6 +123,27 @@ await page.evaluate(() => (document.documentElement.dataset.theme = "dark"));
 await page.click(".drawer .tabs button:has-text('로그')");
 await page.screenshot({ path: `${OUT}/07-crashloop-dark.png` });
 
+// 6) 노드 하나 죽이기: 끄기 → (40초) NotReady → (300초) eviction → 다른 노드에 다시
+console.log("6) 노드 죽이기");
+await page.evaluate(() => (document.documentElement.dataset.theme = "light"));
+await page.click(".menu-btn");
+await page.click('.menu-item[data-example="node-down"]');
+await page.selectOption(".transport .speed", "30");
+await waitFor(async () => (await statusTexts()).length === 6 && (await statusTexts()).every((s) => s === "Running"), "Pod 6개 Running");
+await page.locator(".try", { hasText: "worker-2 끄기" }).locator("button").click();
+const story = () => page.locator('[data-node="worker-2"] .node-story').textContent().catch(() => "");
+await waitFor(async () => (await story())?.startsWith("꺼짐"), "꺼짐 안내");
+check(true, "끄면 노드 상자에 '꺼짐 — … 뒤 NotReady' 안내");
+await page.screenshot({ path: `${OUT}/08-node-off.png` });
+await waitFor(async () => (await story())?.startsWith("NotReady"), "NotReady", 30000);
+check(true, "40초 뒤 NotReady + eviction 까지 남은 시간");
+await page.locator('[data-node="worker-2"] .node-head').click();
+await page.screenshot({ path: `${OUT}/09-node-notready.png` });
+await waitFor(async () => (await page.locator('[data-node="worker-2"] .pod .pod-status').allTextContents()).every((s) => s === "Terminating"), "eviction 뒤 Terminating", 40000);
+await waitFor(async () => (await page.locator('.node:not([data-node="worker-2"]) .pod .pod-status').allTextContents()).filter((s) => s === "Running").length === 6, "다른 노드에 6개 Running", 20000);
+check(true, "300초 뒤 eviction → 꺼진 노드의 Pod 는 Terminating 에 멈추고 다른 노드에 6개 Running");
+await page.screenshot({ path: `${OUT}/10-node-evicted.png` });
+
 check(errors.length === 0, `브라우저 오류 없음${errors.length ? `: ${errors.join(" | ")}` : ""}`, "콘솔 오류의 스택을 보고 고치세요");
 console.log(failed ? "ui-check 실패" : "ui-check 통과 — 스크린샷: .shots/");
 await done(failed ? 1 : 0);

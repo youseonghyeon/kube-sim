@@ -1,7 +1,7 @@
 // kubectl 흉내: 문자열 명령 → API 호출 + 실제와 같은 모양의 출력. 코어 API 위의 얇은 층이다.
 // 축소판: default 네임스페이스만, 자주 쓰는 하위 명령·플래그만.
 import { ApiError } from "./api/server";
-import { controllerOf, isNodeReady, isPodReady, podRequests, type KEvent, type Kind, type Node, type Pod } from "./api/types";
+import { controllerOf, isNodeReady, NODE_LEASE_NS, podRequests, type KEvent, type Kind, type Node, type Pod } from "./api/types";
 import { deployment, type Cluster } from "./cluster";
 import { deploymentHash, HASH_LABEL } from "./controllers/deployment";
 import { nodeUsage } from "./scheduler";
@@ -29,14 +29,16 @@ const RESOURCE_ALIASES: Record<string, Kind | "Event" | "all"> = {
   no: "Node",
   node: "Node",
   nodes: "Node",
+  lease: "Lease",
+  leases: "Lease",
   ev: "Event",
   event: "Event",
   events: "Event",
   all: "all",
 };
 
-const KIND_PREFIX: Record<Kind, string> = { Pod: "pod", Deployment: "deployment.apps", ReplicaSet: "replicaset.apps", Node: "node" };
-const KIND_PLURAL: Record<Kind, string> = { Pod: "pods", Deployment: "deployments.apps", ReplicaSet: "replicasets.apps", Node: "nodes" };
+const KIND_PREFIX: Record<Kind, string> = { Pod: "pod", Deployment: "deployment.apps", ReplicaSet: "replicaset.apps", Node: "node", Lease: "lease.coordination.k8s.io" };
+const KIND_PLURAL: Record<Kind, string> = { Pod: "pods", Deployment: "deployments.apps", ReplicaSet: "replicasets.apps", Node: "nodes", Lease: "leases.coordination.k8s.io" };
 
 export const KUBECTL_HELP = [
   "쓸 수 있는 명령 (축소판 — default 네임스페이스):",
@@ -48,6 +50,7 @@ export const KUBECTL_HELP = [
   "  kubectl set resources deployment/<이름> --requests=cpu=500m,memory=256Mi",
   "  kubectl delete pod|deploy|rs <이름>   (pod 는 --force --grace-period=0 로 강제)",
   "  kubectl cordon|uncordon <노드>",
+  "  kubectl get leases -n kube-node-lease   (kubelet heartbeat)",
 ].join("\n");
 
 export function runKubectl(cluster: Cluster, line: string): KubectlResult {
@@ -57,7 +60,8 @@ export function runKubectl(cluster: Cluster, line: string): KubectlResult {
   const { pos, flags } = parseFlags(args);
   const cmd = pos.shift()!;
   const ns = flags.get("n");
-  if (ns !== undefined && ns !== "default") {
+  const leaseNs = ns === NODE_LEASE_NS && cmd === "get" && /^leases?$/.test(pos[0] ?? "");
+  if (ns !== undefined && ns !== "default" && !leaseNs) {
     // 축소판: 네임스페이스는 default 하나. 다른 이름은 조용히 무시하지 않고 비어 있다고 답한다 (노드는 클러스터 범위라 그대로)
     if (cmd === "get" && !/^(no|node|nodes)$/.test(pos[0] ?? "")) return ok(`No resources found in ${ns} namespace.`);
     if (cmd !== "get") return fail(`error: 이 시뮬레이터에는 default 네임스페이스만 있습니다 (축소판). -n ${ns} 를 빼고 다시 하세요`);
@@ -168,6 +172,9 @@ function get(c: Cluster, pos: string[], flags: Map<string, string>): string {
       return getNodes(c, names, wide) || "No resources found";
     case "Event":
       return getEvents(c) || "No resources found in default namespace.";
+    case "Lease":
+      if (flags.get("n") !== NODE_LEASE_NS) return "No resources found in default namespace. (노드 Lease 는 -n kube-node-lease)";
+      return getLeases(c, names) || `No resources found in ${NODE_LEASE_NS} namespace.`;
   }
 }
 
@@ -232,6 +239,15 @@ function getNodes(c: Cluster, names: string[], wide: boolean): string {
   );
 }
 
+function getLeases(c: Cluster, names: string[]): string {
+  const ls = pick(c, "Lease", c.api.list("Lease", NODE_LEASE_NS), names);
+  if (!ls.length) return "";
+  return table(
+    ["NAME", "HOLDER", "AGE", "RENEWED"],
+    ls.map((l) => [l.metadata.name, l.spec.holderIdentity, fmtAge(c.now - l.metadata.creationTimestamp), `${fmtAge(c.now - l.spec.renewTime)} ago`]),
+  );
+}
+
 function getEvents(c: Cluster): string {
   const evs = [...c.api.events].filter((e) => (e.involvedObject.namespace ?? "default") === "default" || e.involvedObject.kind === "Node").sort((a, b) => a.lastTimestamp - b.lastTimestamp);
   if (!evs.length) return "";
@@ -275,6 +291,8 @@ function describe(c: Cluster, pos: string[]): string {
         ["NewReplicaSet", cur ? `${cur.metadata.name} (${cur.status.replicas}/${cur.spec.replicas} replicas created)` : "<none>"],
       ]) + eventsBlock(c, o.metadata.uid);
     }
+    case "Lease":
+      throw new KubectlError("error: describe lease 는 아직 없습니다 — kubectl get leases -n kube-node-lease");
     case "ReplicaSet": {
       const pods = c.api.list("Pod", "default").filter((p) => controllerOf(p.metadata)?.uid === o.metadata.uid);
       const running = pods.filter((p) => p.status.phase === "Running").length;

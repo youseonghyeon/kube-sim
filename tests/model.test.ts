@@ -21,10 +21,16 @@ describe("화면 시계", () => {
     expect(c.now).toBe(1100);
   });
 
-  test("배경 타이머만 남으면 멈춘다", () => {
+  test("배경 타이머(heartbeat)만 있어도 흐르고 그 사이에 발화한다 — 노드가 있는 클러스터는 실제처럼 시간이 계속 흐른다", () => {
     const c = new Clock();
-    c.background(100, "hb", () => {});
-    expect(advanceClock(c, 16, 1)).toBeNull();
+    let beats = 0;
+    const beat = () => {
+      beats++;
+      c.background(100, "hb", beat);
+    };
+    c.background(100, "hb", beat);
+    expect(advanceClock(c, 250, 1)).toMatchObject({ time: 250 });
+    expect(beats).toBe(2);
   });
 
   test("폭주하면 burst 로 알린다", () => {

@@ -396,16 +396,24 @@ pre {
 .tree-count.wait {
   color: var(--wait);
 }
-.tree-line .row-action {
+.tree-line .row-actions {
   position: absolute;
   right: 6px;
   top: 2px;
+  display: flex;
+  gap: 2px;
   opacity: 0;
+}
+.tree-line .row-action {
   background: var(--surface-2);
 }
-.tree-line:hover .row-action,
-.tree-line .row-action:focus-visible {
+.tree-line:hover .row-actions,
+.tree-line .row-actions:focus-within {
   opacity: 1;
+}
+.row-action.power.is-off,
+.node-power.is-off {
+  color: var(--bad);
 }
 .tree-line:hover .tree-count {
   visibility: hidden;
@@ -586,6 +594,46 @@ pre {
 }
 .node-name {
   font-weight: 600;
+}
+.node-power {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  margin: -4px -6px -4px 0;
+  border-radius: 6px;
+  color: var(--ink-3);
+  cursor: pointer;
+}
+.node-power:hover {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+.node.notready {
+  border-color: var(--bad);
+}
+.node.off .node-res,
+.node.off .pods,
+.node.off .node-head .node-name {
+  opacity: 0.6;
+}
+.node.off {
+  background: repeating-linear-gradient(135deg, var(--surface) 0 10px, var(--surface-2) 10px 20px);
+}
+.node-story {
+  margin: 0 12px 8px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+}
+.node-story.t-wait {
+  background: var(--wait-soft);
+  color: var(--wait);
+}
+.node-story.t-bad {
+  background: var(--bad-soft);
+  color: var(--bad);
 }
 .node-status {
   color: var(--ink-2);
@@ -896,6 +944,10 @@ pre {
 .row dd {
   min-width: 0;
   word-break: break-word;
+}
+.lines {
+  display: grid;
+  overflow-wrap: anywhere;
 }
 .link {
   padding: 0;

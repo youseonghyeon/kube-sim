@@ -1,15 +1,11 @@
 // 왼쪽: 오브젝트 나무 (Deployment → ReplicaSet → Pod 수) 와 노드 목록. 고르면 인스펙터에 보인다.
-import { useMemo } from "preact/hooks";
 import { deployment } from "../core/cluster";
-import { sim, simVersion } from "../model/sim";
+import { currentView, sim } from "../model/sim";
 import { addManifest, addNodeDef, clusterDef, removeNodeDef, selection, uniqueDeploymentName } from "../model/store";
-import { buildView } from "../model/view";
 import { Icon } from "./Icons";
 
 export function Sidebar() {
-  const version = simVersion.value;
-  const c = sim.cluster;
-  const view = useMemo(() => buildView(c), [version, c]);
+  const view = currentView();
   const sel = selection.value;
   const isSel = (kind: string, name: string) => sel?.kind === kind && sel.name === name;
   const manifestNames = new Set(clusterDef.value.manifests.map((m) => m.metadata.name));
@@ -78,9 +74,19 @@ export function Sidebar() {
         {view.nodes.map((n) => (
           <div key={n.name} class="tree-line">
             <button class={`tree-row${isSel("Node", n.name) ? " sel" : ""}`} data-tree={`node/${n.name}`} onClick={() => (selection.value = { kind: "Node", name: n.name })}>
-              <span class={`dot ${n.ready ? (n.cordoned ? "wait" : "ok") : "bad"}`} />
+              <span class={`dot ${n.ready ? (n.powered ? (n.cordoned ? "wait" : "ok") : "wait") : "bad"}`} />
               <span class="tree-name">{n.name}</span>
+              {!n.powered && <span class="tag">꺼짐</span>}
               <span class="tree-count">Pod {n.pods.length}</span>
+            </button>
+            <span class="row-actions">
+            <button
+              class={`icon-btn sm row-action power${n.powered ? "" : " is-off"}`}
+              title={n.powered ? `${n.name} 끄기 — kubelet 이 멈추고 heartbeat 가 끊깁니다 (노드는 클러스터에 남음)` : `${n.name} 다시 켜기`}
+              aria-label={n.powered ? `${n.name} 끄기` : `${n.name} 켜기`}
+              onClick={() => sim.setNodePower(n.name, !n.powered)}
+            >
+              <Icon name="power" size={14} />
             </button>
             <button
               class="icon-btn sm row-action"
@@ -93,6 +99,7 @@ export function Sidebar() {
             >
               <Icon name="trash" size={14} />
             </button>
+            </span>
           </div>
         ))}
       </div>

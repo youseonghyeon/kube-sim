@@ -2,7 +2,7 @@
 // 상태는 API 의 Pod status 로만 알린다 (다른 컴포넌트와 직접 이야기하지 않음).
 // 축소판: 컨테이너는 Pod 마다 첫 번째 하나만 돌린다. probe 는 2단계, heartbeat·NotReady 는 1단계 후반.
 import { refOf, type WatchEvent } from "./api/server";
-import type { ContainerState, Node, Pod } from "./api/types";
+import { NODE_LEASE_NS, type ContainerState, type Node, type Pod } from "./api/types";
 import type { TimerHandle } from "./clock";
 import type { ComponentContext } from "./controllers/base";
 import { setCondition } from "./scheduler";
@@ -18,6 +18,9 @@ export const PULL_FAIL_MS = 800;
 /** 크래시·pull 실패 백오프: 10초부터 두 배, 최대 5분 (실제값) */
 export const BACKOFF_BASE_MS = 10_000;
 export const BACKOFF_MAX_MS = 300_000;
+/** Lease 갱신 주기 (실제값: leaseDuration 40초의 1/4) */
+export const HEARTBEAT_MS = 10_000;
+export const LEASE_DURATION_S = 40;
 /** 이만큼 잘 돌다 죽으면 백오프를 처음부터 */
 export const BACKOFF_RESET_MS = 600_000;
 
@@ -59,6 +62,11 @@ export class Kubelet {
   private nextIp = 2;
   private readonly unwatch: () => void;
   private stopped = false;
+  /** 전원(kubelet 프로세스)이 켜져 있는지. 꺼지면 heartbeat 도, watch 도, 컨테이너도 멈춘다 */
+  private powered = true;
+  /** 꺼졌다 켜질 때마다 +1 — 꺼지기 전에 걸어 둔 타이머가 켜진 뒤에 발화하지 않게 */
+  private epoch = 0;
+  private heartbeat?: TimerHandle;
 
   readonly def: NodeDef;
 
@@ -102,6 +110,78 @@ export class Kubelet {
       this.actor,
     );
     this.ctx.trace.add(this.actor, "node.register", `노드 ${def.name} 등록 (cpu ${fmtCpu(def.cpu)} · memory ${fmtMem(def.memory)} · PodCIDR ${this.podCIDR}) → Ready`, { kind: "Node", name: def.name });
+    const node = this.ctx.api.get("Node", def.name)!;
+    // heartbeat: kube-node-lease 의 Lease 를 10초마다 갱신. Node 가 주인이라 Node 를 지우면 가비지 컬렉터가 함께 지운다
+    this.ctx.api.create<"Lease">(
+      {
+        apiVersion: "coordination.k8s.io/v1",
+        kind: "Lease",
+        metadata: { name: def.name, namespace: NODE_LEASE_NS, ownerReferences: [{ apiVersion: "v1", kind: "Node", name: def.name, uid: node.metadata.uid, controller: false }] },
+        spec: { holderIdentity: def.name, leaseDurationSeconds: LEASE_DURATION_S, renewTime: this.ctx.clock.now },
+      },
+      this.actor,
+    );
+    this.scheduleHeartbeat();
+  }
+
+  get isPowered(): boolean {
+    return this.powered;
+  }
+
+  /** 배경 타이머: 시계를 스스로 움직이지 않는다 (끝없는 주기 동작) */
+  private scheduleHeartbeat(): void {
+    this.heartbeat?.cancel();
+    this.heartbeat = this.ctx.clock.background(HEARTBEAT_MS, this.actor, () => {
+      if (this.stopped || !this.powered) return;
+      this.ctx.api.patch("Lease", this.def.name, NODE_LEASE_NS, this.actor, (l) => {
+        l.spec.renewTime = this.ctx.clock.now;
+      });
+      this.scheduleHeartbeat();
+    });
+  }
+
+  /** 노드 전원을 끈다 (또는 kubelet 이 죽음): heartbeat 가 끊기고, 돌던 컨테이너는 사라지지만 API 는 아직 모른다 */
+  powerOff(): void {
+    if (!this.powered || this.stopped) return;
+    this.powered = false;
+    this.epoch++;
+    this.heartbeat?.cancel();
+    for (const rt of this.pods.values()) rt.timer?.cancel();
+    const n = this.pods.size;
+    this.pods.clear();
+    this.pulls.clear();
+    this.ctx.trace.add(
+      this.actor,
+      "node.power",
+      `노드 ${this.def.name} 꺼짐 → Lease 갱신이 멈춤. 컨테이너 ${n}개도 멈췄지만 API 의 Pod 는 아직 Running 으로 남아 있음 (아무도 모름)`,
+      { kind: "Node", name: this.def.name },
+    );
+  }
+
+  /** 다시 켠다: Node 를 Ready 로 보고하고 Lease 를 갱신한 뒤, 이 노드에 바인딩된 Pod 를 다시 읽어 맞춘다 */
+  powerOn(): void {
+    if (this.powered || this.stopped) return;
+    this.powered = true;
+    this.epoch++;
+    const now = this.ctx.clock.now;
+    this.ctx.api.patch("Node", this.def.name, undefined, this.actor, (n) => {
+      setCondition(n, "Ready", "True", now, "KubeletReady", "kubelet is posting ready status");
+    });
+    this.ctx.api.patch("Lease", this.def.name, NODE_LEASE_NS, this.actor, (l) => {
+      l.spec.renewTime = now;
+    });
+    this.scheduleHeartbeat();
+    const mine = this.ctx.api.list("Pod").filter((p) => p.spec.nodeName === this.def.name);
+    const gone = mine.filter((p) => p.metadata.deletionTimestamp !== undefined);
+    const rerun = mine.filter((p) => p.metadata.deletionTimestamp === undefined);
+    this.ctx.trace.add(
+      this.actor,
+      "node.power",
+      `노드 ${this.def.name} 다시 켜짐 → Ready 보고·Lease 갱신, 이 노드의 Pod 다시 읽기: 지워지던 ${gone.length}개 정리, ${rerun.length}개 컨테이너 다시 시작`,
+      { kind: "Node", name: this.def.name },
+    );
+    for (const p of gone) this.ctx.api.finalizePod(p.metadata.name, p.metadata.namespace, p.metadata.uid, this.actor);
+    for (const p of rerun) this.admit(p, Math.max(0, ...p.status.containerStatuses.map((c) => c.restartCount)) + (p.status.containerStatuses.length ? 1 : 0));
   }
 
   /** 노드 자원을 바꾼다 (실제로는 kubelet 을 새 설정으로 다시 띄우는 것) → Node status 갱신 → 스케줄러가 기다리던 Pod 를 다시 본다 */
@@ -119,6 +199,7 @@ export class Kubelet {
   /** 노드를 클러스터에서 뺄 때: 모든 타이머를 멈추고 더 이상 watch 하지 않는다 */
   stop(): void {
     this.stopped = true;
+    this.heartbeat?.cancel();
     this.unwatch();
     for (const rt of this.pods.values()) rt.timer?.cancel();
     this.pods.clear();
@@ -128,7 +209,7 @@ export class Kubelet {
 
   private onPod(ev: WatchEvent<"Pod">): void {
     const p = ev.object;
-    if (this.stopped || p.spec.nodeName !== this.def.name) return;
+    if (this.stopped || !this.powered || p.spec.nodeName !== this.def.name) return;
     const rt = this.pods.get(p.metadata.uid);
     if (ev.type === "DELETED") {
       if (rt) {
@@ -151,14 +232,14 @@ export class Kubelet {
 
   // ---------- 수명주기 ----------
 
-  private admit(p: Pod): void {
+  private admit(p: Pod, restarts = 0): void {
     const rt: PodRt = {
       uid: p.metadata.uid,
       name: p.metadata.name,
       ns: p.metadata.namespace ?? "default",
       ip: this.allocIp(),
       stage: "sandbox",
-      restarts: 0,
+      restarts,
       crashBackoff: 0,
       pullBackoff: 0,
     };
@@ -177,7 +258,7 @@ export class Kubelet {
         image: c.image,
         ready: false,
         started: false,
-        restartCount: 0,
+        restartCount: restarts,
         state: { waiting: { reason: "ContainerCreating" } },
       }));
     });
@@ -229,10 +310,11 @@ export class Kubelet {
       return;
     }
     this.pulls.set(image, [done]);
+    const epoch = this.epoch;
     this.ctx.clock.after(spec.pullMs, this.actor, () => {
+      if (this.stopped || epoch !== this.epoch) return;
       const cbs = this.pulls.get(image) ?? [];
       this.pulls.delete(image);
-      if (this.stopped) return;
       this.ctx.api.patch("Node", this.def.name, undefined, this.actor, (n: Node) => {
         if (!n.status.images.includes(image)) n.status.images.push(image);
       });

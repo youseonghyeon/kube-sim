@@ -22,7 +22,7 @@ export class ReplicaSetController extends Controller {
     const [ns, name] = splitKey(key);
     const rs = this.api.get("ReplicaSet", name, ns);
     if (!rs || rs.metadata.deletionTimestamp !== undefined) return;
-    const owned = this.api.list("Pod", ns).filter((p) => controllerOf(p.metadata)?.uid === rs.metadata.uid);
+    const owned = this.api.peekList("Pod", ns).filter((p) => controllerOf(p.metadata)?.uid === rs.metadata.uid);
     const active = owned.filter((p) => p.metadata.deletionTimestamp === undefined && !isPodTerminal(p));
     const want = rs.spec.replicas;
     const diff = want - active.length;
@@ -81,7 +81,7 @@ export class ReplicaSetController extends Controller {
   private updateStatus(rs: ReplicaSet, ns: string): void {
     this.api.patch("ReplicaSet", rs.metadata.name, ns, this.name, (cur) => {
       const pods = this.api
-        .list("Pod", ns)
+        .peekList("Pod", ns)
         .filter((p) => controllerOf(p.metadata)?.uid === cur.metadata.uid && p.metadata.deletionTimestamp === undefined && !isPodTerminal(p));
       const ready = pods.filter(isPodReady).length;
       cur.status = { replicas: pods.length, readyReplicas: ready, availableReplicas: ready, observedGeneration: cur.metadata.generation };

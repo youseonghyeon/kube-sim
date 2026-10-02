@@ -15,7 +15,7 @@ export interface NodeUsage {
 }
 
 /** 노드에 올라간(끝나지 않은) Pod 들의 requests 합. Terminating Pod 도 사라질 때까지 자리를 차지한다 */
-export function nodeUsage(pods: Pod[], nodeName: string): NodeUsage {
+export function nodeUsage(pods: readonly Pod[], nodeName: string): NodeUsage {
   let cpu = 0;
   let memory = 0;
   let n = 0;
@@ -101,10 +101,10 @@ export class Scheduler {
     if (!pod || pod.spec.nodeName || pod.metadata.deletionTimestamp !== undefined) return;
     const again = why ? ` (다시 시도: ${why})` : "";
     const req = podRequests(pod.spec);
-    const nodes = api.list("Node");
-    const pods = api.list("Pod");
+    const nodes = api.peekList("Node");
+    const pods = api.peekList("Pod");
     const reasons = new Map<string, number>();
-    const fits: { node: Node; score: number }[] = [];
+    const fits: { node: Readonly<Node>; score: number }[] = [];
     const rejected: string[] = [];
     for (const node of nodes) {
       const why = filter(node, pod, req, nodeUsage(pods, node.metadata.name));

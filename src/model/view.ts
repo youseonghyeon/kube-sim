@@ -1,7 +1,9 @@
 // 화면에 그릴 모양을 클러스터에서 뽑는다 (순수 함수 — 테스트 가능).
-import { controllerOf, isNodeReady, isPodReady, type Deployment, type Node, type Pod, type ReplicaSet } from "../core/api/types";
+import { controllerOf, isNodeReady, isPodReady, NODE_LEASE_NS, type Deployment, type Node, type Pod, type ReplicaSet } from "../core/api/types";
 import type { Cluster } from "../core/cluster";
 import { nodeStatusText, podReadyText, podStatusText } from "../core/kubectl";
+import { DEFAULT_TOLERATION_SECONDS } from "../core/api/server";
+import { NODE_MONITOR_GRACE_MS } from "../core/controllers/nodelifecycle";
 import { nodeUsage } from "../core/scheduler";
 import type { ObjRef, TraceEvent } from "../core/trace";
 
@@ -27,6 +29,12 @@ export interface NodeView {
   status: string;
   ready: boolean;
   cordoned: boolean;
+  /** kubelet(전원)이 켜져 있는지 — API 는 모르는 사실이라 화면에만 */
+  powered: boolean;
+  /** Lease 를 마지막으로 갱신한 시각 */
+  renewTime?: number;
+  /** unreachable:NoExecute taint 가 붙은 시각 (NotReady 가 된 시각) */
+  unreachableSince?: number;
   cpu: { used: number; total: number };
   memory: { used: number; total: number };
   pods: PodView[];
@@ -48,6 +56,31 @@ export interface ClusterView {
 }
 
 export const OWNER_COLORS = 6;
+
+/** 노드 상자 아래에 띄울 "지금 무슨 일이 진행 중인가" 한 줄 (노드 장애 시계) */
+export function nodeStory(n: NodeView, now: number): { tone: Tone; text: string } | undefined {
+  const sec = (ms: number) => Math.max(0, Math.ceil(ms / 1000));
+  const mmss = (ms: number) => {
+    const s = sec(ms);
+    return s >= 60 ? `${Math.floor(s / 60)}분 ${s % 60}초` : `${s}초`;
+  };
+  if (n.unreachableSince !== undefined) {
+    const left = n.unreachableSince + DEFAULT_TOLERATION_SECONDS * 1000 - now;
+    const stuck = n.pods.filter((p) => p.pod.metadata.deletionTimestamp !== undefined).length;
+    if (left > 0) return { tone: "bad", text: `NotReady — ${mmss(left)} 뒤 이 노드의 Pod 를 eviction (기본 toleration ${DEFAULT_TOLERATION_SECONDS}초)` };
+    if (!n.powered && stuck) return { tone: "bad", text: `Pod ${stuck}개가 Terminating 에 멈춤 — 컨테이너를 멈추고 확인해 줄 kubelet 이 없음` };
+    return { tone: "bad", text: n.powered ? "다시 켜짐 — node-lifecycle-controller 가 다음 확인(5초 주기) 때 taint 를 뗍니다" : "NotReady — 이 노드의 Pod 는 다른 노드로 옮겨졌습니다" };
+  }
+  if (!n.powered) {
+    const since = n.renewTime ?? 0;
+    const left = since + NODE_MONITOR_GRACE_MS - now;
+    return {
+      tone: "wait",
+      text: left > 0 ? `꺼짐 — 마지막 heartbeat ${sec(now - since)}초 전. API 는 아직 모름, 약 ${sec(left)}초 뒤 NotReady` : "꺼짐 — 곧 node-lifecycle-controller 가 알아챔 (5초 주기)",
+    };
+  }
+  return undefined;
+}
 
 const BAD = new Set(["CrashLoopBackOff", "Error", "ErrImagePull", "ImagePullBackOff", "OOMKilled", "InvalidImageName", "CreateContainerConfigError"]);
 
@@ -83,8 +116,13 @@ export function buildView(c: Cluster): ClusterView {
   });
   const nodes: NodeView[] = c.api.list("Node").map((n) => {
     const u = nodeUsage(allPods, n.metadata.name);
+    const lease = c.api.get("Lease", n.metadata.name, NODE_LEASE_NS);
+    const noExec = (n.spec.taints ?? []).find((t) => t.key === "node.kubernetes.io/unreachable" && t.effect === "NoExecute");
     return {
       node: n,
+      powered: c.nodePowered(n.metadata.name),
+      renewTime: lease?.spec.renewTime,
+      unreachableSince: noExec?.timeAdded,
       name: n.metadata.name,
       ip: n.status.addresses.find((a) => a.type === "InternalIP")?.address ?? "",
       status: nodeStatusText(n),

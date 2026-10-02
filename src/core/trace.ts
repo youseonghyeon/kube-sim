@@ -27,7 +27,14 @@ export type TraceKind =
   | "kubelet.backoff"
   | "kubelet.kill"
   | "kubelet.removed"
-  | "node.register";
+  | "node.register"
+  /** kubelet 이 꺼지거나 다시 켜짐 (사용자 동작) */
+  | "node.power"
+  /** node-lifecycle-controller: Lease 가 끊겨 NotReady·taint, 또는 되살아남 */
+  | "node.notready"
+  | "node.ready"
+  /** taint-eviction-controller: NoExecute taint 를 못 견디는 Pod 를 지움 */
+  | "node.evict";
 
 export interface ObjRef {
   kind: string;

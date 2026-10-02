@@ -1,10 +1,11 @@
 // 오른쪽 인스펙터: 고른 오브젝트의 개요·설정·describe·YAML. 아무것도 안 골랐으면 예제의 "해 볼 것".
 import { useSignal } from "@preact/signals";
 import { useEffect, useMemo } from "preact/hooks";
-import { controllerOf, type Deployment, type KObject, type Node, type Pod, type ReplicaSet } from "../core/api/types";
-import { eventSource, podRestartsText, podStatusText, runKubectl } from "../core/kubectl";
+import { controllerOf, isNodeReady, NODE_LEASE_NS, type Deployment, type KObject, type Node, type Pod, type ReplicaSet } from "../core/api/types";
+import { eventSource, nodeStatusText, podRestartsText, podStatusText, runKubectl } from "../core/kubectl";
 import { fmtAge, fmtCpu, fmtMem, parseCpu, parseMem } from "../core/units";
 import { IMAGE_NAMES, IMAGES } from "../core/workloads";
+import { NODE_MONITOR_GRACE_MS } from "../core/controllers/nodelifecycle";
 import { exampleById, resolveCommand } from "../model/examples";
 import { sim, simVersion } from "../model/sim";
 import { clusterDef, drawerOpen, drawerTab, exampleId, removeManifest, selection, updateManifest, updateNodeDef } from "../model/store";
@@ -83,7 +84,11 @@ function StatusBadge({ obj }: { obj: KObject }) {
     const s = podStatusText(obj);
     return <span class={`badge t-${toneOf(obj, s)}`}>{s}</span>;
   }
-  if (obj.kind === "Node") return <span class={`badge t-${obj.spec.unschedulable ? "wait" : "ok"}`}>{obj.spec.unschedulable ? "SchedulingDisabled" : "Ready"}</span>;
+  if (obj.kind === "Node") {
+    const s = nodeStatusText(obj);
+    return <span class={`badge t-${!isNodeReady(obj) ? "bad" : obj.spec.unschedulable ? "wait" : "ok"}`}>{s}</span>;
+  }
+  if (obj.kind === "Lease") return null;
   const ready = obj.status.readyReplicas;
   return <span class={`badge t-${ready === obj.spec.replicas ? "ok" : "wait"}`}>{`${ready}/${obj.spec.replicas} Ready`}</span>;
 }
@@ -312,11 +317,34 @@ function ReplicaSetOverview({ rs }: { rs: ReplicaSet }) {
 function NodeOverview({ n }: { n: Node }) {
   const c = sim.cluster;
   const pods = c.api.list("Pod").filter((p) => p.spec.nodeName === n.metadata.name);
+  const powered = c.nodePowered(n.metadata.name);
+  const lease = c.api.get("Lease", n.metadata.name, NODE_LEASE_NS);
+  const ready = n.status.conditions.find((x) => x.type === "Ready");
   return (
     <>
+      {!powered && (
+        <div class="callout warn">
+          <div class="callout-title">꺼진 노드</div>
+          <div class="small">API 서버는 노드가 꺼진 것을 직접 알 수 없습니다. kubelet 의 heartbeat(Lease)가 {NODE_MONITOR_GRACE_MS / 1000}초 넘게 끊기면 그때 NotReady 로 봅니다.</div>
+        </div>
+      )}
       <Rows
         rows={[
-          ["상태", n.spec.unschedulable ? "Ready, SchedulingDisabled (cordon)" : "Ready"],
+          ["상태", nodeStatusText(n)],
+          ["Ready", <span>{`${ready?.status ?? "—"}${ready?.reason ? ` (${ready.reason})` : ""}`}</span>],
+          ["heartbeat", lease ? `${fmtAge(c.now - lease.spec.renewTime)} 전 (Lease, 10초마다)` : "—"],
+          [
+            "taints",
+            n.spec.taints?.length ? (
+              <span class="lines mono small">
+                {n.spec.taints.map((t) => (
+                  <span key={`${t.key}:${t.effect}`}>{`${t.key}:${t.effect}`}</span>
+                ))}
+              </span>
+            ) : (
+              "없음"
+            ),
+          ],
           ["InternalIP", <span class="mono">{n.status.addresses.find((a) => a.type === "InternalIP")?.address}</span>],
           ["PodCIDR", <span class="mono">{n.spec.podCIDR}</span>],
           ["allocatable", <span class="mono">{`cpu ${fmtCpu(n.status.allocatable.cpu)} · memory ${fmtMem(n.status.allocatable.memory)} · pods ${n.status.allocatable.pods}`}</span>],
@@ -326,6 +354,10 @@ function NodeOverview({ n }: { n: Node }) {
       <div class="actions">
         <button class="btn" onClick={() => runAndShow(`kubectl ${n.spec.unschedulable ? "uncordon" : "cordon"} ${n.metadata.name}`)}>
           {n.spec.unschedulable ? "uncordon" : "cordon"}
+        </button>
+        <button class="btn" onClick={() => sim.setNodePower(n.metadata.name, !powered)} title="전원·kubelet 을 끄고 켭니다. API 는 heartbeat(Lease)가 끊긴 것으로만 알아챕니다">
+          <Icon name="power" size={14} />
+          {powered ? "노드 끄기" : "다시 켜기"}
         </button>
       </div>
       <h3>Pod ({pods.length})</h3>
@@ -513,6 +545,18 @@ function ExamplePanel() {
             return (
               <li key={i} class="try">
                 <div class="try-title">{t.title}</div>
+                {t.action && (
+                  <div class="try-cmd">
+                    <code class="mono">{t.action.on ? `노드 ${t.action.node} 다시 켜기` : `노드 ${t.action.node} 끄기`}</code>
+                    <button
+                      class="btn sm"
+                      disabled={sim.cluster.nodePowered(t.action.node) === t.action.on || !sim.cluster.kubelets.has(t.action.node)}
+                      onClick={() => t.action && sim.setNodePower(t.action.node, t.action.on)}
+                    >
+                      실행
+                    </button>
+                  </div>
+                )}
                 {t.command && (
                   <div class="try-cmd">
                     <code class="mono">{cmd ?? t.command}</code>

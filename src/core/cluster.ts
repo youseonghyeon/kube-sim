@@ -5,6 +5,7 @@ import type { Deployment, PodSpec } from "./api/types";
 import { Clock } from "./clock";
 import type { ComponentContext } from "./controllers/base";
 import { DeploymentController } from "./controllers/deployment";
+import { NodeLifecycleController, TaintEvictionController } from "./controllers/nodelifecycle";
 import { ReplicaSetController } from "./controllers/replicaset";
 import { Kubelet, type NodeDef } from "./kubelet";
 import { Rng } from "./rng";
@@ -42,6 +43,8 @@ export class Cluster {
     new DeploymentController(this.ctx);
     new ReplicaSetController(this.ctx, this.rng);
     new Scheduler(this.ctx);
+    new NodeLifecycleController(this.ctx);
+    new TaintEvictionController(this.ctx);
     // pod-garbage-collector: 사라진 노드에 바인딩돼 있던 Pod 는 강제로 지운다
     this.api.watch("Node", (ev) => {
       if (ev.type !== "DELETED") return;
@@ -71,6 +74,19 @@ export class Cluster {
     k.stop();
     this.kubelets.delete(name);
     if (this.api.get("Node", name)) this.api.delete("Node", name, undefined, actor);
+  }
+
+  /** 노드 전원 끄기·켜기 (kubelet 이 멈추거나 다시 뜸). 노드는 클러스터에 남는다 */
+  setNodePower(name: string, on: boolean): void {
+    const k = this.kubelets.get(name);
+    if (!k || k.isPowered === on) return;
+    this.trace.add("user", "user", `노드 ${name} ${on ? "다시 켜기" : "끄기 (전원·kubelet 멈춤)"}`, { kind: "Node", name });
+    if (on) k.powerOn();
+    else k.powerOff();
+  }
+
+  nodePowered(name: string): boolean {
+    return this.kubelets.get(name)?.isPowered ?? false;
   }
 
   resizeNode(name: string, cpu: number, memory: number): void {

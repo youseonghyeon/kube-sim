@@ -22,9 +22,10 @@
   - 최소 예제: 노드 2대 + Pod 하나가 Pending → Running 이 되는 것까지(스케줄러·kubelet 은 가장 단순하게)
 - 완료 기준: 네 가지 검증 통과, 로그에 Pod 수명주기 트레이스가 보이고 스크린샷이 DESIGN.md 를 따른다. **사용자에게 화면을 보여 주고 방향을 확인받는다.**
 
-## 1. 오브젝트와 컨트롤 루프 (진행 중)
+## 1. 오브젝트와 컨트롤 루프 ✅ 2026-10-02
 - 된 것 (2026-10-02): API 저장소·watch·resourceVersion·Conflict·GC, Deployment·ReplicaSet 컨트롤러, 스케줄러(requests·nodeSelector·taint·cordon, FailedScheduling), kubelet(pull·ErrImagePull/ImagePullBackOff·CrashLoopBackOff·SIGTERM 정리), pod-garbage-collector, kubectl 흉내(get·describe·create·scale·set image/resources·delete·cordon), 이벤트, 예제 5개
-- 남은 것: 노드 heartbeat(Lease) → NotReady → taint → toleration 300초 → eviction ("노드 하나 죽이기" 예제), `kubectl get pods -w`
+- 노드 장애 (2026-10-02): Lease heartbeat → 40초 → NotReady·unreachable taint → toleration 300초 → eviction → Terminating 에 멈춤, 다시 켜면 정리. 예제 "노드 하나 죽이기". `kubectl get leases -n kube-node-lease`
+- 남은 것(작음): `kubectl get pods -w`
 - 축소판: 템플릿이 바뀌면 옛 ReplicaSet 을 바로 0 으로(Recreate 식, 롤링 업데이트는 3단계), 컨테이너는 Pod 마다 첫 번째만 돌림, ReplicaSet slow start·expectations 없음, 스케줄러 점수는 LeastAllocated 하나·preemption 없음
 - 배우는 것
   - 선언과 reconcile: Pod 를 지워도 ReplicaSet 이 다시 만든다, replicas 를 바꾸면 무엇이 무엇을 만드는가(Deployment → ReplicaSet → Pod, ownerReferences)

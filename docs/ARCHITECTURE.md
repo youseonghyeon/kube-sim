@@ -7,7 +7,7 @@
 - 일반 타이머: 시계를 그 시각으로 점프시킬 수 있다. 끝이 있는 기다림(이미지 pull 3초, 재시작 백오프)에 쓴다. 핸들로 취소한다 — 끝난 일의 타이머가 남으면 시계가 엉뚱하게 뛴다(net-sim LESSONS 1).
 - 배경 타이머: 그 자체로는 시계를 움직이지 않고, 다른 일로 시간이 그 시각을 지날 때만 발화한다. 끝나지 않는 주기 동작(probe 주기, 노드 heartbeat, 컨트롤러 resync)은 반드시 이것으로. 일반 이벤트가 없으면 `runToIdle` 은 멈춘다.
 - `runToIdle(maxEvents)`, `runUntil(t)`, `step()`.
-- **화면 시계 (결정 2026-10-02)**: 일반 이벤트가 남아 있으면 재생 속도(1× = 실제 시간)로 흐르고, 없으면 멈춘다. net-sim 처럼 다음 이벤트로 **점프하지 않는다** — 기다림 자체(pull 3초, 백오프 10초)가 배울 거리라서. 긴 기다림은 속도(최대 30×)와 "+10초"·"+1분" 으로. (`src/model/simClock.ts`)
+- **화면 시계 (결정 2026-10-02, 같은 날 고침)**: 타이머(일반 또는 배경)가 하나라도 걸려 있으면 재생 속도(1× = 실제 시간)로 흐르고, 하나도 없으면 멈춘다. 노드가 있으면 kubelet heartbeat(배경)가 늘 있으므로 실제 클러스터처럼 시간이 계속 흐른다 — 노드 장애의 40초·300초가 저절로 지나가야 해서다(처음 안은 "일반 이벤트가 있을 때만" 이었는데, 그러면 노드를 끈 뒤 아무 일도 일어나지 않는다). net-sim 처럼 다음 이벤트로 **점프하지 않는다** — 기다림 자체가 배울 거리. 긴 기다림은 속도(최대 30×)와 "+10초"·"+1분". 테스트의 `runToIdle` 은 여전히 일반 이벤트만 본다(배경은 끝이 없으므로). (`src/model/simClock.ts`)
 - **끝없는 일반 타이머 사슬 (결정)**: 크래시·이미지 pull 재시도는 실제 kubelet 처럼 영원히 계속된다. 간격이 10초부터 최대 300초라 폭주하지 않으므로 배경 타이머가 아니라 일반 타이머로 둔다(배경이면 화면 시계가 멈춰 재시작이 안 보인다). 대신 크래시 루프가 있는 구성에서는 `runToIdle` 이 끝나지 않는다 → 테스트는 `runFor(ms)` 를 쓴다.
 - 같은 순간의 여러 변화(노드를 지워 Pod 여럿이 동시에 사라짐)를 보고 판단해야 하는 곳은 0ms 타이머로 미뤄 모두 본 뒤 정한다(net-sim LESSONS 4v).
 
@@ -27,6 +27,14 @@
 - EndpointSlice: Service 셀렉터 + Pod Ready 조건 → 엔드포인트 목록(2단계).
 - Node lifecycle: heartbeat(Lease) 끊김 → NotReady → taint → toleration 만료 Pod eviction.
 - 트레이스 actor 이름은 실제 컴포넌트 이름: `kube-scheduler`, `replicaset-controller`, `deployment-controller`, `kubelet@node-1`, `kube-proxy@node-2`, `coredns`.
+
+## 3-1. 노드 장애 (1단계, `controllers/nodelifecycle.ts`)
+- kubelet 은 `kube-node-lease` 의 Lease 를 10초마다 갱신(배경 타이머). Lease 는 Node 가 주인 → Node 를 지우면 GC.
+- node-lifecycle-controller: 5초마다(배경) Lease 를 보고 40초 넘게 갱신이 없으면 Ready=Unknown(`NodeStatusUnknown`), taint `node.kubernetes.io/unreachable` NoSchedule·NoExecute(timeAdded), 그 노드 Pod 의 Ready=False. 다시 갱신되고 kubelet 이 Ready 를 보고하면 taint 제거.
+- API 서버는 Pod 를 만들 때 기본 toleration(not-ready·unreachable NoExecute 300초)을 붙인다(DefaultTolerationSeconds).
+- taint-eviction-controller: NoExecute taint 의 timeAdded + tolerationSeconds 에 Pod 삭제를 예약(일반 타이머 — taint 가 빠지면 취소). kubelet 이 없으니 Pod 는 Terminating 에 멈춘다(실제와 같음). 노드가 돌아오면 kubelet 이 정리, Node 를 지우면 pod-garbage-collector 가 강제 삭제.
+- 노드 "끄기" 는 API 에 없는 사실이라 `Cluster.setNodePower` 로만 바꾸고 화면은 `nodePowered` 로 안다. 켜면 kubelet 이 바인딩된 Pod 를 다시 읽어 맞춘다(지워지던 것 정리, 나머지는 새 샌드박스·새 IP·재시작 +1).
+- 축소판: zone 별 eviction 속도 제한·대규모 장애 보호 없음, NodeStatus 주기 보고 없음(Lease 만), not-ready(kubelet 은 살았는데 런타임 고장) 경우 없음.
 
 ## 4. 스케줄러
 - 바인딩 안 된 Pod 를 큐에 → 필터(Ready 노드, requests 가 남은 자리에 맞음, nodeSelector, taint/toleration) → 점수(남은 자원 균형 등 단순 규칙, 동점은 노드 이름 순 — 결정론) → `spec.nodeName` 바인딩.

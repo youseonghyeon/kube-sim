@@ -5,6 +5,7 @@ import { runKubectl, type KubectlResult } from "../core/kubectl";
 import { DefSync } from "./defSync";
 import { exampleById } from "./examples";
 import { advanceClock, EVENT_BURST_LIMIT } from "./simClock";
+import { buildView, type ClusterView } from "./view";
 import { clusterDef, exampleId } from "./store";
 
 /** 보관하는 트레이스 상한 (넘으면 오래된 것부터) */
@@ -115,6 +116,11 @@ class SimController {
     return result;
   }
 
+  setNodePower(name: string, on: boolean): void {
+    this.cluster.setNodePower(name, on);
+    this.bump();
+  }
+
   drift(name: string): string[] {
     const m = clusterDef.peek().manifests.find((x) => x.metadata.name === name);
     return m ? this.syncer.drift(m) : [];
@@ -139,6 +145,15 @@ class SimController {
 }
 
 export const sim = new SimController();
+
+let viewCache: { cluster: unknown; version: number; view: ClusterView } | undefined;
+/** 화면 모양 — 같은 버전이면 캔버스·왼쪽 목록이 한 번 만든 것을 같이 쓴다 */
+export function currentView(): ClusterView {
+  const version = simVersion.value;
+  const cluster = sim.cluster;
+  if (!viewCache || viewCache.version !== version || viewCache.cluster !== cluster) viewCache = { cluster, version, view: buildView(cluster) };
+  return viewCache.view;
+}
 
 export function togglePlay(): void {
   running.value = !running.value;

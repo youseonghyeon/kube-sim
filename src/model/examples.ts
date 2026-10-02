@@ -11,6 +11,8 @@ export interface ClusterDef {
 export interface TryStep {
   /** 무엇을 해 보나 */
   title: string;
+  /** kubectl 이 아닌 동작 (노드 전원) */
+  action?: { type: "power"; node: string; on: boolean };
   /** 무엇을 보게 되나 (학습 포인트) */
   expect: string;
   /** 눌러서 실행할 kubectl 명령. {pod:<deploy>} 는 그 Deployment 의 첫 Pod 이름, {node:<n>} 는 n 번째 노드 이름으로 바뀐다 */
@@ -140,6 +142,41 @@ export const EXAMPLES: Example[] = [
     ],
   },
   {
+    id: "node-down",
+    title: "노드 하나 죽이기 (왜 5분이 걸리나)",
+    summary: "노드가 꺼져도 Pod 가 바로 옮겨지지 않는 이유 — Lease 40초, NotReady·taint, toleration 300초, 그리고 Terminating 에 멈추는 Pod.",
+    build: () => ({
+      nodes: [node("worker-1"), node("worker-2"), node("worker-3")],
+      manifests: [deployment("web", { replicas: 6, image: "nginx:1.27", cpu: 250, memory: 128 })],
+    }),
+    tries: [
+      {
+        title: "heartbeat 보기",
+        command: "kubectl get leases -n kube-node-lease",
+        expect: "kubelet 은 10초마다 자기 노드의 Lease 를 갱신합니다. RENEWED 가 10초를 넘지 않습니다.",
+      },
+      {
+        title: "worker-2 끄기",
+        action: { type: "power", node: "worker-2", on: false },
+        expect: "컨테이너는 이미 멈췄지만 API 는 아직 모릅니다. 40초 동안 노드는 Ready, Pod 는 Running 으로 보입니다. 속도를 10× 로 올려 보세요.",
+      },
+      {
+        title: "NotReady 확인",
+        command: "kubectl describe node worker-2",
+        expect: "Lease 가 40초 넘게 끊기면 node-lifecycle-controller 가 Ready=Unknown 과 taint node.kubernetes.io/unreachable 을 붙입니다. Pod 는 Ready=False 가 되지만 STATUS 는 여전히 Running 입니다.",
+      },
+      {
+        title: "5분 기다리기",
+        expect: "Pod 마다 붙은 기본 toleration(unreachable 300초)이 끝나야 taint-eviction-controller 가 지웁니다. 그제야 ReplicaSet 이 다른 노드에 새 Pod 를 만듭니다. 옛 Pod 는 정리해 줄 kubelet 이 없어 Terminating 에 멈춥니다.",
+      },
+      {
+        title: "worker-2 다시 켜기",
+        action: { type: "power", node: "worker-2", on: true },
+        expect: "kubelet 이 돌아와 Ready 를 보고하고, Terminating 이던 Pod 를 정리합니다. taint 가 빠지면 새 Pod 가 다시 갈 수 있습니다 (옮겨 간 Pod 가 돌아오지는 않습니다).",
+      },
+    ],
+  },
+  {
     id: "nodes",
     title: "노드 비우기와 빼기",
     summary: "cordon 으로 새 Pod 를 막고, 노드를 빼면 그 위의 Pod 가 다른 노드로 다시 생기는 것을 봅니다.",
@@ -165,6 +202,7 @@ export const EXAMPLES: Example[] = [
     ],
   },
 ];
+
 
 export const DEFAULT_EXAMPLE = "basics";
 
