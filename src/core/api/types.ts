@@ -200,8 +200,41 @@ export interface Service {
   apiVersion: "v1";
   kind: "Service";
   metadata: ObjectMeta;
-  spec: { type: "ClusterIP" | "NodePort"; selector: Record<string, string>; ports: ServicePort[]; clusterIP?: string };
-  status: Record<string, never>;
+  spec: {
+    type: ServiceType;
+    selector: Record<string, string>;
+    ports: ServicePort[];
+    clusterIP?: string;
+    /** NodePort·LoadBalancer 로 바깥에서 들어온 트래픽: Cluster(아무 노드의 Pod, 출발지 SNAT) · Local(그 노드의 Pod 만, 출발지 보존) */
+    externalTrafficPolicy?: "Cluster" | "Local";
+  };
+  status: { loadBalancer?: { ingress?: { ip?: string; hostname?: string }[] } };
+}
+
+export type ServiceType = "ClusterIP" | "NodePort" | "LoadBalancer";
+
+export interface IngressBackend {
+  service: { name: string; port: { number: number } };
+}
+
+export interface IngressPath {
+  path: string;
+  pathType: "Prefix" | "Exact";
+  backend: IngressBackend;
+}
+
+/** 바깥 HTTP 요청을 호스트·경로로 나눠 Service 로 보내는 규칙. 실제로 처리하는 것은 Ingress 컨트롤러(ingressClassName 이 고름) */
+export interface Ingress {
+  apiVersion: "networking.k8s.io/v1";
+  kind: "Ingress";
+  metadata: ObjectMeta;
+  spec: {
+    ingressClassName?: string;
+    defaultBackend?: IngressBackend;
+    rules?: { host?: string; http: { paths: IngressPath[] } }[];
+    tls?: { hosts: string[] }[];
+  };
+  status: { loadBalancer: { ingress?: { ip?: string; hostname?: string }[] } };
 }
 
 export interface Endpoint {
@@ -245,7 +278,7 @@ export interface Lease {
 
 export const NODE_LEASE_NS = "kube-node-lease";
 
-export type KObject = Pod | ReplicaSet | Deployment | Node | Lease | Service | EndpointSlice | PodDisruptionBudget;
+export type KObject = Pod | ReplicaSet | Deployment | Node | Lease | Service | EndpointSlice | PodDisruptionBudget | Ingress;
 export type Kind = KObject["kind"];
 
 export type ObjectOf<K extends Kind> = Extract<KObject, { kind: K }>;

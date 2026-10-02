@@ -28,6 +28,9 @@ export interface SvcRule {
   clusterIP: string;
   port: number;
   nodePort?: number;
+  /** MetalLB 가 준 LoadBalancer IP */
+  lbIP?: string;
+  externalTrafficPolicy?: "Cluster" | "Local";
   chain: string;
   /** ready 인 엔드포인트만 (iptables 모드) */
   seps: SepRule[];
@@ -109,7 +112,26 @@ export class KubeProxy {
       const svc = `${r.ns}/${r.name}${r.portName ? `:${r.portName}` : ""}`;
       if (!r.seps.length) continue; // filter 테이블의 REJECT 가 맡는다
       lines.push(`-A KUBE-SERVICES -d ${r.clusterIP}/32 -p tcp -m comment --comment "${svc} cluster IP" -m tcp --dport ${r.port} -j ${r.chain}`);
-      if (r.nodePort) lines.push(`-A KUBE-NODEPORTS -p tcp -m comment --comment "${svc}" -m tcp --dport ${r.nodePort} -j ${r.chain}`);
+      if (r.nodePort || r.lbIP) {
+        // 바깥에서 온 것: KUBE-EXT → Cluster 면 SNAT 표시 후 모든 엔드포인트, Local 이면 이 노드의 엔드포인트만(KUBE-SVL)
+        const ext = r.chain.replace("KUBE-SVC-", "KUBE-EXT-");
+        if (r.lbIP) lines.push(`-A KUBE-SERVICES -d ${r.lbIP}/32 -p tcp -m comment --comment "${svc} loadbalancer IP" -m tcp --dport ${r.port} -j ${ext}`);
+        if (r.nodePort) lines.push(`-A KUBE-NODEPORTS -p tcp -m comment --comment "${svc}" -m tcp --dport ${r.nodePort} -j ${ext}`);
+        if (r.externalTrafficPolicy === "Local") {
+          const svl = r.chain.replace("KUBE-SVC-", "KUBE-SVL-");
+          lines.push(`-A ${ext} -m comment --comment "${svc} (externalTrafficPolicy: Local)" -j ${svl}`);
+          const local = r.seps.filter((s) => s.nodeName === this.nodeName);
+          if (!local.length) lines.push(`-A ${svl} -m comment --comment "${svc} has no local endpoints" -j KUBE-MARK-DROP`);
+          local.forEach((s, i) => {
+            const left = local.length - i;
+            const prob = left > 1 ? ` -m statistic --mode random --probability ${iptablesProbability(1 / left)}` : "";
+            lines.push(`-A ${svl} -m comment --comment "${svc} -> ${s.ip}:${s.port}"${prob} -j ${s.chain}`);
+          });
+        } else {
+          lines.push(`-A ${ext} -m comment --comment "masquerade traffic for ${svc} external destinations" -j KUBE-MARK-MASQ`);
+          lines.push(`-A ${ext} -j ${r.chain}`);
+        }
+      }
       r.seps.forEach((s, i) => {
         const left = r.seps.length - i;
         const prob = left > 1 ? ` -m statistic --mode random --probability ${iptablesProbability(1 / left)}` : "";
@@ -142,7 +164,18 @@ export function buildRules(services: readonly Service[], slices: readonly Endpoi
         }
       }
       seps.sort((a, b) => (a.ip < b.ip ? -1 : 1));
-      out.push({ ns, name: svc.metadata.name, portName: p.name, clusterIP: svc.spec.clusterIP, port: p.port, nodePort: p.nodePort, chain: `KUBE-SVC-${chainHash(`${key}/tcp`)}`, seps });
+      out.push({
+        ns,
+        name: svc.metadata.name,
+        portName: p.name,
+        clusterIP: svc.spec.clusterIP,
+        port: p.port,
+        nodePort: p.nodePort,
+        lbIP: svc.status.loadBalancer?.ingress?.[0]?.ip,
+        externalTrafficPolicy: svc.spec.externalTrafficPolicy,
+        chain: `KUBE-SVC-${chainHash(`${key}/tcp`)}`,
+        seps,
+      });
     }
   }
   return out;

@@ -39,6 +39,8 @@ export type TraceKind =
   | "node.evict"
   /** kube-proxy 가 노드의 iptables 규칙을 다시 씀 */
   | "net.rules"
+  /** MetalLB IP 할당·노드 맡기, Ingress 주소, Tailscale 프록시 */
+  | "net.lb"
   /** 요청 한 번의 단계: DNS → DNAT(규칙) → 노드 간 경로 → 앱 응답 / 실패 */
   | "net.request"
   | "net.dns"

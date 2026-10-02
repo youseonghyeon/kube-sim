@@ -95,5 +95,5 @@ export function manifestKey(m: Manifest): string {
 }
 
 function resourceName(kind: Manifest["kind"]): string {
-  return kind === "Deployment" ? "deployment.apps" : kind === "Service" ? "service" : "poddisruptionbudget.policy";
+  return kind === "Deployment" ? "deployment.apps" : kind === "Service" ? "service" : kind === "Ingress" ? "ingress.networking.k8s.io" : "poddisruptionbudget.policy";
 }

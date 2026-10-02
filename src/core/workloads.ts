@@ -17,13 +17,29 @@ export interface ImageSpec {
   body?: string;
   /** 시작 후 이만큼 지나야 readiness 가 통과 (앱 준비 시간) */
   warmupMs?: number;
+  /**
+   * 특별한 앱: ingress-nginx = Host·경로로 Ingress 규칙을 찾아 Pod 로 프록시, tailscale-proxy = Tailscale 오퍼레이터의 프록시(TLS 종료 → Service),
+   * echo = 받은 요청의 출발지 IP 를 그대로 돌려줌 (whoami)
+   */
+  role?: "ingress-nginx" | "tailscale-proxy" | "echo";
   description: string;
 }
 
 export const IMAGES: Record<string, ImageSpec> = {
   "nginx:1.27": { pullMs: 3000, sizeMB: 72, termMs: 300, port: 80, body: "<title>Welcome to nginx!</title>", description: "웹 서버 (포트 80). 잘 뜨고 SIGTERM 에 바로 끝납니다" },
   "nginx:1.28": { pullMs: 3000, sizeMB: 73, termMs: 300, port: 80, body: "<title>Welcome to nginx!</title> (1.28)", description: "웹 서버 새 버전 (포트 80)" },
-  "ghcr.io/youseonghyeon/net-sim:latest": { pullMs: 4000, sizeMB: 25, termMs: 300, port: 80, body: "<title>net-sim</title>", description: "정적 사이트 (nginx 위 net-sim, 포트 80)" },
+  "ghcr.io/youseonghyeon/net-sim:latest": { pullMs: 4000, sizeMB: 25, termMs: 300, port: 8080, body: "<title>net-sim</title>", description: "정적 사이트 (nginx-unprivileged 위 net-sim, 포트 8080)" },
+  "registry.k8s.io/ingress-nginx/controller:v1.11.2": {
+    pullMs: 4000,
+    sizeMB: 110,
+    termMs: 300,
+    port: 80,
+    body: "",
+    role: "ingress-nginx",
+    description: "ingress-nginx 컨트롤러: Ingress 규칙(Host·경로)대로 Pod 로 프록시 (포트 80)",
+  },
+  "tailscale/tailscale:v1.76.6": { pullMs: 3000, sizeMB: 90, termMs: 300, port: 443, body: "", role: "tailscale-proxy", description: "Tailscale 오퍼레이터의 Ingress 프록시: tailnet 기기로 붙어 TLS 를 끝내고 Service 로 보냄" },
+  "traefik/whoami:v1.10": { pullMs: 1500, sizeMB: 7, termMs: 100, port: 80, body: "", role: "echo", description: "받은 요청의 출발지 IP·헤더를 그대로 보여 줌 (출발지 IP 보존 실험용)" },
   "redis:7": { pullMs: 2500, sizeMB: 45, termMs: 500, port: 6379, description: "인메모리 DB (포트 6379, HTTP 아님)" },
   "example/api:1.0": {
     pullMs: 2500,

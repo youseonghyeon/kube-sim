@@ -1,7 +1,7 @@
 // 클러스터 한 벌: 시계 + 트레이스 + API 서버 + 컨트롤 플레인(스케줄러·컨트롤러) + 노드마다 kubelet.
 // 바깥(모델·kubectl·UI)은 여기 메서드로만 클러스터를 바꾼다.
 import { ApiServer, WATCH_DELAY_MS } from "./api/server";
-import type { Deployment, PodDisruptionBudget, PodSpec, Probe, Service } from "./api/types";
+import type { Deployment, Ingress, PodDisruptionBudget, PodSpec, Probe, Service, ServiceType } from "./api/types";
 import { Clock } from "./clock";
 import type { ComponentContext } from "./controllers/base";
 import { DeploymentController } from "./controllers/deployment";
@@ -11,8 +11,9 @@ import { EndpointSliceController } from "./controllers/endpointslice";
 import { NodeLifecycleController, TaintEvictionController } from "./controllers/nodelifecycle";
 import { ReplicaSetController } from "./controllers/replicaset";
 import { Kubelet, type NodeDef } from "./kubelet";
+import { IngressNginxStatus, MetalLB, TailscaleOperator } from "./net/ingress";
 import { KubeProxy } from "./net/kubeproxy";
-import { simulateFromPod, simulateNodePort, type NetResult, type StepKind, type Tool } from "./net/request";
+import { simulateExternal, simulateFromPod, simulateNodePort, type NetResult, type StepKind, type Tool } from "./net/request";
 import { Traffic } from "./net/traffic";
 import { Rng } from "./rng";
 import { Scheduler } from "./scheduler";
@@ -40,7 +41,14 @@ export interface PdbManifest {
   spec: PodDisruptionBudget["spec"];
 }
 
-export type Manifest = DeploymentManifest | ServiceManifest | PdbManifest;
+export interface IngressManifest {
+  apiVersion: "networking.k8s.io/v1";
+  kind: "Ingress";
+  metadata: { name: string; namespace?: string; labels?: Record<string, string>; annotations?: Record<string, string> };
+  spec: Ingress["spec"];
+}
+
+export type Manifest = DeploymentManifest | ServiceManifest | PdbManifest | IngressManifest;
 
 export interface ClusterOptions {
   seed?: number;
@@ -54,6 +62,8 @@ export class Cluster {
   readonly rng: Rng;
   readonly kubelets = new Map<string, Kubelet>();
   readonly kubeProxies = new Map<string, KubeProxy>();
+  /** LoadBalancer IP 를 주고 어느 노드가 맡는지 정한다 */
+  readonly metallb: MetalLB;
   /** 요청 흉내 전용 난수 (kube-proxy 의 확률 분배) — Pod 이름 난수와 분리해 요청을 보내도 이후 이름이 바뀌지 않게 */
   readonly netRng: Rng;
   private nodeIndex = 0;
@@ -68,6 +78,9 @@ export class Cluster {
     new ReplicaSetController(this.ctx, this.rng);
     new EndpointSliceController(this.ctx, this.rng);
     new DisruptionController(this.ctx);
+    this.metallb = new MetalLB(this.ctx, (n) => this.nodePowered(n));
+    new IngressNginxStatus(this.ctx);
+    new TailscaleOperator(this.ctx);
     new Scheduler(this.ctx);
     new NodeLifecycleController(this.ctx);
     new TaintEvictionController(this.ctx);
@@ -115,6 +128,7 @@ export class Cluster {
     if (on) k.powerOn();
     else k.powerOff();
     this.kubeProxies.get(name)?.setPower(on);
+    this.metallb.all();
   }
 
   nodePowered(name: string): boolean {
@@ -171,6 +185,13 @@ export class Cluster {
     return r;
   }
 
+  /** 클러스터 밖에서 URL 로 curl (Ingress 호스트 · LoadBalancer IP · 노드IP:NodePort · *.ts.net) */
+  requestExternal(url: string): NetResult {
+    const r = simulateExternal(this, url);
+    this.traceRequest(`바깥에서 curl ${url}`, r);
+    return r;
+  }
+
   /** 클러스터 밖에서 노드IP:NodePort 로 curl */
   requestNodePort(nodeName: string, nodePort: number): NetResult {
     const r = simulateNodePort(this, nodeName, nodePort);
@@ -194,7 +215,8 @@ export class Cluster {
     if (!cur) {
       if (m.kind === "Deployment") this.api.create<"Deployment">({ apiVersion: m.apiVersion, kind: m.kind, metadata: { ...m.metadata, namespace: ns }, spec: structuredClone(m.spec) }, actor);
       else if (m.kind === "Service") this.api.create<"Service">({ apiVersion: m.apiVersion, kind: m.kind, metadata: { ...m.metadata, namespace: ns }, spec: structuredClone(m.spec) }, actor);
-      else this.api.create<"PodDisruptionBudget">({ apiVersion: m.apiVersion, kind: m.kind, metadata: { ...m.metadata, namespace: ns }, spec: structuredClone(m.spec) }, actor);
+      else if (m.kind === "PodDisruptionBudget") this.api.create<"PodDisruptionBudget">({ apiVersion: m.apiVersion, kind: m.kind, metadata: { ...m.metadata, namespace: ns }, spec: structuredClone(m.spec) }, actor);
+      else this.api.create<"Ingress">({ apiVersion: m.apiVersion, kind: m.kind, metadata: { ...m.metadata, namespace: ns }, spec: structuredClone(m.spec) }, actor);
       return "created";
     }
     const rv = cur.metadata.resourceVersion;
@@ -212,6 +234,7 @@ export class Cluster {
       }
       (o as { spec: unknown }).spec = spec;
       o.metadata.labels = { ...(m.metadata.labels ?? {}) };
+      if (m.kind === "Ingress") o.metadata.annotations = { ...(m.metadata.annotations ?? {}) };
     });
     return next && next.metadata.resourceVersion !== rv ? "configured" : "unchanged";
   }
@@ -226,19 +249,41 @@ export class Cluster {
   }
 }
 
+/** 예제에서 쓰는 Ingress */
+export function ingress(
+  name: string,
+  opts: { className?: string; rules?: Ingress["spec"]["rules"]; defaultBackend?: Ingress["spec"]["defaultBackend"]; tls?: string[]; annotations?: Record<string, string> },
+): IngressManifest {
+  return {
+    apiVersion: "networking.k8s.io/v1",
+    kind: "Ingress",
+    metadata: { name, ...(opts.annotations ? { annotations: { ...opts.annotations } } : {}) },
+    spec: {
+      ...(opts.className ? { ingressClassName: opts.className } : {}),
+      ...(opts.defaultBackend ? { defaultBackend: opts.defaultBackend } : {}),
+      ...(opts.rules?.length ? { rules: opts.rules } : {}),
+      ...(opts.tls ? { tls: [{ hosts: opts.tls }] } : {}),
+    },
+  };
+}
+
 /** 예제에서 쓰는 PodDisruptionBudget */
 export function pdb(name: string, selector: Record<string, string>, opts: { minAvailable?: number | string; maxUnavailable?: number | string }): PdbManifest {
   return { apiVersion: "policy/v1", kind: "PodDisruptionBudget", metadata: { name }, spec: { selector: { matchLabels: { ...selector } }, ...opts } };
 }
 
 /** 예제·폼에서 쓰는 단순 Service */
-export function service(name: string, opts: { selector: Record<string, string>; port: number; targetPort?: number; type?: "ClusterIP" | "NodePort"; nodePort?: number }): ServiceManifest {
+export function service(
+  name: string,
+  opts: { selector: Record<string, string>; port: number; targetPort?: number; type?: ServiceType; nodePort?: number; externalTrafficPolicy?: "Cluster" | "Local" },
+): ServiceManifest {
   return {
     apiVersion: "v1",
     kind: "Service",
     metadata: { name },
     spec: {
       type: opts.type ?? "ClusterIP",
+      ...(opts.externalTrafficPolicy ? { externalTrafficPolicy: opts.externalTrafficPolicy } : {}),
       selector: { ...opts.selector },
       ports: [{ protocol: "TCP", port: opts.port, targetPort: opts.targetPort ?? opts.port, ...(opts.nodePort ? { nodePort: opts.nodePort } : {}) }],
     },

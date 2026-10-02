@@ -1,8 +1,8 @@
 // kubectl 흉내: 문자열 명령 → API 호출 + 실제와 같은 모양의 출력. 코어 API 위의 얇은 층이다.
 // 축소판: default 네임스페이스만, 자주 쓰는 하위 명령·플래그만.
 import { ApiError } from "./api/server";
-import { controllerOf, isNodeReady, NODE_LEASE_NS, podRequests, SERVICE_NAME_LABEL, type Deployment, type KEvent, type Kind, type Node, type Pod } from "./api/types";
-import { deployment, pdb, service, type Cluster } from "./cluster";
+import { controllerOf, isNodeReady, NODE_LEASE_NS, podRequests, SERVICE_NAME_LABEL, type Deployment, type IngressPath, type KEvent, type Kind, type Node, type Pod, type ServiceType } from "./api/types";
+import { deployment, ingress, pdb, service, type Cluster } from "./cluster";
 import type { DrainJob } from "./drain";
 import type { NetResult } from "./net/request";
 import { deploymentHash, HASH_LABEL, revisionOf } from "./controllers/deployment";
@@ -30,6 +30,9 @@ const RESOURCE_ALIASES: Record<string, Res> = {
   services: "Service",
   ep: "Endpoints",
   endpoints: "Endpoints",
+  ing: "Ingress",
+  ingress: "Ingress",
+  ingresses: "Ingress",
   pdb: "PodDisruptionBudget",
   poddisruptionbudget: "PodDisruptionBudget",
   poddisruptionbudgets: "PodDisruptionBudget",
@@ -64,6 +67,7 @@ const KIND_PREFIX: Record<Kind, string> = {
   Service: "service",
   EndpointSlice: "endpointslice.discovery.k8s.io",
   PodDisruptionBudget: "poddisruptionbudget.policy",
+  Ingress: "ingress.networking.k8s.io",
 };
 const KIND_PLURAL: Record<Kind, string> = {
   Pod: "pods",
@@ -74,6 +78,7 @@ const KIND_PLURAL: Record<Kind, string> = {
   Service: "services",
   EndpointSlice: "endpointslices.discovery.k8s.io",
   PodDisruptionBudget: "poddisruptionbudgets.policy",
+  Ingress: "ingresses.networking.k8s.io",
 };
 
 export const KUBECTL_HELP = [
@@ -92,6 +97,10 @@ export const KUBECTL_HELP = [
   "  kubectl drain <노드> [--ignore-daemonsets]   (PodDisruptionBudget 을 지키며 내보냄)",
   "  kubectl create pdb <이름> --selector=app=web --min-available=2 | --max-unavailable=1",
   "  kubectl get pdb",
+  "  kubectl get ingress · describe ingress <이름>",
+  "  kubectl create ingress <이름> --class=nginx --rule=\"shop.example.com/*=web:80\"",
+  "  kubectl patch svc <이름> -p '{\"spec\":{\"externalTrafficPolicy\":\"Local\"}}'   (type·externalTrafficPolicy 만)",
+  "  curl http://<호스트·LoadBalancer IP·노드IP:NodePort>   (kubectl 없이 — 클러스터 밖에서 보냄)",
   "  kubectl get leases -n kube-node-lease   (kubelet heartbeat)",
 ].join("\n");
 
@@ -119,7 +128,7 @@ export function runKubectl(cluster: Cluster, line: string): KubectlResult {
       case "describe":
         return ok(describe(cluster, pos));
       case "create":
-        return create(cluster, pos, flags, line);
+        return create(cluster, pos, flags, line, args);
       case "scale":
         return scale(cluster, pos, flags, line);
       case "set":
@@ -129,6 +138,8 @@ export function runKubectl(cluster: Cluster, line: string): KubectlResult {
       case "cordon":
       case "uncordon":
         return cordon(cluster, cmd, pos, line);
+      case "patch":
+        return patchCmd(cluster, pos, flags, line);
       case "drain":
         return drainCmd(cluster, pos, line);
       case "rollout":
@@ -162,7 +173,8 @@ function fail(output: string): KubectlResult {
 }
 
 function tokenize(s: string): string[] {
-  return s.match(/"[^"]*"|'[^']*'|\S+/g)?.map((t) => t.replace(/^["']|["']$/g, "")) ?? [];
+  // --flag="값" 처럼 = 뒤를 따옴표로 감싼 것도 따옴표를 벗긴다
+  return s.match(/--[\w-]+=(?:"[^"]*"|'[^']*')|"[^"]*"|'[^']*'|\S+/g)?.map((t) => t.replace(/^(--[\w-]+=)(["'])(.*)\2$/, "$1$3").replace(/^["']|["']$/g, "")) ?? [];
 }
 
 function parseFlags(args: string[]): { pos: string[]; flags: Map<string, string> } {
@@ -170,7 +182,7 @@ function parseFlags(args: string[]): { pos: string[]; flags: Map<string, string>
   const flags = new Map<string, string>();
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
-    if (a === "-o" || a === "-n") {
+    if (a === "-o" || a === "-n" || a === "-p") {
       flags.set(a.slice(1), args[++i] ?? "");
     } else if (a.startsWith("--")) {
       const eq = a.indexOf("=");
@@ -234,6 +246,8 @@ function get(c: Cluster, pos: string[], flags: Map<string, string>): string {
       return getSlices(c, names) || "No resources found in default namespace.";
     case "PodDisruptionBudget":
       return getPdbs(c, names) || "No resources found in default namespace.";
+    case "Ingress":
+      return getIngresses(c, names) || "No resources found in default namespace.";
     case "Lease":
       if (flags.get("n") !== NODE_LEASE_NS) return "No resources found in default namespace. (노드 Lease 는 -n kube-node-lease)";
       return getLeases(c, names) || `No resources found in ${NODE_LEASE_NS} namespace.`;
@@ -310,7 +324,7 @@ function getServices(c: Cluster, names: string[], prefixed: boolean): string {
       `${prefixed ? "service/" : ""}${s.metadata.name}`,
       s.spec.type,
       s.spec.clusterIP ?? "<none>",
-      "<none>",
+      s.spec.type === "LoadBalancer" ? (s.status.loadBalancer?.ingress?.[0]?.ip ?? "<pending>") : "<none>",
       s.spec.ports.map((p) => `${p.port}${p.nodePort ? `:${p.nodePort}` : ""}/${p.protocol}`).join(","),
       fmtAge(c.now - s.metadata.creationTimestamp),
     ]),
@@ -350,6 +364,22 @@ function getSlices(c: Cluster, names: string[]): string {
   );
 }
 
+function getIngresses(c: Cluster, names: string[]): string {
+  const is = pick(c, "Ingress", c.api.list("Ingress", "default"), names);
+  if (!is.length) return "";
+  return table(
+    ["NAME", "CLASS", "HOSTS", "ADDRESS", "PORTS", "AGE"],
+    is.map((i) => [
+      i.metadata.name,
+      i.spec.ingressClassName ?? "<none>",
+      [...new Set((i.spec.rules ?? []).map((r) => r.host ?? "*"))].join(",") || "*",
+      i.status.loadBalancer.ingress?.map((a) => a.ip ?? a.hostname).join(",") ?? "",
+      i.spec.tls?.length ? "80, 443" : "80",
+      fmtAge(c.now - i.metadata.creationTimestamp),
+    ]),
+  );
+}
+
 function getPdbs(c: Cluster, names: string[]): string {
   const bs = pick(c, "PodDisruptionBudget", c.api.list("PodDisruptionBudget", "default"), names);
   if (!bs.length) return "";
@@ -381,7 +411,7 @@ function getEvents(c: Cluster): string {
 
 function describe(c: Cluster, pos: string[]): string {
   const { kind, names } = resourceArgs(pos);
-  const k = needWorkload(kind, ["Pod", "Deployment", "ReplicaSet", "Node", "Service"], "describe");
+  const k = needWorkload(kind, ["Pod", "Deployment", "ReplicaSet", "Node", "Service", "Ingress"], "describe");
   const name = names[0];
   if (!name) throw new KubectlError(`error: 이름을 함께 쓰세요. 예: kubectl describe ${k.toLowerCase()} <이름>`);
   const o = c.api.get(k, name, "default");
@@ -436,12 +466,45 @@ function describe(c: Cluster, pos: string[]): string {
         ["Type", o.spec.type],
         ["IP", o.spec.clusterIP ?? "None"],
       ];
+      if (o.spec.type === "LoadBalancer") lines.push(["LoadBalancer Ingress", o.status.loadBalancer?.ingress?.[0]?.ip ?? "<pending>"]);
       for (const p of o.spec.ports) {
         lines.push(["Port", `${p.name ?? "<unset>"}  ${p.port}/${p.protocol}`], ["TargetPort", `${p.targetPort}/${p.protocol}`]);
         if (p.nodePort) lines.push(["NodePort", `${p.name ?? "<unset>"}  ${p.nodePort}/${p.protocol}`]);
         lines.push(["Endpoints", readyAddrs(c, o.metadata.name).join(",") || "<none>"]);
       }
+      if (o.spec.externalTrafficPolicy) lines.push(["External Traffic Policy", o.spec.externalTrafficPolicy]);
       return kv(lines) + eventsBlock(c, o.metadata.uid);
+    }
+    case "Ingress": {
+      const backendText = (b: { service: { name: string; port: { number: number } } }) => {
+        const svc = c.api.get("Service", b.service.name, "default");
+        const eps = svc ? readyAddrs(c, svc.metadata.name) : [];
+        return `${b.service.name}:${b.service.port.number} (${svc ? eps.join(",") || "<none>" : `<error: services "${b.service.name}" not found>`})`;
+      };
+      const rows: string[][] = [["  Host", "Path", "Backends"], ["  ----", "----", "--------"]];
+      for (const r of o.spec.rules ?? []) {
+        rows.push([`  ${r.host ?? "*"}`, "", ""]);
+        for (const p of r.http.paths) rows.push(["", p.path, backendText(p.backend)]);
+      }
+      if (!o.spec.rules?.length) rows.push(["  *", "*", o.spec.defaultBackend ? backendText(o.spec.defaultBackend) : "<default>"]);
+      const ann = Object.entries(o.metadata.annotations ?? {}).map(([k2, v]) => `${k2}: ${v}`);
+      return (
+        kv([
+          ["Name", o.metadata.name],
+          ["Labels", labelsText(o.metadata.labels)],
+          ["Namespace", "default"],
+          ["Address", o.status.loadBalancer.ingress?.map((a) => a.ip ?? a.hostname).join(",") ?? ""],
+          ["Ingress Class", o.spec.ingressClassName ?? "<none>"],
+          ["Default backend", o.spec.defaultBackend ? backendText(o.spec.defaultBackend) : "<default>"],
+          ...(o.spec.tls?.length ? ([["TLS", ""], ["  SNI routes", o.spec.tls.flatMap((t) => t.hosts).join(",")]] as [string, string][]) : []),
+          ["Rules", ""],
+        ]) +
+        "\n" +
+        table(rows[0]!, rows.slice(1)) +
+        "\n" +
+        kv([["Annotations", ann.join("\n                  ") || "<none>"]]) +
+        eventsBlock(c, o.metadata.uid)
+      );
     }
     case "ReplicaSet": {
       const pods = c.api.list("Pod", "default").filter((p) => controllerOf(p.metadata)?.uid === o.metadata.uid);
@@ -588,7 +651,8 @@ export function eventSource(source: string): string {
 
 // ---------- 바꾸는 명령 ----------
 
-function create(c: Cluster, pos: string[], flags: Map<string, string>, line: string): KubectlResult {
+function create(c: Cluster, pos: string[], flags: Map<string, string>, line: string, raw: string[] = []): KubectlResult {
+  if (pos[0] === "ingress" || pos[0] === "ing") return createIngress(c, pos[1], raw, line);
   if (pos[0] === "pdb" || pos[0] === "poddisruptionbudget") {
     const name = pos[1];
     const sel = flags.get("selector");
@@ -677,7 +741,7 @@ function setCmd(c: Cluster, pos: string[], flags: Map<string, string>, line: str
 
 function del(c: Cluster, pos: string[], flags: Map<string, string>, line: string): KubectlResult {
   const { kind, names } = resourceArgs(pos);
-  const k = needWorkload(kind, ["Pod", "Deployment", "ReplicaSet", "Service", "PodDisruptionBudget"], "delete");
+  const k = needWorkload(kind, ["Pod", "Deployment", "ReplicaSet", "Service", "PodDisruptionBudget", "Ingress"], "delete");
   if (!names.length) throw new KubectlError(`error: 지울 이름이 필요합니다. 예: kubectl delete ${k.toLowerCase()} <이름>`);
   for (const n of names) if (!c.api.get(k, n, "default")) throw new ApiError("NotFound", `${KIND_PLURAL[k]} "${n}" not found`);
   userTrace(c, line);
@@ -714,6 +778,69 @@ function cordon(c: Cluster, cmd: "cordon" | "uncordon", pos: string[], line: str
     else delete o.spec.unschedulable;
   });
   return ok(`node/${name} ${cmd}ed`, true);
+}
+
+/** kubectl patch svc <이름> -p '<JSON merge patch>' — Service 의 spec.type · spec.externalTrafficPolicy 만 (축소판) */
+function patchCmd(c: Cluster, pos: string[], flags: Map<string, string>, line: string): KubectlResult {
+  const { kind, names } = resourceArgs(pos);
+  needWorkload(kind, ["Service"], "patch");
+  const name = names[0];
+  if (!name) throw new KubectlError("error: 이름이 필요합니다. 예: kubectl patch svc web -p '{\"spec\":{\"externalTrafficPolicy\":\"Local\"}}'");
+  const raw = flags.get("p") ?? flags.get("patch");
+  if (!raw) throw new KubectlError("error: must specify -p to patch");
+  let body: { spec?: Record<string, unknown> };
+  try {
+    body = JSON.parse(raw) as { spec?: Record<string, unknown> };
+  } catch {
+    throw new KubectlError(`error: unable to parse "${raw}": 올바른 JSON 이 아닙니다 (작은따옴표로 감싸세요)`);
+  }
+  const spec = body.spec ?? {};
+  for (const key of Object.keys(spec)) if (key !== "type" && key !== "externalTrafficPolicy") throw new KubectlError(`error: patch 는 spec.type · spec.externalTrafficPolicy 만 됩니다 (축소판). 받은 키 "${key}"`);
+  if (spec.type !== undefined && !["ClusterIP", "NodePort", "LoadBalancer"].includes(String(spec.type))) throw new ApiError("Invalid", `Service "${name}" is invalid: spec.type: Unsupported value: "${String(spec.type)}"`);
+  if (spec.externalTrafficPolicy !== undefined && !["Cluster", "Local"].includes(String(spec.externalTrafficPolicy)))
+    throw new ApiError("Invalid", `Service "${name}" is invalid: spec.externalTrafficPolicy: Unsupported value: "${String(spec.externalTrafficPolicy)}": supported values: "Cluster", "Local"`);
+  const cur = c.api.get("Service", name, "default");
+  if (!cur) throw new ApiError("NotFound", `services "${name}" not found`);
+  const nextType = (spec.type as ServiceType | undefined) ?? cur.spec.type;
+  if (spec.externalTrafficPolicy !== undefined && nextType === "ClusterIP") throw new ApiError("Invalid", `Service "${name}" is invalid: spec.externalTrafficPolicy: Invalid value: "${String(spec.externalTrafficPolicy)}": may only be set for externally-accessible services`);
+  userTrace(c, line);
+  const rv = cur.metadata.resourceVersion;
+  const out = c.api.patch("Service", name, "default", "kubectl", (o) => {
+    if (spec.type !== undefined) o.spec.type = spec.type as ServiceType;
+    if (spec.externalTrafficPolicy !== undefined) o.spec.externalTrafficPolicy = spec.externalTrafficPolicy as "Cluster" | "Local";
+  });
+  return ok(`service/${name} ${out && out.metadata.resourceVersion !== rv ? "patched" : "patched (no change)"}`, true);
+}
+
+/** kubectl create ingress <이름> --class=nginx --rule="host/path=svc:port" (여러 번) [--default-backend=svc:port] */
+function createIngress(c: Cluster, name: string | undefined, args: string[], line: string): KubectlResult {
+  if (!name) throw new KubectlError('error: 이름이 필요합니다. 예: kubectl create ingress shop --class=nginx --rule="shop.example.com/*=web:80"');
+  const val = (flag: string) => args.flatMap((a, i) => (a.startsWith(`--${flag}=`) ? [a.slice(flag.length + 3)] : a === `--${flag}` && args[i + 1] ? [args[i + 1]!] : []));
+  const rules = new Map<string, IngressPath[]>();
+  for (const r of val("rule")) {
+    const m = /^([^/=]*)(\/[^=]*)=([a-z0-9-]+):(\d+)$/.exec(r);
+    if (!m) throw new KubectlError(`error: --rule "${r}" 를 읽지 못했습니다 — host/path=service:port (경로 끝 * 은 Prefix). 예: shop.example.com/*=web:80`);
+    const prefix = m[2]!.endsWith("*");
+    const path = prefix ? m[2]!.slice(0, -1).replace(/(.)\/$/, "$1") || "/" : m[2]!;
+    const list = rules.get(m[1]!) ?? [];
+    list.push({ path, pathType: prefix ? "Prefix" : "Exact", backend: { service: { name: m[3]!, port: { number: Number(m[4]) } } } });
+    rules.set(m[1]!, list);
+  }
+  const def = val("default-backend")[0];
+  const dm = def ? /^([a-z0-9-]+):(\d+)$/.exec(def) : null;
+  if (def && !dm) throw new KubectlError(`error: --default-backend "${def}" 는 service:port 여야 합니다`);
+  if (!rules.size && !dm) throw new KubectlError("error: --rule 이나 --default-backend 가 하나는 있어야 합니다");
+  if (c.api.get("Ingress", name, "default")) throw new ApiError("AlreadyExists", `ingresses.networking.k8s.io "${name}" already exists`);
+  userTrace(c, line);
+  c.apply(
+    ingress(name, {
+      className: val("class")[0],
+      rules: [...rules].map(([host, paths]) => ({ ...(host ? { host } : {}), http: { paths } })),
+      ...(dm ? { defaultBackend: { service: { name: dm[1]!, port: { number: Number(dm[2]) } } } } : {}),
+    }),
+    "kubectl",
+  );
+  return ok(`ingress.networking.k8s.io/${name} created`, true);
 }
 
 function drainCmd(c: Cluster, pos: string[], line: string): KubectlResult {
@@ -795,8 +922,8 @@ function expose(c: Cluster, pos: string[], flags: Map<string, string>, line: str
   // 실제 kubectl 처럼 --target-port 를 안 주면 targetPort = --port (컨테이너 포트와 다르면 연결 거부 — 흔한 실수)
   const targetPort = flags.has("target-port") ? Number(flags.get("target-port")) : port;
   if (!Number.isInteger(targetPort) || targetPort < 1) throw new KubectlError(`error: --target-port 를 읽지 못했습니다 ("${flags.get("target-port")}")`);
-  const type = (flags.get("type") ?? "ClusterIP") as "ClusterIP" | "NodePort";
-  if (type !== "ClusterIP" && type !== "NodePort") throw new KubectlError(`error: --type 은 ClusterIP 또는 NodePort (축소판). 받은 값 "${type}"`);
+  const type = (flags.get("type") ?? "ClusterIP") as ServiceType;
+  if (type !== "ClusterIP" && type !== "NodePort" && type !== "LoadBalancer") throw new KubectlError(`error: --type 은 ClusterIP · NodePort · LoadBalancer (축소판). 받은 값 "${type}"`);
   const svcName = flags.get("name") ?? name;
   if (c.api.get("Service", svcName, "default")) throw new ApiError("AlreadyExists", `services "${svcName}" already exists`);
   userTrace(c, line);

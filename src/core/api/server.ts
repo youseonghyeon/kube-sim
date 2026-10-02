@@ -311,8 +311,11 @@ export class ApiServer {
         }
       }
     }
+    // externalTrafficPolicy 는 바깥에서 들어오는 Service 에만 (기본 Cluster)
+    if (svc.spec.type === "ClusterIP") delete svc.spec.externalTrafficPolicy;
+    else svc.spec.externalTrafficPolicy ??= "Cluster";
     svc.spec.ports.forEach((p, i) => {
-      if (svc.spec.type !== "NodePort") {
+      if (svc.spec.type === "ClusterIP") {
         delete p.nodePort;
         return;
       }
@@ -434,6 +437,8 @@ function emptyStatus(kind: Kind): unknown {
       return { capacity: { cpu: 0, memory: 0, pods: 0 }, allocatable: { cpu: 0, memory: 0, pods: 0 }, conditions: [], addresses: [], images: [] };
     case "PodDisruptionBudget":
       return { currentHealthy: 0, desiredHealthy: 0, disruptionsAllowed: 0, expectedPods: 0, observedGeneration: 0 };
+    case "Ingress":
+      return { loadBalancer: {} };
     case "Lease":
     case "Service":
     case "EndpointSlice":
@@ -447,6 +452,7 @@ function lower(kind: Kind): string {
   if (kind === "Lease") return "leases.coordination.k8s.io";
   if (kind === "EndpointSlice") return "endpointslices.discovery.k8s.io";
   if (kind === "PodDisruptionBudget") return "poddisruptionbudgets.policy";
+  if (kind === "Ingress") return "ingresses.networking.k8s.io";
   return `${kind.toLowerCase()}s`;
 }
 
