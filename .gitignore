@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.shots/
+*.log
+.DS_Store
+# 리뷰 에이전트의 worktree (git add 로 gitlink 가 담기지 않게)
+.claude/worktrees/
