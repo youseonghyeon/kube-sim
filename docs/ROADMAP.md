@@ -8,11 +8,11 @@
 |---|---|---|
 | 편집 방식 | ① 매니페스트(YAML) 편집 중심 ② 캔버스에서 리소스 끌어 놓기 ③ 혼합 | ③ 캔버스는 "노드 안의 Pod 배치·트래픽" 을 보여 주고, 리소스는 인스펙터 폼으로 고치며 "YAML 보기" 를 곁들인다 |
 | kubectl 입력창 | 둘지 말지 | 둔다 (1단계부터 `get`·`describe`·`scale`·`delete`·`rollout`·`cordon`·`drain` 흉내). 실무 손버릇과 화면을 잇는 학습 효과가 크다 |
-| 캔버스 표현 | 노드 = 큰 상자, Pod = 노드 안 칩, Service = 가상(점선) | DESIGN.md "캔버스 제안" 을 그려서 보여 주고 확인받는다 |
+| 캔버스 표현 | 노드 = 큰 상자, Pod = 노드 안 칩, Service = 가상(점선) | 그려서 보여 주고 확인받음 (2026-10-02, DESIGN.md "캔버스") |
 | 네트워크 깊이 | 요청 단위 / 패킷 단위 | 요청 단위로 시작 (ARCHITECTURE.md) |
 
 ## 0. 골격 ✅ 2026-10-02
-- 결과: 캔버스(컨트롤 플레인 · 스케줄 대기 · 노드 안 Pod 칩), 인스펙터, 로그·kubectl 서랍, 예제 5개. 네 가지 검증 통과. 캔버스 표현은 "그려서 보여 주고 확인" 을 이 결과물로 받는다(사용자 확인 대기).
+- 결과: 캔버스(컨트롤 플레인 · 스케줄 대기 · 노드 안 Pod 칩), 인스펙터, 로그·kubectl 서랍, 예제 5개. 네 가지 검증 통과. 캔버스 표현은 이 결과물로 사용자 확인을 받았다(2026-10-02).
 - 축소판: 자리 배치는 자동(끌어 놓지 않음), 되돌리기 없음, 네임스페이스는 default 하나.
 - 배우는 것: (없음 — 토대)
 - 만들 것
@@ -26,7 +26,7 @@
 - 된 것 (2026-10-02): API 저장소·watch·resourceVersion·Conflict·GC, Deployment·ReplicaSet 컨트롤러, 스케줄러(requests·nodeSelector·taint·cordon, FailedScheduling), kubelet(pull·ErrImagePull/ImagePullBackOff·CrashLoopBackOff·SIGTERM 정리), pod-garbage-collector, kubectl 흉내(get·describe·create·scale·set image/resources·delete·cordon), 이벤트, 예제 5개
 - 노드 장애 (2026-10-02): Lease heartbeat → 40초 → NotReady·unreachable taint → toleration 300초 → eviction → Terminating 에 멈춤, 다시 켜면 정리. 예제 "노드 하나 죽이기". `kubectl get leases -n kube-node-lease`
 - 남은 것(작음): `kubectl get pods -w`
-- 축소판: 템플릿이 바뀌면 옛 ReplicaSet 을 바로 0 으로(Recreate 식, 롤링 업데이트는 3단계), 컨테이너는 Pod 마다 첫 번째만 돌림, ReplicaSet slow start·expectations 없음, 스케줄러 점수는 LeastAllocated 하나·preemption 없음
+- 축소판: (1단계 당시 템플릿 변경은 Recreate 식 — 3단계에서 롤링 업데이트로 바뀜), 컨테이너는 Pod 마다 첫 번째만 돌림, ReplicaSet slow start·expectations 없음, 스케줄러 점수는 LeastAllocated 하나·preemption 없음
 - 배우는 것
   - 선언과 reconcile: Pod 를 지워도 ReplicaSet 이 다시 만든다, replicas 를 바꾸면 무엇이 무엇을 만드는가(Deployment → ReplicaSet → Pod, ownerReferences)
   - 스케줄러: requests 로 자리를 찾고, 없으면 `FailedScheduling` (`0/3 nodes are available: 3 Insufficient cpu.`)
