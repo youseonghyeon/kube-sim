@@ -730,8 +730,9 @@ export function rolloutStatusLine(d: Deployment): { done: boolean; text: string 
   const n = d.metadata.name;
   const s = d.status;
   const prog = s.conditions?.find((x) => x.type === "Progressing");
-  if (prog?.reason === "ProgressDeadlineExceeded") return { done: true, text: `error: deployment "${n}" exceeded its progress deadline` };
+  // 실제 kubectl 처럼 새 spec 이 관찰됐는지 먼저 본다
   if (s.observedGeneration < d.metadata.generation) return { done: false, text: "Waiting for deployment spec update to be observed..." };
+  if (prog?.reason === "ProgressDeadlineExceeded") return { done: true, text: `error: deployment "${n}" exceeded its progress deadline` };
   if (s.updatedReplicas < d.spec.replicas) return { done: false, text: `Waiting for deployment "${n}" rollout to finish: ${s.updatedReplicas} out of ${d.spec.replicas} new replicas have been updated...` };
   if (s.replicas > s.updatedReplicas) return { done: false, text: `Waiting for deployment "${n}" rollout to finish: ${s.replicas - s.updatedReplicas} old replicas are pending termination...` };
   if (s.availableReplicas < s.updatedReplicas) return { done: false, text: `Waiting for deployment "${n}" rollout to finish: ${s.availableReplicas} of ${s.updatedReplicas} updated replicas are available...` };

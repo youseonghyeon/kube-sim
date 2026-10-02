@@ -47,7 +47,7 @@ describe("종료 순서: 엔드포인트가 빠지기 전에 앱이 멈추면 �
     expect(pods(b.c).filter((p) => p.metadata.labels.app === "web").every((p) => p.spec.containers[0]!.image === "nginx:1.28")).toBe(true);
   });
 
-  test("preStop 이 유예 시간을 넘으면 SIGKILL", () => {
+  test("preStop 이 유예 시간을 넘으면 유예에서 끊고 SIGTERM (최소 2초 창 — nginx 는 그 안에 끝남)", () => {
     const c = cluster([{ name: "w1" }]);
     c.apply(deployment("web", { replicas: 1, image: "nginx:1.27", cpu: 100, memory: 64, preStop: 40 }));
     c.runFor(10_000);
@@ -57,7 +57,7 @@ describe("종료 순서: 엔드포인트가 빠지기 전에 앱이 멈추면 �
     expect(c.api.get("Pod", p)).toBeDefined();
     c.runFor(2000);
     expect(c.api.get("Pod", p)).toBeUndefined();
-    expect(c.trace.events.some((e) => e.msg.includes("SIGKILL"))).toBe(true);
+    expect(c.trace.events.some((e) => e.msg.includes("SIGKILL"))).toBe(false);
   });
 });
 

@@ -109,8 +109,10 @@ export class DeploymentController extends Controller {
     const olds = this.ownedRS(d, ns).filter((rs) => rs.metadata.uid !== newRS!.metadata.uid);
     if (recreate) this.recreate(d, ns, newRS, olds);
     else this.rolling(d, ns, newRS, olds);
-    this.cleanupHistory(d, ns, hash);
     this.updateStatus(d, ns, hash);
+    // 옛 RS 정리는 롤아웃이 끝난 뒤에만 (실제처럼 — 도중에 지우면 Terminating 인 옛 Pod 를 못 세게 된다)
+    const after = this.api.get("Deployment", d.metadata.name, ns);
+    if (after && rolloutComplete(after)) this.cleanupHistory(after, ns, hash);
   }
 
   private ownedRS(d: Deployment, ns: string): ReplicaSet[] {
@@ -275,13 +277,18 @@ export class DeploymentController extends Controller {
         updatedReplicas: newRS?.status.replicas ?? 0,
         readyReplicas: sum((rs) => rs.status.readyReplicas),
         availableReplicas: sum((rs) => rs.status.availableReplicas),
-        unavailableReplicas: Math.max(0, cur.spec.replicas - sum((rs) => rs.status.availableReplicas)),
+        // 실제처럼: 모든 RS 의 원하는 수 합 − available (롤아웃 중 surge 만큼 커질 수 있다)
+        unavailableReplicas: Math.max(0, sum((rs) => rs.spec.replicas) - sum((rs) => rs.status.availableReplicas)),
         observedGeneration: cur.metadata.generation,
         collisionCount: cur.status.collisionCount,
         conditions: [...(prev.conditions ?? [])],
       };
+      // 진전 = 새 Pod 가 늘거나, Ready·available 이 늘거나, 옛 Pod 가 줄었을 때 (실제 DeploymentProgressing). 줄어드는 것은 진전이 아니다
       const progressed =
-        next.replicas !== prev.replicas || next.updatedReplicas !== prev.updatedReplicas || next.readyReplicas !== prev.readyReplicas || next.availableReplicas !== prev.availableReplicas;
+        next.updatedReplicas > prev.updatedReplicas ||
+        next.readyReplicas > prev.readyReplicas ||
+        next.availableReplicas > prev.availableReplicas ||
+        next.replicas - next.updatedReplicas < prev.replicas - prev.updatedReplicas;
       cur.status = next;
       if (newRS) cur.metadata.annotations = { ...(cur.metadata.annotations ?? {}), [REVISION]: newRS.metadata.annotations?.[REVISION] ?? "1" };
       const { maxUnavailable } = this.limits(cur);

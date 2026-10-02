@@ -25,7 +25,7 @@ export class DisruptionController extends Controller {
     const [ns, name] = splitKey(key);
     const b = this.api.get("PodDisruptionBudget", name, ns);
     if (!b) return;
-    const status = computePdbStatus(b, this.api.peekList("Pod", ns), this.api.peekList("ReplicaSet", ns));
+    const status = computePdbStatus(b, this.api.peekList("Pod", ns), this.api.peekList("ReplicaSet", ns), this.api.peekList("Deployment", ns));
     if (stableJson(status) === stableJson(b.status)) return;
     const before = b.status.disruptionsAllowed;
     this.api.patch("PodDisruptionBudget", name, ns, this.name, (o) => {
@@ -40,11 +40,25 @@ export function computePdbStatus(
   b: PodDisruptionBudget,
   pods: readonly import("../api/types").Pod[],
   rss: readonly import("../api/types").ReplicaSet[],
+  deps: readonly import("../api/types").Deployment[] = [],
 ): PodDisruptionBudget["status"] {
   const mine = pods.filter((p) => matchesSelector(p.metadata.labels, b.spec.selector) && !isPodTerminal(p));
-  const owners = new Set(mine.map((p) => controllerOf(p.metadata)?.uid).filter(Boolean));
-  const fromRs = rss.filter((r) => owners.has(r.metadata.uid)).reduce((n, r) => n + r.spec.replicas, 0);
-  const expected = owners.size ? Math.max(fromRs, 0) : mine.length;
+  // 기대 수: Pod 의 주인(scale 을 가진 것)의 replicas — RS 가 Deployment 의 것이면 Deployment 의 replicas (롤아웃 중 RS 합이 아니라)
+  const scales = new Map<string, number>();
+  let orphans = 0;
+  for (const p of mine) {
+    const ref = controllerOf(p.metadata);
+    const rs = ref ? rss.find((r) => r.metadata.uid === ref.uid) : undefined;
+    if (!rs) {
+      orphans++;
+      continue;
+    }
+    const dref = controllerOf(rs.metadata);
+    const d = dref ? deps.find((x) => x.metadata.uid === dref.uid) : undefined;
+    if (d) scales.set(d.metadata.uid, d.spec.replicas);
+    else scales.set(rs.metadata.uid, rs.spec.replicas);
+  }
+  const expected = [...scales.values()].reduce((n, x) => n + x, 0) + orphans;
   const healthy = mine.filter((p) => isPodReady(p) && p.metadata.deletionTimestamp === undefined).length;
   let desired: number;
   if (b.spec.maxUnavailable !== undefined) desired = Math.max(0, expected - resolveIntOrPercent(b.spec.maxUnavailable, expected, true));

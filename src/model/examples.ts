@@ -295,7 +295,7 @@ export const EXAMPLES: Example[] = [
       {
         title: "이미지 바꾸기",
         command: "kubectl set image deployment/web web=nginx:1.28",
-        expect: "replicas 4, 기본 25%/25% → maxSurge 1 · maxUnavailable 1. 전체 Pod 는 5개를 넘지 않고 Ready 는 3개 밑으로 내려가지 않습니다. Pod 칩의 r1·r2 가 옛·새 리비전입니다. 이 Deployment 는 preStop 이 있어 요청 실패가 없습니다.",
+        expect: "replicas 4, 기본 25%/25% → maxSurge 1 · maxUnavailable 1. Terminating 을 빼면 전체 Pod 는 5개를 넘지 않고 Ready 는 3개 밑으로 내려가지 않습니다 (preStop 5초 동안 Terminating 인 옛 Pod 는 maxSurge 에 세지 않아 화면에는 더 보입니다). Pod 칩의 r1·r2 가 옛·새 리비전입니다. 이 Deployment 는 preStop 이 있어 요청 실패가 없습니다.",
       },
       { title: "진행 보기", command: "kubectl rollout status deployment/web", expect: "새 Pod 몇 개가 바뀌었는지, 옛 Pod 가 몇 개 남았는지 한 줄로 알려 줍니다." },
       { title: "이력 보기", command: "kubectl rollout history deployment/web", expect: "리비전마다 ReplicaSet 이 하나씩 남아 있습니다 (그래서 되돌릴 수 있습니다)." },

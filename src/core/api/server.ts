@@ -3,7 +3,7 @@
 import type { Clock } from "../clock";
 import { stableJson } from "../rng";
 import type { Trace } from "../trace";
-import { CLUSTER_SCOPED, type Deployment, type KEvent, type KObject, type Kind, type ObjectMeta, type ObjectOf, type Pod, type Service } from "./types";
+import { CLUSTER_SCOPED, type Deployment, type KEvent, type KObject, type Kind, type ObjectMeta, type ObjectOf, type Pod, type PodDisruptionBudget, type Service } from "./types";
 
 export type WatchType = "ADDED" | "MODIFIED" | "DELETED";
 
@@ -12,7 +12,7 @@ export interface WatchEvent<K extends Kind = Kind> {
   object: ObjectOf<K>;
 }
 
-export type ApiErrorReason = "NotFound" | "AlreadyExists" | "Conflict" | "Invalid" | "TooManyRequests";
+export type ApiErrorReason = "NotFound" | "AlreadyExists" | "Conflict" | "Invalid" | "TooManyRequests" | "InternalError";
 
 export class ApiError extends Error {
   constructor(
@@ -231,22 +231,32 @@ export class ApiServer {
     const p = this.store.get(objKey("Pod", name, namespace)) as Pod | undefined;
     if (!p) throw new ApiError("NotFound", `pods "${name}" not found`);
     if (p.metadata.deletionTimestamp !== undefined) return;
-    const ready = p.status.conditions.some((c) => c.type === "Ready" && c.status === "True");
-    for (const o of [...this.store.values()]) {
-      if (o.kind !== "PodDisruptionBudget" || (o.metadata.namespace ?? "default") !== (p.metadata.namespace ?? "default")) continue;
-      if (!Object.entries(o.spec.selector.matchLabels).every(([k, v]) => p.metadata.labels[k] === v)) continue;
+    // 아직 안 뜬(Pending)·끝난 Pod 는 PDB 를 보지 않는다 (canIgnorePDB)
+    if (p.status.phase === "Pending" || p.status.phase === "Succeeded" || p.status.phase === "Failed") {
+      this.delete("Pod", name, namespace, actor);
+      return;
+    }
+    const ns = p.metadata.namespace ?? "default";
+    const budgets = [...this.store.values()].filter(
+      (o): o is PodDisruptionBudget =>
+        o.kind === "PodDisruptionBudget" && (o.metadata.namespace ?? "default") === ns && Object.entries(o.spec.selector.matchLabels).every(([k, v]) => p.metadata.labels[k] === v),
+    );
+    if (budgets.length > 1) throw new ApiError("InternalError", "This pod has more than one PodDisruptionBudget, which the eviction subresource does not support.");
+    const b = budgets[0];
+    if (b) {
+      const ready = p.status.conditions.some((c) => c.type === "Ready" && c.status === "True");
       // 준비 안 된 Pod 는 예산이 건강할 때 지울 수 있다 (unhealthyPodEvictionPolicy: IfHealthyBudget)
-      const ok = ready ? o.status.disruptionsAllowed > 0 : o.status.currentHealthy >= o.status.desiredHealthy;
+      const ok = ready ? b.status.disruptionsAllowed > 0 : b.status.currentHealthy >= b.status.desiredHealthy;
       if (!ok) {
-        this.trace.add("kube-apiserver", "api.conflict", `${actor} 의 eviction 요청 → Pod ${name} 거절: PodDisruptionBudget ${o.metadata.name} 이 허락하지 않음 (Ready ${o.status.currentHealthy} · 최소 ${o.status.desiredHealthy} · 허용 ${o.status.disruptionsAllowed})`, refOf(p));
+        this.trace.add("kube-apiserver", "api.conflict", `${actor} 의 eviction 요청 → Pod ${name} 거절: PodDisruptionBudget ${b.metadata.name} 이 허락하지 않음 (Ready ${b.status.currentHealthy} · 최소 ${b.status.desiredHealthy} · 허용 ${b.status.disruptionsAllowed})`, refOf(p));
         throw new ApiError("TooManyRequests", "Cannot evict pod as it would violate the pod's disruption budget.");
       }
       if (ready) {
-        const next = clone(o);
+        const next = clone(b);
         next.status.disruptionsAllowed -= 1;
         next.status.currentHealthy -= 1;
         next.metadata.resourceVersion = ++this.rv;
-        this.store.set(objKey(o.kind, o.metadata.name, o.metadata.namespace), next);
+        this.store.set(objKey(b.kind, b.metadata.name, b.metadata.namespace), next);
         this.notify("MODIFIED", next);
       }
     }

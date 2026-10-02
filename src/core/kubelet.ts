@@ -18,6 +18,8 @@ export const PULL_FAIL_MS = 800;
 /** 크래시·pull 실패 백오프: 10초부터 두 배, 최대 5분 (실제값) */
 export const BACKOFF_BASE_MS = 10_000;
 export const BACKOFF_MAX_MS = 300_000;
+/** preStop 뒤 SIGTERM 에 주는 최소 시간 (kubelet minimumGracePeriodInSeconds = 2) */
+export const MIN_SIGTERM_MS = 2000;
 /** Lease 갱신 주기 (실제값: leaseDuration 40초의 1/4) */
 export const HEARTBEAT_MS = 10_000;
 export const LEASE_DURATION_S = 40;
@@ -628,8 +630,9 @@ export class Kubelet {
     const preStopMs = Math.max(0, (c.lifecycle?.preStop?.sleep.seconds ?? 0) * 1000);
     if (preStopMs > 0) {
       if (preStopMs >= grace) {
-        this.ctx.trace.add(this.actor, "kubelet.kill", `${rt.name} 삭제 요청 → preStop sleep ${preStopMs / 1000}초가 유예 ${grace / 1000}초를 다 씀 → SIGKILL`, refOf(p));
-        rt.timer = this.ctx.clock.after(grace, this.actor, () => this.finish(rt, 137));
+        // preStop 은 유예 시간에서 끊기고, SIGTERM 에는 최소 2초를 준다 (kubelet minimumGracePeriodInSeconds)
+        this.ctx.trace.add(this.actor, "kubelet.kill", `${rt.name} 삭제 요청 → preStop sleep ${preStopMs / 1000}초가 유예 ${grace / 1000}초를 넘음 → ${grace / 1000}초에 끊고 SIGTERM (최소 2초 더 줌)`, refOf(p));
+        rt.timer = this.ctx.clock.after(grace, this.actor, () => this.sigterm(rt, c.name, c.image, MIN_SIGTERM_MS));
         return;
       }
       this.ctx.trace.add(
@@ -638,7 +641,7 @@ export class Kubelet {
         `${rt.name} 삭제 요청 → preStop sleep ${preStopMs / 1000}초 — 그동안 앱은 계속 요청을 받고, 그사이 엔드포인트가 빠져 모든 노드의 규칙이 바뀐다`,
         refOf(p),
       );
-      rt.timer = this.ctx.clock.after(preStopMs, this.actor, () => this.sigterm(rt, c.name, c.image, grace - preStopMs));
+      rt.timer = this.ctx.clock.after(preStopMs, this.actor, () => this.sigterm(rt, c.name, c.image, Math.max(MIN_SIGTERM_MS, grace - preStopMs)));
       return;
     }
     this.sigterm(rt, c.name, c.image, grace);
