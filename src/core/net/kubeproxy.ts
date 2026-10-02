@@ -84,8 +84,15 @@ export class KubeProxy {
     this.rules = next;
   }
 
-  /** `iptables-save -t nat | grep KUBE` 모양 */
+  /** `iptables-save | grep KUBE` 모양: ready 엔드포인트가 없는 Service 의 REJECT 는 filter 테이블, 나머지(DNAT)는 nat 테이블 */
   iptablesSave(): string {
+    const filter: string[] = ["*filter", ":KUBE-SERVICES - [0:0]"];
+    for (const r of this.rules) {
+      if (r.seps.length) continue;
+      const svc = `${r.ns}/${r.name}${r.portName ? `:${r.portName}` : ""}`;
+      filter.push(`-A KUBE-SERVICES -d ${r.clusterIP}/32 -p tcp -m comment --comment "${svc} has no endpoints" -m tcp --dport ${r.port} -j REJECT --reject-with icmp-port-unreachable`);
+    }
+    filter.push("COMMIT");
     const lines: string[] = ["*nat", ":KUBE-SERVICES - [0:0]", ":KUBE-NODEPORTS - [0:0]", ":KUBE-MARK-MASQ - [0:0]"];
     for (const r of this.rules) {
       lines.push(`:${r.chain} - [0:0]`);
@@ -93,10 +100,7 @@ export class KubeProxy {
     }
     for (const r of this.rules) {
       const svc = `${r.ns}/${r.name}${r.portName ? `:${r.portName}` : ""}`;
-      if (!r.seps.length) {
-        lines.push(`-A KUBE-SERVICES -d ${r.clusterIP}/32 -p tcp -m comment --comment "${svc} has no endpoints" -m tcp --dport ${r.port} -j REJECT --reject-with icmp-port-unreachable`);
-        continue;
-      }
+      if (!r.seps.length) continue; // filter 테이블의 REJECT 가 맡는다
       lines.push(`-A KUBE-SERVICES -d ${r.clusterIP}/32 -p tcp -m comment --comment "${svc} cluster IP" -m tcp --dport ${r.port} -j ${r.chain}`);
       if (r.nodePort) lines.push(`-A KUBE-NODEPORTS -p tcp -m comment --comment "${svc}" -m tcp --dport ${r.nodePort} -j ${r.chain}`);
       r.seps.forEach((s, i) => {
@@ -110,7 +114,7 @@ export class KubeProxy {
       }
     }
     lines.push("-A KUBE-SERVICES -m comment --comment \"kubernetes service nodeports; NOTE: this must be the last rule in this chain\" -m addrtype --dst-type LOCAL -j KUBE-NODEPORTS", "COMMIT");
-    return lines.join("\n");
+    return [...filter, ...lines].join("\n");
   }
 }
 

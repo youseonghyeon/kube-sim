@@ -27,6 +27,8 @@ export interface NetResult {
   output: string;
   /** 응답한 Pod */
   servedBy?: string;
+  /** 실패의 종류 — 도구마다 다른 문구(wget 등)를 만들 때 쓴다 */
+  failure?: { kind: "dns" | "refused" | "timeout" | "http" | "nohttp"; host: string; ip?: string };
 }
 
 export type Tool = "curl" | "ping" | "nslookup";
@@ -77,20 +79,21 @@ export function simulateFromPod(c: Cluster, from: Pod, tool: Tool, target: strin
   const t = parseTarget(target);
   if (!t) return { ok: false, steps, output: `${tool}: 주소를 읽지 못했습니다: ${target}` };
   let ip = t.host;
-  let shownHost = t.host;
+  // curl·ping 은 사용자가 쓴 이름을 그대로 찍는다 (풀린 FQDN 이 아니라)
+  const shownHost = t.host;
   if (!IP_RE.test(t.host)) {
     const a = resolve(c, t.host, from.metadata.namespace ?? "default");
     if (!a.ip) {
       steps.push({ kind: "dns", actor: "coredns", text: `${a.tried.join(" → ")} 모두 NXDOMAIN (resolv.conf 의 search 도메인을 차례로 붙여 물어봄)`, at: { dns: true } });
       steps.push({ kind: "fail", actor: from.metadata.name, text: "이름을 풀지 못해 연결하지 않음" });
-      if (tool === "nslookup") return { ok: false, steps, output: `Server:\t\t${DNS_SERVICE_IP}\nAddress:\t${DNS_SERVICE_IP}:53\n\n** server can't find ${t.host}: NXDOMAIN` };
-      if (tool === "ping") return { ok: false, steps, output: `ping: bad address '${t.host}'` };
-      return { ok: false, steps, output: `curl: (6) Could not resolve host: ${t.host}` };
+      const failure = { kind: "dns" as const, host: t.host };
+      if (tool === "nslookup") return { ok: false, steps, failure, output: `Server:\t\t${DNS_SERVICE_IP}\nAddress:\t${DNS_SERVICE_IP}:53\n\n** server can't find ${t.host}: NXDOMAIN` };
+      if (tool === "ping") return { ok: false, steps, failure, output: `ping: bad address '${t.host}'` };
+      return { ok: false, steps, failure, output: `curl: (6) Could not resolve host: ${t.host}` };
     }
     const extra = a.tried.length > 1 ? ` (먼저 ${a.tried.slice(0, -1).join(", ")} 는 NXDOMAIN — ndots:5 라 search 도메인부터 붙여 봄)` : "";
     steps.push({ kind: "dns", actor: "coredns", text: `${t.host} → ${a.fqdn} → ${a.ip}${extra}`, at: { dns: true } });
     ip = a.ip;
-    shownHost = a.fqdn;
     if (tool === "nslookup") return { ok: true, steps, output: `Server:\t\t${DNS_SERVICE_IP}\nAddress:\t${DNS_SERVICE_IP}:53\n\nName:\t${a.fqdn}\nAddress: ${a.ip}` };
   } else if (tool === "nslookup") {
     return { ok: false, steps, output: `** server can't find ${ip.split(".").reverse().join(".")}.in-addr.arpa: NXDOMAIN (축소판: 역방향 조회 없음)` };
@@ -120,7 +123,7 @@ function send(c: Cluster, src: Source, tool: Tool, ip: string, port: number, sho
         at: { service: svcByIp.metadata.name },
       });
       steps.push({ kind: "fail", actor: src.pod ?? src.node, text: "아무도 답하지 않음 → ping 은 시간 초과 (TCP 로 접속하면 됩니다)" });
-      return { ok: false, steps, output: pingOut(shownHost, ip, 0) };
+      return { ok: false, steps, failure: { kind: "timeout", host: shownHost, ip }, output: pingOut(shownHost, ip, 0) };
     }
     return deliverToIp(c, src, tool, ip, port, shownHost, steps);
   }
@@ -128,23 +131,24 @@ function send(c: Cluster, src: Source, tool: Tool, ip: string, port: number, sho
     const known = svcByIp.spec.ports.map((p) => p.port).join(", ");
     steps.push({ kind: "dnat", actor: `iptables@${src.node}`, text: `${ip}:${port} 에 맞는 규칙 없음 (Service ${svcByIp.metadata.name} 의 포트는 ${known}) → 가상 주소라 받는 곳이 없어 패킷이 버려짐`, at: { service: svcByIp.metadata.name } });
     steps.push({ kind: "fail", actor: src.pod ?? src.node, text: "응답 없음 → 연결 시간 초과" });
-    return { ok: false, steps, output: `curl: (28) Failed to connect to ${shownHost} port ${port} after 130000 ms: Connection timed out` };
+    return timedOut(tool, steps, shownHost, ip, port);
   }
-  if (rule) return viaService(c, src, rule, shownHost, steps, tool);
+  if (rule) return viaService(c, src, rule, shownHost, steps, tool, port);
   return deliverToIp(c, src, tool, ip, port, shownHost, steps);
 }
 
-function viaService(c: Cluster, src: Source, rule: SvcRule, shownHost: string, steps: NetStep[], tool: Tool): NetResult {
+/** shownPort: 사용자가 접속한 포트 (ClusterIP 면 Service 포트, 바깥에서면 NodePort) — 실패 문구에 그대로 찍는다 */
+function viaService(c: Cluster, src: Source, rule: SvcRule, shownHost: string, steps: NetStep[], tool: Tool, shownPort: number): NetResult {
   const where = `iptables@${src.node}`;
   if (!rule.seps.length) {
     steps.push({
       kind: "dnat",
       actor: where,
-      text: `${rule.clusterIP}:${rule.port} → KUBE-SERVICES 에 "${rule.ns}/${rule.name} has no endpoints" REJECT 규칙 (ready 인 Pod 가 하나도 없음)`,
+      text: `${rule.clusterIP}:${rule.port} → filter 테이블 KUBE-SERVICES 의 "${rule.ns}/${rule.name} has no endpoints" REJECT 규칙 (ready 인 Pod 가 하나도 없음)`,
       at: { service: rule.name, node: src.node },
     });
     steps.push({ kind: "fail", actor: src.pod ?? src.node, text: "ICMP port-unreachable 을 받음 → 연결 거부" });
-    return { ok: false, steps, output: `curl: (7) Failed to connect to ${shownHost} port ${rule.port} after 1 ms: Couldn't connect to server` };
+    return refused(steps, shownHost, shownPort, rule.clusterIP, 1);
   }
   const n = rule.seps.length;
   const i = c.netRng.int(n);
@@ -153,10 +157,12 @@ function viaService(c: Cluster, src: Source, rule: SvcRule, shownHost: string, s
   steps.push({
     kind: "dnat",
     actor: where,
-    text: `${src.outside ? `NodePort ${rule.nodePort} → ` : ""}${rule.clusterIP}:${rule.port} 가 KUBE-SERVICES → ${rule.chain} 에 맞음 → 엔드포인트 ${odds} → ${sep.chain} → DNAT ${sep.ip}:${sep.port} (${sep.pod})`,
+    text: `${src.outside ? `KUBE-NODEPORTS ${rule.nodePort} → ` : `${rule.clusterIP}:${rule.port} 가 KUBE-SERVICES → `}${rule.chain} 에 맞음 → 엔드포인트 ${odds} → ${sep.chain} → DNAT ${sep.ip}:${sep.port} (${sep.pod})${
+      src.outside ? " · externalTrafficPolicy: Cluster 라 출발지도 노드 IP 로 SNAT (원래 클라이언트 IP 는 사라짐 — 같은 노드의 Pod 로 가도)" : ""
+    }`,
     at: { service: rule.name, node: src.node },
   });
-  return deliverToIp(c, src, tool, sep.ip, sep.port, shownHost, steps, rule.port);
+  return deliverToIp(c, src, tool, sep.ip, sep.port, shownHost, steps, shownPort);
 }
 
 /** Pod IP 로 패킷을 보낸다: 같은 노드면 cni0 브리지, 다른 노드면 flannel VXLAN */
@@ -166,7 +172,7 @@ function deliverToIp(c: Cluster, src: Source, tool: Tool, ip: string, port: numb
   if (!node) {
     steps.push({ kind: "route", actor: src.pod ?? src.node, text: `${ip} 는 어떤 노드의 PodCIDR 에도 없음 → 기본 경로로 나갔지만 받는 곳이 없음` });
     steps.push({ kind: "fail", actor: src.pod ?? src.node, text: "응답 없음 → 연결 시간 초과" });
-    return { ok: false, steps, output: tool === "ping" ? pingOut(shownHost, ip, 0) : `curl: (28) Failed to connect to ${shownHost} port ${shownPort} after 130000 ms: Connection timed out` };
+    return timedOut(tool, steps, shownHost, ip, shownPort);
   }
   const dst = node.metadata.name;
   if (dst === src.node) steps.push({ kind: "route", actor: `cni0@${src.node}`, text: `${ip} 는 같은 노드(${src.node}) 의 PodCIDR ${node.spec.podCIDR} → 브리지 cni0 로 바로 전달`, at: { node: dst, pod: pod?.metadata.name } });
@@ -175,18 +181,18 @@ function deliverToIp(c: Cluster, src: Source, tool: Tool, ip: string, port: numb
     steps.push({
       kind: "route",
       actor: `flannel@${src.node}`,
-      text: `${ip} 는 ${dst} 의 PodCIDR ${node.spec.podCIDR} → flannel.1 로 VXLAN 캡슐화해 노드 IP ${nodeIp} 로 보냄 → ${dst} 가 풀어서 cni0 로 전달${src.outside ? " (출발지는 노드 IP 로 SNAT — 원래 클라이언트 IP 는 사라짐)" : ""}`,
+      text: `${ip} 는 ${dst} 의 PodCIDR ${node.spec.podCIDR} → flannel.1 로 VXLAN 캡슐화해 노드 IP ${nodeIp} 로 보냄 → ${dst} 가 풀어서 cni0 로 전달`,
       at: { node: dst, pod: pod?.metadata.name },
     });
   }
   const timeout = () => {
     steps.push({ kind: "fail", actor: src.pod ?? src.node, text: `${dst} 가 꺼져 있어 아무도 받지 않음 → 시간 초과 (EndpointSlice 에서 빠지기 전까지 요청 일부가 이렇게 실패)` });
-    return { ok: false, steps, output: tool === "ping" ? pingOut(shownHost, ip, 0) : `curl: (28) Failed to connect to ${shownHost} port ${shownPort} after 130000 ms: Connection timed out` };
+    return timedOut(tool, steps, shownHost, ip, shownPort);
   };
   if (!c.nodePowered(dst)) return timeout();
   if (!pod) {
     steps.push({ kind: "fail", actor: `cni0@${dst}`, text: `${ip} 를 가진 Pod 가 없음 (이미 사라진 Pod 의 IP) → 응답 없음` });
-    return { ok: false, steps, output: tool === "ping" ? pingOut(shownHost, ip, 0) : `curl: (7) Failed to connect to ${shownHost} port ${shownPort} after 3 ms: Couldn't connect to server` };
+    return tool === "ping" ? timedOut(tool, steps, shownHost, ip, shownPort) : refused(steps, shownHost, shownPort, ip, 3);
   }
   const app = c.kubelets.get(dst)?.appState(pod.metadata.uid);
   if (tool === "ping") {
@@ -199,14 +205,24 @@ function deliverToIp(c: Cluster, src: Source, tool: Tool, ip: string, port: numb
   if (!app?.running || spec?.port !== port) {
     const why = !app?.running ? "컨테이너가 돌고 있지 않음" : `앱은 포트 ${spec?.port ?? "(없음)"} 에서 듣는데 ${port} 로 옴 — Service 의 targetPort 를 확인하세요`;
     steps.push({ kind: "fail", actor: pod.metadata.name, text: `${why} → TCP RST → 연결 거부`, at: { pod: pod.metadata.name } });
-    return { ok: false, steps, output: `curl: (7) Failed to connect to ${shownHost} port ${shownPort} after 2 ms: Couldn't connect to server` };
+    return refused(steps, shownHost, shownPort, ip, 2);
+  }
+  if (spec.body === undefined) {
+    steps.push({ kind: "fail", actor: pod.metadata.name, text: `${pod.metadata.name} 의 앱이 받았지만 HTTP 가 아닌 프로토콜로 답함 → curl 이 HTTP 응답으로 읽지 못함`, at: { pod: pod.metadata.name } });
+    return { ok: false, steps, failure: { kind: "nohttp", host: shownHost, ip }, output: "curl: (1) Received HTTP/0.9 when not allowed", servedBy: pod.metadata.name };
   }
   if (app.sick || !app.warm) {
     steps.push({ kind: "response", actor: pod.metadata.name, text: `${pod.metadata.name} 이(가) 받았지만 앱이 준비되지 않음 → HTTP 503`, at: { pod: pod.metadata.name } });
-    return { ok: false, steps, output: `<html><body>503 Service Unavailable</body></html>\n(응답한 Pod: ${pod.metadata.name} — 실제 curl 은 이 줄을 찍지 않습니다)`, servedBy: pod.metadata.name };
+    return {
+      ok: false,
+      steps,
+      failure: { kind: "http", host: shownHost, ip },
+      output: `<html><body>503 Service Unavailable</body></html>\n(응답한 Pod: ${pod.metadata.name} — 실제 curl 은 이 줄을 찍지 않습니다)`,
+      servedBy: pod.metadata.name,
+    };
   }
   steps.push({ kind: "response", actor: pod.metadata.name, text: `${pod.metadata.name} (${ip}:${port}) 의 앱이 HTTP 200 으로 응답`, at: { pod: pod.metadata.name } });
-  return { ok: true, steps, output: `${spec.body ?? "OK"}\n(응답한 Pod: ${pod.metadata.name} — 실제 curl 은 이 줄을 찍지 않습니다)`, servedBy: pod.metadata.name };
+  return { ok: true, steps, output: `${spec.body}\n(응답한 Pod: ${pod.metadata.name} — 실제 curl 은 이 줄을 찍지 않습니다)`, servedBy: pod.metadata.name };
 }
 
 /** 바깥(클러스터 밖 클라이언트)에서 노드IP:NodePort 로 */
@@ -216,15 +232,25 @@ export function simulateNodePort(c: Cluster, nodeName: string, nodePort: number)
   const nodeIp = node?.status.addresses.find((a) => a.type === "InternalIP")?.address ?? nodeName;
   if (!node || !c.nodePowered(nodeName)) {
     steps.push({ kind: "fail", actor: "client", text: `${nodeName} 가 꺼져 있어 응답 없음` });
-    return { ok: false, steps, output: `curl: (28) Failed to connect to ${nodeIp} port ${nodePort} after 130000 ms: Connection timed out` };
+    return timedOut("curl", steps, nodeIp, nodeIp, nodePort);
   }
   const rule = c.kubeProxies.get(nodeName)?.currentRules.find((r) => r.nodePort === nodePort);
   if (!rule) {
     steps.push({ kind: "dnat", actor: `iptables@${nodeName}`, text: `KUBE-NODEPORTS 에 ${nodePort} 규칙 없음 (NodePort Service 가 아님) → 연결 거부` });
-    return { ok: false, steps, output: `curl: (7) Failed to connect to ${nodeIp} port ${nodePort} after 1 ms: Couldn't connect to server` };
+    return refused(steps, nodeIp, nodePort, nodeIp, 1);
   }
   steps.push({ kind: "route", actor: "client", text: `클러스터 밖 클라이언트 → ${nodeName} (${nodeIp}:${nodePort})`, at: { node: nodeName } });
-  return viaService(c, { node: nodeName, outside: true }, rule, nodeIp, steps, "curl");
+  return viaService(c, { node: nodeName, outside: true }, rule, nodeIp, steps, "curl", nodePort);
+}
+
+function refused(steps: NetStep[], host: string, port: number, ip: string, ms: number): NetResult {
+  return { ok: false, steps, failure: { kind: "refused", host, ip }, output: `curl: (7) Failed to connect to ${host} port ${port} after ${ms} ms: Couldn't connect to server` };
+}
+
+function timedOut(tool: Tool, steps: NetStep[], host: string, ip: string, port: number): NetResult {
+  const failure = { kind: "timeout" as const, host, ip };
+  if (tool === "ping") return { ok: false, steps, failure, output: pingOut(host, ip, 0) };
+  return { ok: false, steps, failure, output: `curl: (28) Failed to connect to ${host} port ${port} after 130000 ms: Connection timed out` };
 }
 
 function inCidr(ip: string, cidr: string): boolean {

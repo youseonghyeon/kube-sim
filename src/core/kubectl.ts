@@ -618,7 +618,7 @@ function setCmd(c: Cluster, pos: string[], flags: Map<string, string>, line: str
 
 function del(c: Cluster, pos: string[], flags: Map<string, string>, line: string): KubectlResult {
   const { kind, names } = resourceArgs(pos);
-  const k = needWorkload(kind, ["Pod", "Deployment", "ReplicaSet"], "delete");
+  const k = needWorkload(kind, ["Pod", "Deployment", "ReplicaSet", "Service"], "delete");
   if (!names.length) throw new KubectlError(`error: 지울 이름이 필요합니다. 예: kubectl delete ${k.toLowerCase()} <이름>`);
   for (const n of names) if (!c.api.get(k, n, "default")) throw new ApiError("NotFound", `${KIND_PLURAL[k]} "${n}" not found`);
   userTrace(c, line);
@@ -666,7 +666,8 @@ function expose(c: Cluster, pos: string[], flags: Map<string, string>, line: str
   if (!d || d.kind !== "Deployment") throw new ApiError("NotFound", `deployments.apps "${name}" not found`);
   const port = Number(flags.get("port"));
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new KubectlError("error: couldn't find port via --port flag or introspection — --port=80 처럼 쓰세요");
-  const targetPort = flags.has("target-port") ? Number(flags.get("target-port")) : (d.spec.template.spec.containers[0]?.ports?.[0]?.containerPort ?? port);
+  // 실제 kubectl 처럼 --target-port 를 안 주면 targetPort = --port (컨테이너 포트와 다르면 연결 거부 — 흔한 실수)
+  const targetPort = flags.has("target-port") ? Number(flags.get("target-port")) : port;
   if (!Number.isInteger(targetPort) || targetPort < 1) throw new KubectlError(`error: --target-port 를 읽지 못했습니다 ("${flags.get("target-port")}")`);
   const type = (flags.get("type") ?? "ClusterIP") as "ClusterIP" | "NodePort";
   if (type !== "ClusterIP" && type !== "NodePort") throw new KubectlError(`error: --type 은 ClusterIP 또는 NodePort (축소판). 받은 값 "${type}"`);
@@ -692,14 +693,54 @@ function exec(c: Cluster, pos: string[], inner: string[]): KubectlResult {
   const cs = p.status.containerStatuses[0];
   if (!cs || !("running" in cs.state)) return fail(`error: unable to upgrade connection: container not found ("${ct.name}")`);
   const [tool0, ...rest] = inner;
-  const target = rest.filter((a) => !a.startsWith("-")).pop();
+  const target = firstOperand(tool0 ?? "", rest);
   const tool = tool0 === "wget" ? "curl" : tool0;
   if (tool !== "curl" && tool !== "ping" && tool !== "nslookup")
     return fail(`OCI runtime exec failed: exec failed: unable to start container process: exec: "${tool0}": executable file not found in $PATH: unknown\n(이 시뮬레이터의 컨테이너에는 curl·wget·ping·nslookup 만 있습니다 — 축소판)`);
   if (!target) return fail(`${tool}: 대상이 필요합니다. 예: kubectl exec ${podName} -- ${tool} ${tool === "curl" ? "http://web" : "web"}`);
   c.trace.add("user", "user", `kubectl exec ${podName} -- ${inner.join(" ")}`, { kind: "Pod", namespace: "default", name: podName });
   const r = c.requestFromPod(podName, tool, target);
-  return { ok: r.ok, output: r.output, mutated: true, net: r };
+  return { ok: r.ok, output: tool0 === "wget" ? wgetOutput(r) : r.output, mutated: true, net: r };
+}
+
+/** 값을 받는 옵션 (그 뒤 인자는 대상이 아니다) */
+const VALUE_OPTS: Record<string, string[]> = {
+  curl: ["-m", "--max-time", "--connect-timeout", "-o", "--output", "-H", "--header", "-X", "--request", "-d", "--data", "-w", "--write-out", "-u", "--user", "-A", "--user-agent", "-e", "--referer"],
+  wget: ["-O", "-T", "--timeout", "-U", "--user-agent", "--header"],
+  ping: ["-c", "-W", "-w", "-i", "-s", "-t"],
+  nslookup: [],
+};
+
+/** 도구의 첫 피연산자 (옵션과 그 값을 건너뛴다) — nslookup <이름> [서버] 의 이름, curl <url> -m 5 의 url */
+function firstOperand(tool: string, args: string[]): string | undefined {
+  const takes = VALUE_OPTS[tool] ?? [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a.startsWith("-")) {
+      if (takes.includes(a)) i++;
+      continue;
+    }
+    return a;
+  }
+  return undefined;
+}
+
+/** busybox wget 의 문구 */
+function wgetOutput(r: NetResult): string {
+  const f = r.failure;
+  if (!f) return r.output;
+  switch (f.kind) {
+    case "dns":
+      return `wget: bad address '${f.host}'`;
+    case "refused":
+      return `wget: can't connect to remote host (${f.ip ?? f.host}): Connection refused`;
+    case "timeout":
+      return "wget: download timed out";
+    case "http":
+      return "wget: server returned error: HTTP/1.1 503 Service Unavailable";
+    case "nohttp":
+      return "wget: error getting response: Connection reset by peer";
+  }
 }
 
 function parseReplicas(s: string): number {

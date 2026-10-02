@@ -16,8 +16,13 @@ export class EndpointSliceController extends Controller {
     ctx.api.watch("Service", (ev) => this.enqueue(nsKey(ev.object.metadata.namespace, ev.object.metadata.name)));
     ctx.api.watch("Pod", (ev) => {
       const p = ev.object;
-      for (const s of ctx.api.peekList("Service", p.metadata.namespace ?? "default")) {
+      const ns = p.metadata.namespace ?? "default";
+      for (const s of ctx.api.peekList("Service", ns)) {
         if (Object.keys(s.spec.selector).length && matchesSelector(p.metadata.labels, { matchLabels: s.spec.selector })) this.enqueue(nsKey(s.metadata.namespace, s.metadata.name));
+      }
+      // 레이블이 바뀌어 셀렉터에서 벗어난 Pod: 지금 이 Pod 를 담고 있는 슬라이스의 Service 도 다시 계산 (옛 레이블 쪽)
+      for (const sl of ctx.api.peekList("EndpointSlice", ns)) {
+        if (sl.endpoints.some((e) => e.targetRef.uid === p.metadata.uid)) this.enqueue(nsKey(ns, sl.metadata.labels[SERVICE_NAME_LABEL]!));
       }
     });
   }

@@ -230,7 +230,7 @@ export const EXAMPLES: Example[] = [
       {
         title: "바깥에서 worker-1 의 NodePort 로",
         action: { type: "nodeport", node: "worker-1", service: "web-np" },
-        expect: "worker-1 의 규칙이 아무 노드의 Pod 로 보냅니다. 다른 노드로 갈 때 출발지 IP 가 노드 IP 로 바뀌어(SNAT) 원래 클라이언트 IP 는 사라집니다.",
+        expect: "worker-1 의 규칙이 아무 노드의 Pod 로 보냅니다 (externalTrafficPolicy: Cluster). 이때 출발지 IP 가 노드 IP 로 바뀌어(SNAT) Pod 는 원래 클라이언트 IP 를 모릅니다 — 같은 노드의 Pod 로 가도 그렇습니다.",
       },
     ],
   },

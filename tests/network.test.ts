@@ -77,7 +77,7 @@ describe("Service · EndpointSlice · kube-proxy", () => {
     const c = webWithService();
     const from = pods(c)[0]!.metadata.name;
     expect(k(c, `exec ${from} -- curl http://wbe`).output).toBe("curl: (6) Could not resolve host: wbe");
-    expect(k(c, `exec ${from} -- curl http://web:8080`).output).toMatch(/^curl: \(28\) Failed to connect to web\.default\.svc\.cluster\.local port 8080/);
+    expect(k(c, `exec ${from} -- curl http://web:8080`).output).toMatch(/^curl: \(28\) Failed to connect to web port 8080/);
     c.apply(service("web", { selector: { app: "web" }, port: 80, targetPort: 8080 }));
     c.runFor(2000);
     const r = k(c, `exec ${from} -- curl http://web`);
@@ -121,7 +121,8 @@ describe("Service · EndpointSlice · kube-proxy", () => {
     const other = pods(c)[0]!.spec.nodeName === "worker-1" ? "worker-2" : "worker-1";
     const r = c.requestNodePort(other, np);
     expect(r.ok).toBe(true);
-    expect(r.steps.find((s) => s.kind === "route" && s.actor.startsWith("flannel"))!.text).toContain("SNAT");
+    expect(r.steps.some((s) => s.kind === "route" && s.actor.startsWith("flannel"))).toBe(true); // 다른 노드의 Pod 로
+    expect(r.steps.find((s) => s.kind === "dnat")!.text).toContain("SNAT"); // Cluster 정책은 어디로 가든 SNAT
   });
 
   test("노드가 꺼진 뒤 NotReady 전까지는 엔드포인트가 남아 그 Pod 로 간 요청이 시간 초과", () => {

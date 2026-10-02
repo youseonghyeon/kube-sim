@@ -153,6 +153,7 @@ export class ApiServer {
     next.metadata.deletionTimestamp = cur.metadata.deletionTimestamp;
     next.metadata.deletionGracePeriodSeconds = cur.metadata.deletionGracePeriodSeconds;
     next.metadata.generation = cur.metadata.generation;
+    if (next.kind === "Service") this.allocateServiceAddresses(next as Service, cur as Service);
     if (stableJson(next) === stableJson(cur)) return clone(cur);
     const specChanged = stableJson(next.spec) !== stableJson(cur.spec);
     if (specChanged && obj.kind !== "Lease") next.metadata.generation = cur.metadata.generation + 1;
@@ -237,19 +238,29 @@ export class ApiServer {
 
   // ---------- Service 주소 (API 서버가 정한다) ----------
 
-  /** ClusterIP 는 10.96.0.0/12 에서 (10.96.0.1 = kubernetes, 10.96.0.10 = kube-dns 는 비워 둠), NodePort 는 30000-32767 */
-  private allocateServiceAddresses(svc: Service): void {
+  /**
+   * ClusterIP 는 10.96.0.0/12 에서 (10.96.0.1 = kubernetes, 10.96.0.10 = kube-dns 는 비워 둠), NodePort 는 30000-32767.
+   * 만들 때와 바꿀 때 모두 부른다: clusterIP 는 바꿀 수 없고(immutable), 지정한 nodePort 는 범위·중복을 검사하고, 비어 있으면 새로 정한다.
+   */
+  private allocateServiceAddresses(svc: Service, prev?: Service): void {
+    const name = svc.metadata.name;
     const used = new Set<string>(["10.96.0.1", "10.96.0.10"]);
     const usedPorts = new Set<number>();
     for (const o of this.store.values()) {
-      if (o.kind !== "Service" || o === svc) continue;
+      if (o.kind !== "Service" || o.metadata.uid === svc.metadata.uid || (o.metadata.name === name && (o.metadata.namespace ?? "default") === (svc.metadata.namespace ?? "default"))) continue;
       if (o.spec.clusterIP) used.add(o.spec.clusterIP);
       for (const p of o.spec.ports) if (p.nodePort) usedPorts.add(p.nodePort);
     }
-    if (svc.spec.clusterIP && used.has(svc.spec.clusterIP)) throw new ApiError("Invalid", `Service "${svc.metadata.name}" is invalid: spec.clusterIP: Invalid value: "${svc.spec.clusterIP}": provided IP is already allocated`);
+    if (prev?.spec.clusterIP) {
+      if (svc.spec.clusterIP && svc.spec.clusterIP !== prev.spec.clusterIP)
+        throw new ApiError("Invalid", `Service "${name}" is invalid: spec.clusterIP: Invalid value: "${svc.spec.clusterIP}": field is immutable`);
+      svc.spec.clusterIP = prev.spec.clusterIP;
+    } else if (svc.spec.clusterIP && used.has(svc.spec.clusterIP)) {
+      throw new ApiError("Invalid", `Service "${name}" is invalid: spec.clusterIP: Invalid value: "${svc.spec.clusterIP}": provided IP is already allocated`);
+    }
     if (!svc.spec.clusterIP) {
       for (let i = 0; ; i++) {
-        const host = 100 + ((stableHash(svc.metadata.name) + i) % 150);
+        const host = 100 + ((stableHash(name) + i) % 150);
         const ip = `10.96.${Math.floor(i / 150)}.${host}`;
         if (!used.has(ip)) {
           svc.spec.clusterIP = ip;
@@ -257,19 +268,27 @@ export class ApiServer {
         }
       }
     }
-    if (svc.spec.type === "NodePort") {
-      for (const p of svc.spec.ports) {
-        if (p.nodePort) continue;
-        for (let i = 0; ; i++) {
-          const port = 30000 + ((stableHash(`${svc.metadata.name}/${p.port}`) + i) % 2768);
-          if (!usedPorts.has(port)) {
-            p.nodePort = port;
-            usedPorts.add(port);
-            break;
-          }
+    svc.spec.ports.forEach((p, i) => {
+      if (svc.spec.type !== "NodePort") {
+        delete p.nodePort;
+        return;
+      }
+      if (p.nodePort !== undefined) {
+        if (!Number.isInteger(p.nodePort) || p.nodePort < 30000 || p.nodePort > 32767)
+          throw new ApiError("Invalid", `Service "${name}" is invalid: spec.ports[${i}].nodePort: Invalid value: ${p.nodePort}: provided port is not in the valid range. The range of valid ports is 30000-32767`);
+        if (usedPorts.has(p.nodePort)) throw new ApiError("Invalid", `Service "${name}" is invalid: spec.ports[${i}].nodePort: Invalid value: ${p.nodePort}: provided port is already allocated`);
+        usedPorts.add(p.nodePort);
+        return;
+      }
+      for (let j = 0; ; j++) {
+        const port = 30000 + ((stableHash(`${name}/${p.port}`) + j) % 2768);
+        if (!usedPorts.has(port)) {
+          p.nodePort = port;
+          usedPorts.add(port);
+          break;
         }
       }
-    }
+    });
   }
 
   // ---------- watch ----------

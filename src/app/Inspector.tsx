@@ -775,7 +775,7 @@ function IptablesView({ node }: { node: string }) {
   return (
     <>
       <p class="note">
-        이 노드의 kube-proxy 가 써 둔 nat 테이블 (<span class="mono">iptables-save -t nat | grep KUBE</span>). 이 노드에서 나가는 요청은 이 규칙을 따라 DNAT 됩니다.
+        이 노드의 kube-proxy 가 써 둔 규칙 (<span class="mono">iptables-save | grep KUBE</span> — ready 엔드포인트가 없는 Service 의 REJECT 는 filter, DNAT 은 nat 테이블). 이 노드에서 나가는 요청은 이 규칙을 따라 DNAT 됩니다.
         {!powered && " 노드가 꺼져 있어 마지막으로 쓴 규칙에서 멈춰 있습니다."}
       </p>
       <pre class="term">{proxy ? proxy.iptablesSave() : "kube-proxy 없음"}</pre>

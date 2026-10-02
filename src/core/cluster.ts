@@ -169,10 +169,11 @@ export class Cluster {
         // 서버가 정한 값(clusterIP·nodePort)은 매니페스트에 없으면 지킨다 (apply 의 3-way merge 처럼)
         const s = spec as Service["spec"];
         s.clusterIP ??= o.spec.clusterIP;
-        for (const p of s.ports) {
-          if (s.type === "NodePort") p.nodePort ??= o.spec.ports.find((x) => x.port === p.port)?.nodePort;
+        s.ports.forEach((p, i) => {
+          // 매니페스트에 nodePort 가 없으면 지금 것을 이어받는다 (포트 번호가 바뀌었으면 같은 자리의 것). 없으면 API 서버가 새로 정한다
+          if (s.type === "NodePort") p.nodePort ??= (o.spec.ports.find((x) => x.port === p.port) ?? o.spec.ports[i])?.nodePort;
           else delete p.nodePort;
-        }
+        });
       }
       (o as { spec: unknown }).spec = spec;
       o.metadata.labels = { ...(m.metadata.labels ?? {}) };
