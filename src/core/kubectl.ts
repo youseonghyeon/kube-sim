@@ -2,7 +2,8 @@
 // 축소판: default 네임스페이스만, 자주 쓰는 하위 명령·플래그만.
 import { ApiError } from "./api/server";
 import { controllerOf, isNodeReady, NODE_LEASE_NS, podRequests, SERVICE_NAME_LABEL, type Deployment, type KEvent, type Kind, type Node, type Pod } from "./api/types";
-import { deployment, service, type Cluster } from "./cluster";
+import { deployment, pdb, service, type Cluster } from "./cluster";
+import type { DrainJob } from "./drain";
 import type { NetResult } from "./net/request";
 import { deploymentHash, HASH_LABEL, revisionOf } from "./controllers/deployment";
 import { nodeUsage } from "./scheduler";
@@ -15,6 +16,8 @@ export interface KubectlResult {
   mutated: boolean;
   /** kubectl exec 로 보낸 요청의 단계 (화면에서 경로를 그린다) */
   net?: NetResult;
+  /** kubectl drain: 시간이 지나며 출력 줄이 늘어난다 */
+  drain?: DrainJob;
 }
 
 export const KUBE_VERSION = "v1.31.0";
@@ -27,6 +30,9 @@ const RESOURCE_ALIASES: Record<string, Res> = {
   services: "Service",
   ep: "Endpoints",
   endpoints: "Endpoints",
+  pdb: "PodDisruptionBudget",
+  poddisruptionbudget: "PodDisruptionBudget",
+  poddisruptionbudgets: "PodDisruptionBudget",
   endpointslice: "EndpointSlice",
   endpointslices: "EndpointSlice",
   po: "Pod",
@@ -57,6 +63,7 @@ const KIND_PREFIX: Record<Kind, string> = {
   Lease: "lease.coordination.k8s.io",
   Service: "service",
   EndpointSlice: "endpointslice.discovery.k8s.io",
+  PodDisruptionBudget: "poddisruptionbudget.policy",
 };
 const KIND_PLURAL: Record<Kind, string> = {
   Pod: "pods",
@@ -66,6 +73,7 @@ const KIND_PLURAL: Record<Kind, string> = {
   Lease: "leases.coordination.k8s.io",
   Service: "services",
   EndpointSlice: "endpointslices.discovery.k8s.io",
+  PodDisruptionBudget: "poddisruptionbudgets.policy",
 };
 
 export const KUBECTL_HELP = [
@@ -81,6 +89,9 @@ export const KUBECTL_HELP = [
   "  kubectl set resources deployment/<이름> --requests=cpu=500m,memory=256Mi",
   "  kubectl delete pod|deploy|rs|svc <이름>   (pod 는 --force --grace-period=0 로 강제)",
   "  kubectl cordon|uncordon <노드>",
+  "  kubectl drain <노드> [--ignore-daemonsets]   (PodDisruptionBudget 을 지키며 내보냄)",
+  "  kubectl create pdb <이름> --selector=app=web --min-available=2 | --max-unavailable=1",
+  "  kubectl get pdb",
   "  kubectl get leases -n kube-node-lease   (kubelet heartbeat)",
 ].join("\n");
 
@@ -118,6 +129,8 @@ export function runKubectl(cluster: Cluster, line: string): KubectlResult {
       case "cordon":
       case "uncordon":
         return cordon(cluster, cmd, pos, line);
+      case "drain":
+        return drainCmd(cluster, pos, line);
       case "rollout":
         return rollout(cluster, pos, flags, line);
       case "expose":
@@ -162,7 +175,7 @@ function parseFlags(args: string[]): { pos: string[]; flags: Map<string, string>
     } else if (a.startsWith("--")) {
       const eq = a.indexOf("=");
       if (eq > 0) flags.set(a.slice(2, eq), a.slice(eq + 1));
-      else if (["replicas", "image", "requests", "grace-period", "port", "target-port", "type", "name", "to-revision"].includes(a.slice(2)) && args[i + 1] && !args[i + 1]!.startsWith("-")) flags.set(a.slice(2), args[++i]!);
+      else if (["replicas", "image", "requests", "grace-period", "port", "target-port", "type", "name", "to-revision", "selector", "min-available", "max-unavailable"].includes(a.slice(2)) && args[i + 1] && !args[i + 1]!.startsWith("-")) flags.set(a.slice(2), args[++i]!);
       else flags.set(a.slice(2), "true");
     } else if (a.startsWith("-o")) flags.set("o", a.slice(2));
     else pos.push(a);
@@ -219,6 +232,8 @@ function get(c: Cluster, pos: string[], flags: Map<string, string>): string {
       return getEndpoints(c, names) || "No resources found in default namespace.";
     case "EndpointSlice":
       return getSlices(c, names) || "No resources found in default namespace.";
+    case "PodDisruptionBudget":
+      return getPdbs(c, names) || "No resources found in default namespace.";
     case "Lease":
       if (flags.get("n") !== NODE_LEASE_NS) return "No resources found in default namespace. (노드 Lease 는 -n kube-node-lease)";
       return getLeases(c, names) || `No resources found in ${NODE_LEASE_NS} namespace.`;
@@ -335,6 +350,15 @@ function getSlices(c: Cluster, names: string[]): string {
   );
 }
 
+function getPdbs(c: Cluster, names: string[]): string {
+  const bs = pick(c, "PodDisruptionBudget", c.api.list("PodDisruptionBudget", "default"), names);
+  if (!bs.length) return "";
+  return table(
+    ["NAME", "MIN AVAILABLE", "MAX UNAVAILABLE", "ALLOWED DISRUPTIONS", "AGE"],
+    bs.map((b) => [b.metadata.name, b.spec.minAvailable !== undefined ? String(b.spec.minAvailable) : "N/A", b.spec.maxUnavailable !== undefined ? String(b.spec.maxUnavailable) : "N/A", String(b.status.disruptionsAllowed), fmtAge(c.now - b.metadata.creationTimestamp)]),
+  );
+}
+
 function getLeases(c: Cluster, names: string[]): string {
   const ls = pick(c, "Lease", c.api.list("Lease", NODE_LEASE_NS), names);
   if (!ls.length) return "";
@@ -401,6 +425,8 @@ function describe(c: Cluster, pos: string[]): string {
       throw new KubectlError("error: describe lease 는 아직 없습니다 — kubectl get leases -n kube-node-lease");
     case "EndpointSlice":
       throw new KubectlError("error: describe endpointslice 는 아직 없습니다 — kubectl get endpointslices");
+    case "PodDisruptionBudget":
+      throw new KubectlError("error: describe pdb 는 아직 없습니다 — kubectl get pdb");
     case "Service": {
       const lines: [string, string][] = [
         ["Name", o.metadata.name],
@@ -563,6 +589,26 @@ export function eventSource(source: string): string {
 // ---------- 바꾸는 명령 ----------
 
 function create(c: Cluster, pos: string[], flags: Map<string, string>, line: string): KubectlResult {
+  if (pos[0] === "pdb" || pos[0] === "poddisruptionbudget") {
+    const name = pos[1];
+    const sel = flags.get("selector");
+    if (!name || !sel) throw new KubectlError("error: 이름과 --selector 가 필요합니다. 예: kubectl create pdb web-pdb --selector=app=web --min-available=2");
+    const matchLabels: Record<string, string> = {};
+    for (const part of sel.split(",")) {
+      const [k2, v] = part.split("=");
+      if (!k2 || v === undefined) throw new KubectlError(`error: --selector 를 읽지 못했습니다 ("${sel}") — app=web 처럼`);
+      matchLabels[k2] = v;
+    }
+    const intOrPct = (v: string | undefined) => (v === undefined ? undefined : /^\d+%$/.test(v) ? v : Number.isInteger(Number(v)) && Number(v) >= 0 ? Number(v) : NaN);
+    const minA = intOrPct(flags.get("min-available"));
+    const maxU = intOrPct(flags.get("max-unavailable"));
+    if (Number.isNaN(minA) || Number.isNaN(maxU)) throw new KubectlError("error: --min-available·--max-unavailable 은 0 이상 정수나 25% 같은 퍼센트여야 합니다");
+    if ((minA === undefined) === (maxU === undefined)) throw new KubectlError("error: one of min-available or max-unavailable must be specified");
+    if (c.api.get("PodDisruptionBudget", name, "default")) throw new ApiError("AlreadyExists", `poddisruptionbudgets.policy "${name}" already exists`);
+    userTrace(c, line);
+    c.apply(pdb(name, matchLabels, minA !== undefined ? { minAvailable: minA } : { maxUnavailable: maxU }), "kubectl");
+    return ok(`poddisruptionbudget.policy/${name} created`, true);
+  }
   if (pos[0] !== "deployment" && pos[0] !== "deploy") throw new KubectlError(`error: create 는 deployment 만 됩니다 (축소판). 예: kubectl create deployment web --image=nginx:1.27`);
   const name = pos[1];
   const image = flags.get("image");
@@ -631,7 +677,7 @@ function setCmd(c: Cluster, pos: string[], flags: Map<string, string>, line: str
 
 function del(c: Cluster, pos: string[], flags: Map<string, string>, line: string): KubectlResult {
   const { kind, names } = resourceArgs(pos);
-  const k = needWorkload(kind, ["Pod", "Deployment", "ReplicaSet", "Service"], "delete");
+  const k = needWorkload(kind, ["Pod", "Deployment", "ReplicaSet", "Service", "PodDisruptionBudget"], "delete");
   if (!names.length) throw new KubectlError(`error: 지울 이름이 필요합니다. 예: kubectl delete ${k.toLowerCase()} <이름>`);
   for (const n of names) if (!c.api.get(k, n, "default")) throw new ApiError("NotFound", `${KIND_PLURAL[k]} "${n}" not found`);
   userTrace(c, line);
@@ -668,6 +714,15 @@ function cordon(c: Cluster, cmd: "cordon" | "uncordon", pos: string[], line: str
     else delete o.spec.unschedulable;
   });
   return ok(`node/${name} ${cmd}ed`, true);
+}
+
+function drainCmd(c: Cluster, pos: string[], line: string): KubectlResult {
+  const node = pos[0];
+  if (!node) throw new KubectlError("error: USAGE: drain NODE [--ignore-daemonsets]");
+  if (!c.api.get("Node", node)) throw new ApiError("NotFound", `nodes "${node}" not found`);
+  userTrace(c, line);
+  const job = c.drain(node);
+  return { ok: true, output: job.lines.join("\n"), mutated: true, drain: job };
 }
 
 /** 실제 kubectl rollout status 의 한 줄 (축소판: 끝날 때까지 기다리지 않고 지금 상태만) */

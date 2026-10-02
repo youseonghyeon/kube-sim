@@ -225,6 +225,15 @@ export interface EndpointSlice {
 
 export const SERVICE_NAME_LABEL = "kubernetes.io/service-name";
 
+/** 자발적 중단(drain·eviction) 때 최소한 남겨 둘 Pod 수 */
+export interface PodDisruptionBudget {
+  apiVersion: "policy/v1";
+  kind: "PodDisruptionBudget";
+  metadata: ObjectMeta;
+  spec: { selector: LabelSelector; minAvailable?: IntOrPercent; maxUnavailable?: IntOrPercent };
+  status: { currentHealthy: number; desiredHealthy: number; disruptionsAllowed: number; expectedPods: number; observedGeneration: number };
+}
+
 /** kubelet 의 heartbeat: kube-node-lease 네임스페이스에 노드마다 하나, 10초마다 renewTime 을 갱신한다 */
 export interface Lease {
   apiVersion: "coordination.k8s.io/v1";
@@ -236,7 +245,7 @@ export interface Lease {
 
 export const NODE_LEASE_NS = "kube-node-lease";
 
-export type KObject = Pod | ReplicaSet | Deployment | Node | Lease | Service | EndpointSlice;
+export type KObject = Pod | ReplicaSet | Deployment | Node | Lease | Service | EndpointSlice | PodDisruptionBudget;
 export type Kind = KObject["kind"];
 
 export type ObjectOf<K extends Kind> = Extract<KObject, { kind: K }>;

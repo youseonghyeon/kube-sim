@@ -1,10 +1,12 @@
 // 클러스터 한 벌: 시계 + 트레이스 + API 서버 + 컨트롤 플레인(스케줄러·컨트롤러) + 노드마다 kubelet.
 // 바깥(모델·kubectl·UI)은 여기 메서드로만 클러스터를 바꾼다.
 import { ApiServer, WATCH_DELAY_MS } from "./api/server";
-import type { Deployment, PodSpec, Probe, Service } from "./api/types";
+import type { Deployment, PodDisruptionBudget, PodSpec, Probe, Service } from "./api/types";
 import { Clock } from "./clock";
 import type { ComponentContext } from "./controllers/base";
 import { DeploymentController } from "./controllers/deployment";
+import { DisruptionController } from "./controllers/disruption";
+import { DrainJob } from "./drain";
 import { EndpointSliceController } from "./controllers/endpointslice";
 import { NodeLifecycleController, TaintEvictionController } from "./controllers/nodelifecycle";
 import { ReplicaSetController } from "./controllers/replicaset";
@@ -31,7 +33,14 @@ export interface ServiceManifest {
   spec: Service["spec"];
 }
 
-export type Manifest = DeploymentManifest | ServiceManifest;
+export interface PdbManifest {
+  apiVersion: "policy/v1";
+  kind: "PodDisruptionBudget";
+  metadata: { name: string; namespace?: string; labels?: Record<string, string> };
+  spec: PodDisruptionBudget["spec"];
+}
+
+export type Manifest = DeploymentManifest | ServiceManifest | PdbManifest;
 
 export interface ClusterOptions {
   seed?: number;
@@ -58,6 +67,7 @@ export class Cluster {
     new DeploymentController(this.ctx);
     new ReplicaSetController(this.ctx, this.rng);
     new EndpointSliceController(this.ctx, this.rng);
+    new DisruptionController(this.ctx);
     new Scheduler(this.ctx);
     new NodeLifecycleController(this.ctx);
     new TaintEvictionController(this.ctx);
@@ -113,6 +123,11 @@ export class Cluster {
 
   resizeNode(name: string, cpu: number, memory: number): void {
     this.kubelets.get(name)?.resize(cpu, memory);
+  }
+
+  /** kubectl drain: 노드를 cordon 하고 Pod 를 Eviction API 로 내보낸다 (시간이 지나며 진행) */
+  drain(node: string): DrainJob {
+    return new DrainJob(this, node);
   }
 
   /** 지금 돌고 있는 부하 발생기 (하나만) */
@@ -178,7 +193,8 @@ export class Cluster {
     const cur = this.api.get(m.kind, m.metadata.name, ns);
     if (!cur) {
       if (m.kind === "Deployment") this.api.create<"Deployment">({ apiVersion: m.apiVersion, kind: m.kind, metadata: { ...m.metadata, namespace: ns }, spec: structuredClone(m.spec) }, actor);
-      else this.api.create<"Service">({ apiVersion: m.apiVersion, kind: m.kind, metadata: { ...m.metadata, namespace: ns }, spec: structuredClone(m.spec) }, actor);
+      else if (m.kind === "Service") this.api.create<"Service">({ apiVersion: m.apiVersion, kind: m.kind, metadata: { ...m.metadata, namespace: ns }, spec: structuredClone(m.spec) }, actor);
+      else this.api.create<"PodDisruptionBudget">({ apiVersion: m.apiVersion, kind: m.kind, metadata: { ...m.metadata, namespace: ns }, spec: structuredClone(m.spec) }, actor);
       return "created";
     }
     const rv = cur.metadata.resourceVersion;
@@ -208,6 +224,11 @@ export class Cluster {
   runFor(ms: number, maxEvents?: number): number {
     return this.clock.runUntil(this.clock.now + ms, maxEvents);
   }
+}
+
+/** 예제에서 쓰는 PodDisruptionBudget */
+export function pdb(name: string, selector: Record<string, string>, opts: { minAvailable?: number | string; maxUnavailable?: number | string }): PdbManifest {
+  return { apiVersion: "policy/v1", kind: "PodDisruptionBudget", metadata: { name }, spec: { selector: { matchLabels: { ...selector } }, ...opts } };
 }
 
 /** 예제·폼에서 쓰는 단순 Service */

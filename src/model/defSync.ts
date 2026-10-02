@@ -52,7 +52,7 @@ export class DefSync {
     for (const key of [...this.manifests.keys()]) {
       if (wantManifests.has(key)) continue;
       this.manifests.delete(key);
-      const [kind, name] = key.split("/") as ["Deployment" | "Service", string];
+      const [kind, name] = key.split("/") as [Manifest["kind"], string];
       if (c.api.get(kind, name, "default")) {
         c.trace.add("user", "user", `매니페스트 삭제 (kubectl delete): ${resourceName(kind)}/${name}`);
         c.api.delete(kind, name, "default", "kubectl");
@@ -95,5 +95,5 @@ export function manifestKey(m: Manifest): string {
 }
 
 function resourceName(kind: Manifest["kind"]): string {
-  return kind === "Deployment" ? "deployment.apps" : "service";
+  return kind === "Deployment" ? "deployment.apps" : kind === "Service" ? "service" : "poddisruptionbudget.policy";
 }

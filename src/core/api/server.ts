@@ -12,7 +12,7 @@ export interface WatchEvent<K extends Kind = Kind> {
   object: ObjectOf<K>;
 }
 
-export type ApiErrorReason = "NotFound" | "AlreadyExists" | "Conflict" | "Invalid";
+export type ApiErrorReason = "NotFound" | "AlreadyExists" | "Conflict" | "Invalid" | "TooManyRequests";
 
 export class ApiError extends Error {
   constructor(
@@ -223,6 +223,36 @@ export class ApiServer {
     this.clock.after(this.watchDelay, "garbage-collector", () => this.collectDependents(uid, cur));
   }
 
+  /**
+   * Eviction API (kubectl drain 이 쓰는 것): 그 Pod 를 고르는 PodDisruptionBudget 이 중단을 허락할 때만 지운다.
+   * 허락하지 않으면 429 TooManyRequests. 허락하면 PDB 의 disruptionsAllowed 를 하나 줄이고 Pod 를 지운다(유예 시간 있음).
+   */
+  evict(name: string, namespace: string | undefined, actor: string): void {
+    const p = this.store.get(objKey("Pod", name, namespace)) as Pod | undefined;
+    if (!p) throw new ApiError("NotFound", `pods "${name}" not found`);
+    if (p.metadata.deletionTimestamp !== undefined) return;
+    const ready = p.status.conditions.some((c) => c.type === "Ready" && c.status === "True");
+    for (const o of [...this.store.values()]) {
+      if (o.kind !== "PodDisruptionBudget" || (o.metadata.namespace ?? "default") !== (p.metadata.namespace ?? "default")) continue;
+      if (!Object.entries(o.spec.selector.matchLabels).every(([k, v]) => p.metadata.labels[k] === v)) continue;
+      // 준비 안 된 Pod 는 예산이 건강할 때 지울 수 있다 (unhealthyPodEvictionPolicy: IfHealthyBudget)
+      const ok = ready ? o.status.disruptionsAllowed > 0 : o.status.currentHealthy >= o.status.desiredHealthy;
+      if (!ok) {
+        this.trace.add("kube-apiserver", "api.conflict", `${actor} 의 eviction 요청 → Pod ${name} 거절: PodDisruptionBudget ${o.metadata.name} 이 허락하지 않음 (Ready ${o.status.currentHealthy} · 최소 ${o.status.desiredHealthy} · 허용 ${o.status.disruptionsAllowed})`, refOf(p));
+        throw new ApiError("TooManyRequests", "Cannot evict pod as it would violate the pod's disruption budget.");
+      }
+      if (ready) {
+        const next = clone(o);
+        next.status.disruptionsAllowed -= 1;
+        next.status.currentHealthy -= 1;
+        next.metadata.resourceVersion = ++this.rv;
+        this.store.set(objKey(o.kind, o.metadata.name, o.metadata.namespace), next);
+        this.notify("MODIFIED", next);
+      }
+    }
+    this.delete("Pod", name, namespace, actor);
+  }
+
   /** kubelet 이 컨테이너를 다 멈춘 Pod 를 마지막으로 지울 때 */
   finalizePod(name: string, namespace: string | undefined, uid: string, actor: string): void {
     const cur = this.store.get(objKey("Pod", name, namespace));
@@ -392,6 +422,8 @@ function emptyStatus(kind: Kind): unknown {
       return { replicas: 0, updatedReplicas: 0, readyReplicas: 0, availableReplicas: 0, observedGeneration: 0 };
     case "Node":
       return { capacity: { cpu: 0, memory: 0, pods: 0 }, allocatable: { cpu: 0, memory: 0, pods: 0 }, conditions: [], addresses: [], images: [] };
+    case "PodDisruptionBudget":
+      return { currentHealthy: 0, desiredHealthy: 0, disruptionsAllowed: 0, expectedPods: 0, observedGeneration: 0 };
     case "Lease":
     case "Service":
     case "EndpointSlice":
@@ -404,6 +436,7 @@ function lower(kind: Kind): string {
   if (kind === "Deployment") return "deployments.apps";
   if (kind === "Lease") return "leases.coordination.k8s.io";
   if (kind === "EndpointSlice") return "endpointslices.discovery.k8s.io";
+  if (kind === "PodDisruptionBudget") return "poddisruptionbudgets.policy";
   return `${kind.toLowerCase()}s`;
 }
 
