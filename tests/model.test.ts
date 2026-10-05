@@ -3,7 +3,7 @@ import { Clock } from "../src/core/clock";
 import type { DeploymentManifest } from "../src/core/cluster";
 import { DefSync } from "../src/model/defSync";
 import { runCommand } from "../src/model/commands";
-import { EXAMPLES, resolveCommand } from "../src/model/examples";
+import { EXAMPLES, EXAMPLE_GROUPS, resolveCommand } from "../src/model/examples";
 import { advanceClock } from "../src/model/simClock";
 import { runKubectl } from "../src/core/kubectl";
 
@@ -44,6 +44,11 @@ describe("화면 시계", () => {
 });
 
 describe("예제", () => {
+  test("모든 예제가 메뉴 묶음 하나에만 들어 있다", () => {
+    const grouped = EXAMPLE_GROUPS.flatMap((g) => g.ids);
+    expect([...grouped].sort()).toEqual(EXAMPLES.map((e) => e.id).sort());
+  });
+
   for (const ex of EXAMPLES) {
     test(`${ex.id}: 불러와서 2분 돌려도 오류 없이 돌고, 해 볼 것의 명령이 모두 실행된다`, () => {
       const s = new DefSync();

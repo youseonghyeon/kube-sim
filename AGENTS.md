@@ -40,7 +40,7 @@
   - `units.ts` cpu(millicore)·memory(MiB)·AGE 표기 · `rng.ts` 시드 고정 난수·이름 접미사·템플릿 해시
   - `net/kubeproxy.ts` 노드마다 iptables 규칙(모양·확률·KUBE-EXT/SVL), `net/request.ts` CoreDNS 이름 풀기 + 요청 한 번의 단계(DNS → DNAT → 경로 → 응답/실패, 바깥 → LB·NodePort·Ingress·funnel, 출발지 IP 추적), `net/ingress.ts` MetalLB·ingress-nginx 상태·Tailscale 오퍼레이터·Ingress 규칙 고르기
   - `controllers/endpointslice.ts` Service 셀렉터 + Pod Ready → 엔드포인트
-- `src/model/` 편집 가능한 클러스터 정의(노드 + 매니페스트)와 예제(`examples.ts`, "해 볼 것" 포함), 정의 → 클러스터 diff 반영(`defSync.ts`), 화면 시계(`simClock.ts`), 신호·rAF(`sim.ts`), 화면 모양 뽑기(`view.ts`), 명령 한 줄 나누기(`commands.ts` — curl·argocd·git·kubectl), 앱 상태(`store.ts` — localStorage. 되돌리기는 아직 없음)
+- `src/model/` 편집 가능한 클러스터 정의(노드 + 매니페스트)와 예제(`examples.ts`, "해 볼 것" 포함, 메뉴 묶음 `EXAMPLE_GROUPS`), 정의 → 클러스터 diff 반영(`defSync.ts`), 화면 시계(`simClock.ts`), 신호·rAF(`sim.ts`), 화면 모양 뽑기(`view.ts`), 명령 한 줄 나누기(`commands.ts` — curl·argocd·git·kubectl), 앱 상태(`store.ts` — localStorage. 되돌리기는 아직 없음)
 - `src/app/` Preact UI: 왼쪽 오브젝트 나무, 캔버스(컨트롤 플레인 · 스케줄 대기 · 노드 안 Pod 칩), 인스펙터(개요·설정·describe·YAML, 선택 없으면 예제의 "해 볼 것"), 아래 서랍(로그 · kubectl)
 - `tests/` vitest. 코어는 트레이스 시퀀스(`kind` 배열)를 그대로 단언한다
 - `scripts/` `ui-check.mjs`(Playwright 스모크 — Vite 를 **포트 5199** 로 직접 띄움, 사용자가 5173 을 쓸 수 있음), `perf-check.mjs`(프로덕션 빌드로 fps 측정)

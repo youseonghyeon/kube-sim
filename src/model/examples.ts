@@ -590,6 +590,20 @@ export const EXAMPLES: Example[] = [
 ];
 
 
+/**
+ * 예제 메뉴 묶음. 위에서 아래, 왼쪽에서 오른쪽이 학습 순서(ROADMAP 단계 순)다.
+ * 새 예제는 여기에도 넣는다 — 빠지거나 겹치면 tests/model.test.ts 가 잡는다.
+ */
+export const EXAMPLE_GROUPS: { label: string; ids: string[] }[] = [
+  { label: "기본", ids: ["basics", "pending"] },
+  { label: "Pod 고장", ids: ["crashloop", "imagepull"] },
+  { label: "노드", ids: ["node-down", "nodes", "drain"] },
+  { label: "Service", ids: ["service", "readiness"] },
+  { label: "배포·헬스", ids: ["rolling", "rollout-stuck", "graceful", "liveness"] },
+  { label: "바깥 트래픽", ids: ["ingress", "source-ip", "tailscale"] },
+  { label: "GitOps", ids: ["gitops"] },
+];
+
 export const DEFAULT_EXAMPLE = "basics";
 
 export type TryAction = NonNullable<TryStep["action"]>;

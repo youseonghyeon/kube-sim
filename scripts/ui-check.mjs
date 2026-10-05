@@ -101,6 +101,20 @@ await page.locator(".tree-row", { hasText: "web" }).first().click();
 check((await page.locator(".callout", { hasText: "라이브가 매니페스트와 다릅니다" }).count()) === 1, "kubectl 로 바꾼 replicas 가 드리프트로 보인다", "Inspector DriftNote / DefSync.drift");
 await page.screenshot({ path: `${OUT}/05-scaled-drift.png` });
 
+// 3b) 예제 메뉴: 묶음별 열 + 검색
+console.log("3b) 예제 메뉴 묶음·검색");
+await page.click(".menu-btn");
+check((await page.locator(".menu-group").count()) === 7, "예제 메뉴가 묶음 7개로 나뉜다", "examples.ts EXAMPLE_GROUPS / App.tsx ExampleMenu");
+await page.screenshot({ path: `${OUT}/05b-example-menu.png` });
+await page.keyboard.type("readiness");
+const found = await page.locator(".example-item").evaluateAll((els) => els.map((e) => e.getAttribute("data-example")));
+check(found.length > 0 && found.includes("readiness") && !found.includes("basics"), `검색하면 맞는 예제만 남는다 (${found.join(",")})`, "App.tsx ExampleMenu 검색 필터");
+await page.keyboard.press("Escape");
+await page.click(".menu-btn");
+await page.keyboard.type("없는말xyz");
+check((await page.locator(".menu-empty").count()) === 1, "맞는 예제가 없으면 안내가 보인다", "App.tsx ExampleMenu menu-empty");
+await page.keyboard.press("Escape");
+
 // 4) 예제 바꾸기: Pending
 console.log("4) Pending 예제");
 await page.click(".menu-btn");

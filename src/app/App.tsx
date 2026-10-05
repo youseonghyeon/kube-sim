@@ -1,7 +1,7 @@
 import { useSignal } from "@preact/signals";
-import { useEffect, useRef } from "preact/hooks";
+import { useEffect, useLayoutEffect, useRef } from "preact/hooks";
 import { fmtClock } from "../core/units";
-import { EXAMPLES } from "../model/examples";
+import { EXAMPLE_GROUPS, EXAMPLES, exampleById } from "../model/examples";
 import { running, sim, simNotice, simTime, speed, togglePlay } from "../model/sim";
 import { exampleId, loadExample, selection, theme, toggleTheme } from "../model/store";
 import { Canvas } from "./Canvas";
@@ -124,7 +124,24 @@ function ExampleMenu({ onPick }: { onPick: (id: string) => void }) {
       window.removeEventListener("keydown", onKey);
     };
   }, [open.value]);
+  const query = useSignal("");
+  const search = useRef<HTMLInputElement>(null);
+  // 그리기 전에 포커스: 메뉴를 열자마자 친 글자도 검색 칸으로 (useEffect 는 늦어 첫 글자를 놓친다)
+  useLayoutEffect(() => {
+    if (open.value) search.current?.focus();
+    else query.value = "";
+  }, [open.value]);
   const current = EXAMPLES.find((e) => e.id === exampleId.value);
+  const q = query.value.trim().toLowerCase();
+  const groups = EXAMPLE_GROUPS.map((g) => ({
+    label: g.label,
+    items: g.ids.map((id) => exampleById(id)!).filter((x) => !q || `${g.label} ${x.title} ${x.summary}`.toLowerCase().includes(q)),
+  })).filter((g) => g.items.length > 0);
+  const first = groups[0]?.items[0];
+  const pick = (id: string) => {
+    open.value = false;
+    onPick(id);
+  };
   return (
     <div class="menu-wrap" ref={wrap}>
       <button class={`btn ghost menu-btn${open.value ? " on" : ""}`} onClick={() => (open.value = !open.value)} aria-haspopup="menu" aria-expanded={open.value}>
@@ -132,23 +149,39 @@ function ExampleMenu({ onPick }: { onPick: (id: string) => void }) {
         <Icon name="chevron" size={14} />
       </button>
       {open.value && (
-        <div class="menu" role="menu">
-          <div class="menu-caption">예제 불러오기 — 클러스터를 처음부터 다시 만듭니다</div>
-          {EXAMPLES.map((x) => (
-            <button
-              key={x.id}
-              role="menuitem"
-              class={`menu-item${x.id === exampleId.value ? " current" : ""}`}
-              data-example={x.id}
-              onClick={() => {
-                open.value = false;
-                onPick(x.id);
+        <div class="menu menu-wide" role="menu">
+          <div class="menu-head">
+            <span class="menu-caption">
+              예제 불러오기 <span class="muted">{EXAMPLES.length}개 · 클러스터를 처음부터 다시 만듭니다. 위에서 아래, 왼쪽에서 오른쪽이 학습 순서입니다</span>
+            </span>
+            <input
+              class="input menu-search"
+              value={query.value}
+              placeholder="예제 찾기 (예: Pending, readiness, Ingress)"
+              ref={search}
+              onInput={(e) => (query.value = e.currentTarget.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && first) pick(first.id);
               }}
-            >
-              <span class="menu-item-title">{x.title}</span>
-              <span class="menu-item-sub">{x.summary}</span>
-            </button>
-          ))}
+            />
+          </div>
+          <div class="menu-examples">
+            {groups.map((g) => (
+              <div key={g.label} class="menu-group">
+                <div class="menu-group-label">{g.label}</div>
+                {g.items.map((x) => {
+                  const m = /^(.*?)\s*\((.*)\)$/.exec(x.title);
+                  return (
+                    <button key={x.id} role="menuitem" class={`menu-item example-item${x.id === exampleId.value ? " current" : ""}`} data-example={x.id} title={x.summary} onClick={() => pick(x.id)}>
+                      <span class="menu-item-title">{m ? m[1] : x.title}</span>
+                      {m && <span class="menu-item-sub">{m[2]}</span>}
+                    </button>
+                  );
+                })}
+              </div>
+            ))}
+            {groups.length === 0 && <p class="note menu-empty">"{query.value.trim()}" 에 맞는 예제가 없습니다. 묶음·제목·설명에 나오는 말(Pod·Service·rolling·ArgoCD 등)로 찾아 보세요.</p>}
+          </div>
         </div>
       )}
     </div>
