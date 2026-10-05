@@ -3,7 +3,7 @@
 쿠버네티스가 "왜 이렇게 동작하는지" 를 직접 구성하고 한 단계씩 보며 익히는 학습 시뮬레이터. 자매 프로젝트 `../net-sim`(네트워크 시뮬레이터)과 같은 방식이다: 브라우저에서 돌고, 실제 클러스터에 연결하지 않으며, 모든 시뮬레이션은 결정론적. 디자인 품질이 최우선(`DESIGN.md`).
 
 지금 상태: **0·1단계 (2026-10-02).** Deployment·ReplicaSet·스케줄러·kubelet(pull·크래시 백오프·종료·heartbeat)·노드 장애(NotReady·taint·eviction)·kubectl 흉내·캔버스 UI. 2단계(Service·EndpointSlice·kube-proxy·CoreDNS·readiness), 3단계(롤링 업데이트·liveness·preStop·PDB/drain), 4단계(LoadBalancer·Ingress·externalTrafficPolicy·Tailscale funnel), 6단계(Argo CD 식 GitOps)도 됨. 남은 것은 `docs/ROADMAP.md` 5단계(운영 — 후보 중 고르기).
-저장소: https://github.com/youseonghyeon/kube-sim (public). 배포는 아직 없다.
+저장소: https://github.com/youseonghyeon/kube-sim (public). 배포: net-sim 과 같은 방식(아래 "배포" 절, 2026-10-05).
 
 ## 목적 — 누구의 어떤 이해를 바꾸나
 - 사용자: 자기 서비스(예: net-sim)를 Helm 차트 + ArgoCD 로 홈 클러스터에 배포하는 개발자. kubectl 출력은 보지만 그 뒤에서 무슨 일이 일어나는지는 몰라, 문제가 생기면 추측하게 된다.
@@ -67,7 +67,13 @@
 - 긴 작업 중에는 단계(커밋·리뷰 결과)마다 한두 줄로 진행을 알린다. 오래 조용하면 문제가 생긴 것으로 읽힌다. 큰 작업 보고는 마지막에 1) 한 일 2) 검증한 방법 3) 검증 못 한 부분 4) 알려진 한계.
 - 큰 기능 뒤에는 깨끗한 문맥의 리뷰 에이전트(worktree)에게 "재현 테스트로 결함을 찾아라" 를 시키고, 결함을 고친 뒤 재현 테스트를 저장소에 남긴다. 끝나면 worktree 를 지운다(`.gitignore` 에 `.claude/worktrees/` — `git add -A` 가 worktree 를 gitlink 로 담은 사고가 있었다).
 - 새 실수·교훈은 그 세션에 `docs/LESSONS.md` 에, 사용자에게 보이는 실패 문구는 `docs/TROUBLESHOOTING.md` 에 남긴다. 같은 실수를 두 번 하면 규칙(테스트·린터·이 문서)으로 막는다.
-- 커밋은 아래 검증을 통과한 뒤에 한다. 파일은 경로를 지정해 stage 한다(`git add -A` 금지). 원격은 public GitHub(`origin`, main 에 바로 push — 사용자 승인 2026-10-02). 배포는 아직 없다 — 만들 때 사용자와 정한다(net-sim 은 ghcr + ArgoCD + Tailscale funnel. 클러스터 쓰기는 사용자 몫).
+- 커밋은 아래 검증을 통과한 뒤에 한다. 파일은 경로를 지정해 stage 한다(`git add -A` 금지). 원격은 public GitHub(`origin`, main 에 바로 push — 사용자 승인 2026-10-02). CI 가 main 에 태그 갱신 봇 커밋을 push 하므로 push 전에 `git pull --rebase`. 클러스터 쓰기(`kubectl apply`)는 사용자 몫.
+
+## 배포 (net-sim 과 같은 방식, 2026-10-05)
+- `Dockerfile`: node:24-alpine 에서 `vite build` → `nginxinc/nginx-unprivileged`(8080, uid 101) 가 `dist/` 서빙. 설정은 `deploy/nginx.conf`(`/healthz`, `/assets/` 영구 캐시, 나머지는 `index.html` 폴백).
+- `.github/workflows/docker-image.yml`: main push → `npm run typecheck` + `npm test` 게이트 → `ghcr.io/youseonghyeon/kube-sim`(`<sha>`, `latest`) 푸시 → `deploy/values.yaml` 의 `image.tag` 를 봇 커밋으로 갱신.
+- `deploy/`: Helm 차트(Deployment — readOnlyRootFilesystem + `/tmp` emptyDir, `revisionHistoryLimit: 2`(옛 ReplicaSet 2개까지, 사용자 요청) / Service / Ingress — tailscale 클래스 + funnel → `https://kube-sim.<tailnet>.ts.net`). `argocd/application.yaml`: namespace `app`, automated prune/selfHeal. 시크릿 없음.
+- 차트를 고치면 `helm lint deploy && helm template kube-sim deploy` 로 렌더를 확인한다. 브라우저 스모크(`ui-check`)는 CI 에서 돌리지 않는다.
 
 ## 검증
 ```

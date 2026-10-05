@@ -1,0 +1,18 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: kube-sim
+  {{- if .Values.ingress.funnel }}
+  annotations:
+    tailscale.com/funnel: "true"
+  {{- end }}
+spec:
+  ingressClassName: tailscale
+  defaultBackend:
+    service:
+      name: kube-sim
+      port:
+        number: {{ .Values.service.port }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.hostname }}

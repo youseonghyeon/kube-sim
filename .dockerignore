@@ -1,0 +1,9 @@
+node_modules
+dist
+.shots
+.git
+docs
+tests
+scripts
+argocd
+*.md

@@ -1,0 +1,20 @@
+# 한 번만 적용: kubectl apply -f argocd/application.yaml
+# 저장소가 public이라 ArgoCD에 자격을 등록할 필요가 없다. private으로 바꾸면 Settings > Repositories에 읽기 자격을 먼저 등록한다.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kube-sim
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/youseonghyeon/kube-sim.git
+    targetRevision: main
+    path: deploy
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: app
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

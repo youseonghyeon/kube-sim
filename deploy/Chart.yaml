@@ -1,0 +1,6 @@
+apiVersion: v2
+name: kube-sim
+description: 쿠버네티스 학습 시뮬레이터 (정적 SPA)
+type: application
+version: 0.1.0
+appVersion: "main"

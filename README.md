@@ -9,3 +9,4 @@
 - 작업 지침: [AGENTS.md](AGENTS.md) — 에이전트는 여기부터 읽습니다 (`CLAUDE.md` 가 이것을 불러옵니다).
 - 설계: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · 디자인: [DESIGN.md](DESIGN.md) · 교훈: [docs/LESSONS.md](docs/LESSONS.md) · 문제 해결: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)
 - 스택: TypeScript + Vite + Preact + vitest + Playwright
+- 배포: `main` 에 push 하면 GitHub Actions 가 `tsc` + vitest 게이트를 지난 뒤 이미지를 `ghcr.io/youseonghyeon/kube-sim:<sha>` 로 올리고 `deploy/values.yaml` 의 태그를 봇 커밋으로 갱신합니다. ArgoCD(`argocd/application.yaml`, 한 번만 `kubectl apply`)가 `deploy/` Helm 차트를 `app` 네임스페이스에 자동 sync 합니다. 주소는 Tailscale funnel → `https://kube-sim.<tailnet>.ts.net`.

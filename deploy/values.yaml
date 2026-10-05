@@ -1,0 +1,27 @@
+image:
+  repository: ghcr.io/youseonghyeon/kube-sim
+  # CI가 main push마다 커밋 SHA로 갱신한다. 첫 CI 전에는 latest.
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+# ghcr 패키지가 private이면 pull secret 이름을 넣는다. public이면 비워 둔다.
+imagePullSecrets: []
+
+# 남겨 둘 옛 ReplicaSet 수. 현재 것 + 옛것 2개까지 유지된다.
+revisionHistoryLimit: 2
+
+service:
+  port: 8080
+
+ingress:
+  # https://<hostname>.<tailnet>.ts.net 으로 노출된다.
+  hostname: kube-sim
+  # true면 Tailscale Funnel로 공인 인터넷에 노출한다 (tailnet 정책에 funnel nodeAttr 필요).
+  funnel: true
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 16Mi
+  limits:
+    memory: 64Mi
