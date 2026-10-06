@@ -2124,3 +2124,41 @@ body.resizing-row * {
   font-size: 11px;
   cursor: pointer;
 }
+
+/* ---- 노드 칸의 디스크(local-path PV) ---- */
+.node-disks {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  padding: 0 12px 6px;
+}
+.node-disks .res-label {
+  width: 52px;
+}
+.disk-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 1px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--ink-2);
+  font-size: 11px;
+  cursor: pointer;
+}
+.disk-chip.idle {
+  border-style: dashed;
+  color: var(--ink-3);
+}
+.disk-size {
+  color: var(--ink-3);
+  font-size: 10px;
+}
+.sts-ords li {
+  align-items: baseline;
+}
+.sts-ords li.faded {
+  opacity: 0.6;
+}

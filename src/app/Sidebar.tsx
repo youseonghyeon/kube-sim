@@ -1,5 +1,5 @@
 // 왼쪽: 오브젝트 나무 (Deployment → ReplicaSet → Pod 수) 와 노드 목록. 고르면 인스펙터에 보인다.
-import { configMap, deployment, networkPolicy, service } from "../core/cluster";
+import { configMap, deployment, networkPolicy, service, statefulSet } from "../core/cluster";
 import type { ClusterView } from "../model/view";
 import { currentView, sim } from "../model/sim";
 import { addManifest, addNodeDef, clusterDef, removeNodeDef, selection, uniqueDeploymentName } from "../model/store";
@@ -75,6 +75,51 @@ export function Sidebar() {
           </div>
         ))}
         {!view.deployments.length && <div class="side-empty">없음. + 로 추가하거나 kubectl create deployment</div>}
+      </div>
+      <div class="side-section">
+        <div class="side-head">
+          <span>StatefulSet</span>
+          <button
+            class="icon-btn sm"
+            title="StatefulSet 추가 — 방문 수 DB (Pod 마다 1Gi 디스크) + headless Service"
+            aria-label="StatefulSet 추가"
+            onClick={() => {
+              const name = uniqueDeploymentName("db", "StatefulSet");
+              addManifest(service(name, { selector: { app: name }, port: 8080, headless: true }));
+              addManifest(statefulSet(name, { replicas: 2, image: "example/kv:1.0", cpu: 100, memory: 64, port: 8080, storage: [{ name: "data", mountPath: "/data", size: 1024 }] }));
+              selection.value = { kind: "StatefulSet", namespace: "default", name };
+            }}
+          >
+            <Icon name="plus" size={15} />
+          </button>
+        </div>
+        {view.statefulSets.map((s) => (
+          <div key={s.name} class="tree">
+            <button class={`tree-row${isSel("StatefulSet", s.name) ? " sel" : ""}`} data-tree={`statefulset/${s.name}`} onClick={() => (selection.value = { kind: "StatefulSet", namespace: "default", name: s.name })}>
+              <span class="own-swatch" style={{ background: `var(--own-${s.colorIndex})` }} />
+              <span class="tree-name">{s.name}</span>
+              <span class={`tree-count ${s.sts.status.readyReplicas === s.sts.spec.replicas ? "ok" : "wait"}`}>
+                {s.sts.status.readyReplicas}/{s.sts.spec.replicas}
+              </span>
+            </button>
+            {s.ordinals.flatMap((o) =>
+              o.pvcs.map((v) => (
+                <button
+                  key={v.metadata.uid}
+                  class={`tree-row sub${isSel("PersistentVolumeClaim", v.metadata.name) ? " sel" : ""}${o.i >= s.sts.spec.replicas ? " faded" : ""}`}
+                  data-tree={`pvc/${v.metadata.name}`}
+                  title={o.i >= s.sts.spec.replicas ? "줄여서 Pod 는 없지만 PVC(디스크)는 남아 있음 — 다시 늘리면 이 데이터로" : undefined}
+                  onClick={() => (selection.value = { kind: "PersistentVolumeClaim", namespace: "default", name: v.metadata.name })}
+                >
+                  <span class="tree-kind">pvc</span>
+                  <span class="tree-name mono">{v.metadata.name}</span>
+                  <span class={`tree-count ${v.status.phase === "Bound" ? "ok" : "wait"}`}>{v.status.phase}</span>
+                </button>
+              )),
+            )}
+          </div>
+        ))}
+        {!view.statefulSets.length && <div class="side-empty">없음. + 로 DB 하나 띄우기</div>}
       </div>
       <div class="side-section">
         <div class="side-head">

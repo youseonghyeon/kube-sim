@@ -2,7 +2,7 @@
 
 쿠버네티스가 "왜 이렇게 동작하는지" 를 직접 구성하고 한 단계씩 보며 익히는 학습 시뮬레이터. 자매 프로젝트 `../net-sim`(네트워크 시뮬레이터)과 같은 방식이다: 브라우저에서 돌고, 실제 클러스터에 연결하지 않으며, 모든 시뮬레이션은 결정론적. 디자인 품질이 최우선(`DESIGN.md`).
 
-지금 상태: **0·1단계 (2026-10-02).** Deployment·ReplicaSet·스케줄러·kubelet(pull·크래시 백오프·종료·heartbeat)·노드 장애(NotReady·taint·eviction)·kubectl 흉내·캔버스 UI. 2단계(Service·EndpointSlice·kube-proxy·CoreDNS·readiness), 3단계(롤링 업데이트·liveness·preStop·PDB/drain), 4단계(LoadBalancer·Ingress·externalTrafficPolicy·Tailscale funnel), 6단계(Argo CD 식 GitOps), 5a(requests/limits·OOMKilled·throttling)·5b(ConfigMap/Secret 과 재시작)·5c(NetworkPolicy, 2026-10-06)도 됨. 남은 것은 `docs/ROADMAP.md` 5단계의 나머지 후보(HPA·StatefulSet).
+지금 상태: **0·1단계 (2026-10-02).** Deployment·ReplicaSet·스케줄러·kubelet(pull·크래시 백오프·종료·heartbeat)·노드 장애(NotReady·taint·eviction)·kubectl 흉내·캔버스 UI. 2단계(Service·EndpointSlice·kube-proxy·CoreDNS·readiness), 3단계(롤링 업데이트·liveness·preStop·PDB/drain), 4단계(LoadBalancer·Ingress·externalTrafficPolicy·Tailscale funnel), 6단계(Argo CD 식 GitOps), 5a(requests/limits·OOMKilled·throttling)·5b(ConfigMap/Secret 과 재시작)·5c(NetworkPolicy)·5d(StatefulSet+PVC, 2026-10-06)도 됨. 남은 것은 `docs/ROADMAP.md` 5단계의 나머지 후보(HPA).
 저장소: https://github.com/youseonghyeon/kube-sim (public). 배포: net-sim 과 같은 방식(아래 "배포" 절, 2026-10-05).
 
 ## 목적 — 누구의 어떤 이해를 바꾸나
@@ -29,7 +29,8 @@
   - `clock.ts` 시계·이벤트 큐(일반 타이머 + 배경 타이머) — net-sim `src/core/network.ts` 의 큐 개념
   - `trace.ts` `TraceKind` 목록. 새 이벤트 종류는 여기에 먼저 등록한다
   - `api/` API 서버 흉내: 오브젝트 저장소(kind·namespace·name, `metadata.resourceVersion`·`generation`·`ownerReferences`·`labels`), watch, 낙관적 동시성, ownerReference 가비지 컬렉션, 이벤트(`kubectl get events`)
-  - `controllers/` 공통 워크큐(`base.ts`) + Deployment(롤링·Recreate·리비전)·ReplicaSet·EndpointSlice·disruption(PDB) + `nodelifecycle.ts`(node-lifecycle·taint-eviction) (나중에 HPA·StatefulSet)
+  - `controllers/` 공통 워크큐(`base.ts`) + Deployment(롤링·Recreate·리비전)·ReplicaSet·StatefulSet(고정 이름·순서·PVC)·EndpointSlice·disruption(PDB) + `nodelifecycle.ts`(node-lifecycle·taint-eviction) (나중에 HPA)
+  - `storage.ts` local-path StorageClass·프로비저너(WaitForFirstConsumer → 노드에 묶인 PV), 노드 디스크의 앱 데이터
   - `drain.ts` kubectl drain 진행(Eviction API, 5초 재시도), `net/traffic.ts` 부하 발생기
   - `scheduler.ts` 필터 → 점수 → 바인딩, FailedScheduling 문구
   - `kubelet.ts` 노드마다 Pod 수명주기: 샌드박스·IP → 이미지 pull → 시작 → 크래시 백오프 → SIGTERM·정리, Lease heartbeat, readiness·liveness probe(timeoutSeconds), preStop, 전원 끄기·켜기, 자원(메모리 사용 → cgroup OOM·노드 OOM(oom_score), CPU 나눠 받기·throttling → 응답 시간), 설정(volume 마운트·env 해석·FailedMount/CreateContainerConfigError·파일 갱신) (startup probe 없음)

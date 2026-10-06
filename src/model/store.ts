@@ -1,7 +1,7 @@
 // 앱 상태: 사용자가 고치는 원본(노드 + 매니페스트), 선택, 화면 설정. localStorage 에 저장한다.
 // 클러스터의 "라이브" 상태는 sim.ts 의 Cluster 가 가진다 — kubectl 로 바꾼 것은 여기(매니페스트)에 돌아오지 않는다 (실제와 같다).
 import { effect, signal } from "@preact/signals";
-import type { ConfigMapManifest, DeploymentManifest, IngressManifest, Manifest, NetworkPolicyManifest, SecretManifest, ServiceManifest } from "../core/cluster";
+import type { ConfigMapManifest, DeploymentManifest, IngressManifest, Manifest, NetworkPolicyManifest, SecretManifest, ServiceManifest, StatefulSetManifest } from "../core/cluster";
 import type { NodeDef } from "../core/kubelet";
 import type { ObjRef } from "../core/trace";
 import { DEFAULT_EXAMPLE, exampleById, type ClusterDef } from "./examples";
@@ -205,6 +205,14 @@ export function addManifest(m: Manifest): void {
 export function upsertManifest(m: Manifest): void {
   const rest = clusterDef.value.manifests.filter((x) => !(x.kind === m.kind && x.metadata.name === m.metadata.name));
   clusterDef.value = { ...clusterDef.value, manifests: [...rest, structuredClone(m)] };
+}
+
+export function updateStsManifest(name: string, mutate: (m: StatefulSetManifest) => void): void {
+  const def = structuredClone(clusterDef.value);
+  const m = def.manifests.find((x): x is StatefulSetManifest => x.kind === "StatefulSet" && x.metadata.name === name);
+  if (!m) return;
+  mutate(m);
+  clusterDef.value = def;
 }
 
 export function updateNetpolManifest(name: string, mutate: (m: NetworkPolicyManifest) => void): void {

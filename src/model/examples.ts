@@ -1,5 +1,5 @@
 // 예제: 노드 + 매니페스트 + "해 볼 것"(학습 포인트를 직접 확인하는 행동).
-import { application, configMap, deployment, ingress, networkPolicy, pdb, secret, service, type Manifest } from "../core/cluster";
+import { application, configMap, deployment, ingress, networkPolicy, pdb, secret, service, statefulSet, type Manifest } from "../core/cluster";
 
 const NET_SIM_REPO = "https://github.com/youseonghyeon/net-sim.git";
 import type { Pod } from "../core/api/types";
@@ -905,6 +905,70 @@ export const EXAMPLES: Example[] = [
       { title: "Pod 에서 보기", command: "kubectl describe networkpolicy shop-from-ingress", expect: "PodSelector app=shop · From PodSelector app=ingress-nginx-controller · To Port 80/TCP." },
     ],
   },
+  {
+    id: "sts-basics",
+    title: "StatefulSet: 고정 이름·순서·자기 디스크",
+    summary: "방문 수를 세는 DB 를 StatefulSet 으로 3개 띄웁니다. Pod 이름은 db-0·db-1·db-2 로 고정되고 앞 번호가 Ready 여야 다음이 뜹니다. Pod 마다 자기 PVC 가 있어, 지웠다 다시 떠도 같은 이름·같은 데이터입니다. headless Service 로 Pod 마다 DNS 이름이 생깁니다.",
+    build: () => ({
+      nodes: [node("worker-1"), node("worker-2")],
+      manifests: [
+        service("db", { selector: { app: "db" }, port: 8080, headless: true }),
+        statefulSet("db", { replicas: 3, image: "example/kv:1.0", cpu: 100, memory: 64, port: 8080, storage: [{ name: "data", mountPath: "/data", size: 1024 }] }),
+        deployment("client", { replicas: 1, image: "curlimages/curl:8.10.1", cpu: 50, memory: 32 }),
+      ],
+    }),
+    tries: [
+      { title: "순서대로 뜨는 것 보기", command: "kubectl get pods -o wide", expect: "db-0 → db-1 → db-2 순서로 뜹니다 (앞 번호가 Running·Ready 가 돼야 다음 — 로그의 statefulset-controller 줄). 노드 칸 아래 '디스크' 에 PVC 가 생깁니다." },
+      { title: "PVC 보기", command: "kubectl get pvc", expect: "data-db-0·1·2 — Pod 마다 하나. local-path 는 Pod 가 노드에 정해진 뒤 그 노드에 디스크(PV)를 만듭니다 (WaitForFirstConsumer)." },
+      { title: "headless DNS", command: "kubectl exec {pod:client} -- nslookup db", expect: "가상 주소(ClusterIP) 없이 ready Pod IP 3개가 그대로 나옵니다. Pod 하나는 db-0.db 처럼 부릅니다." },
+      { title: "db-0 에 쓰기", command: "kubectl exec {pod:client} -- curl http://db-0.db:8080", expect: "visits=1 — 누를 때마다 하나씩 늘어 db-0 의 디스크(PV)에 적힙니다. headless 라 Service 포트가 아니라 Pod 포트(8080)로 바로 갑니다." },
+      { title: "db-0 지우기", command: "kubectl delete pod db-0", expect: "같은 이름 db-0 으로 다시 뜹니다 (랜덤 접미사 없음). 같은 PVC data-db-0 을 붙입니다." },
+      { title: "다시 db-0", command: "kubectl exec {pod:client} -- curl http://db-0.db:8080", expect: "visits 가 이어집니다 — Pod 는 바뀌었지만 디스크는 그대로." },
+      { title: "1개로 줄이기", command: "kubectl scale sts/db --replicas=1", expect: "큰 번호부터 하나씩: db-2 → db-1. 목록에서 data-db-1·2 PVC 는 흐리게 남아 있습니다." },
+      { title: "PVC 는 남는다", command: "kubectl get pvc", expect: "셋 다 Bound — 줄여도 디스크는 지우지 않습니다. 다시 3 으로 늘리면 db-1·2 가 그 데이터로 돌아옵니다." },
+      { title: "다시 3개로", command: "kubectl scale sts/db --replicas=3", expect: "db-1 → db-2 순서로, 옛 PVC 를 그대로 붙여 뜹니다." },
+    ],
+  },
+  {
+    id: "sts-node-down",
+    title: "노드가 죽으면 DB 는? (local-path 디스크)",
+    summary: "k3s 의 local-path 디스크는 노드의 디렉터리라 그 노드에 묶입니다. db-0 이 있던 노드를 끄면, StatefulSet Pod 는 Terminating 에 멈추고(같은 이름이라 대신할 Pod 가 안 생김), --force 로 지워도 디스크가 죽은 노드에 있어 다른 노드로 못 갑니다.",
+    build: () => ({
+      nodes: [node("worker-1"), node("worker-2")],
+      manifests: [
+        service("db", { selector: { app: "db" }, port: 8080, headless: true }),
+        statefulSet("db", { replicas: 1, image: "example/kv:1.0", cpu: 100, memory: 64, port: 8080, storage: [{ name: "data", mountPath: "/data", size: 1024 }] }),
+        deployment("client", { replicas: 1, image: "curlimages/curl:8.10.1", cpu: 50, memory: 32, nodeSelector: { "kubernetes.io/hostname": "worker-2" } }),
+      ],
+    }),
+    tries: [
+      { title: "db-0 에 쓰기", command: "kubectl exec {pod:client} -- curl http://db-0.db:8080", expect: "visits=1 — db-0 은 worker-1 에, 디스크도 worker-1 에." },
+      { title: "디스크가 어디 있나", command: "kubectl get pv", expect: "PV 하나. kubectl describe pv 로 보면 Node Affinity: kubernetes.io/hostname in [worker-1]." },
+      { title: "worker-1 끄기", action: { type: "power", node: "worker-1", on: false }, expect: "40초 뒤 NotReady, 5분 뒤 taint-eviction 이 db-0 을 지웁니다. 속도를 10× 로 올리세요." },
+      { title: "5분 뒤 Pod 보기", command: "kubectl get pods -o wide", expect: "db-0 은 Terminating 에 멈춰 있습니다 — 정리할 kubelet 이 없습니다. Deployment 와 달리 StatefulSet 은 같은 이름의 Pod 를 둘 두지 않아 대신할 Pod 를 만들지 않습니다 (로그의 statefulset-controller 줄)." },
+      { title: "강제로 지우기", command: "kubectl delete pod db-0 --force --grace-period=0", expect: "API 에서 바로 지워져 새 db-0 이 생깁니다 — 하지만 (실제로는 옛 db-0 이 아직 돌고 있을 수도 있어 위험합니다)." },
+      { title: "왜 Pending 인가", command: "kubectl describe pod db-0", expect: "FailedScheduling: 1 node(s) had volume node affinity conflict — 디스크(PV)가 죽은 worker-1 에 있어 worker-2 로 못 갑니다. local-path 의 한계입니다 (복제·네트워크 스토리지가 필요)." },
+      { title: "worker-1 다시 켜기", action: { type: "power", node: "worker-1", on: true }, expect: "taint 가 빠지면 db-0 이 worker-1 에 다시 뜹니다. 다시 curl 하면 visits=2 — 데이터는 그 노드에 그대로 있었습니다." },
+    ],
+  },
+  {
+    id: "deployment-db",
+    title: "Deployment 로 DB 를 띄우면 (볼륨 없음)",
+    summary: "같은 방문 수 DB 를 볼륨 없이 Deployment 로 띄웁니다. 데이터는 컨테이너 안에만 있어, Pod 가 바뀌거나 컨테이너가 다시 뜨면 처음부터입니다. StatefulSet + PVC 와 비교해 보세요.",
+    build: () => ({
+      nodes: [node("worker-1"), node("worker-2")],
+      manifests: [
+        deployment("kv", { replicas: 1, image: "example/kv:1.0", cpu: 100, memory: 64, port: 8080 }),
+        service("kv", { selector: { app: "kv" }, port: 8080 }),
+        deployment("client", { replicas: 1, image: "curlimages/curl:8.10.1", cpu: 50, memory: 32 }),
+      ],
+    }),
+    tries: [
+      { title: "쓰기", command: "kubectl exec {pod:client} -- curl http://kv:8080", expect: "visits=1 · 저장: 컨테이너 안. 몇 번 더 눌러 보세요." },
+      { title: "Pod 지우기", command: "kubectl delete pod {pod:kv}", expect: "ReplicaSet 이 새 이름의 Pod 를 만듭니다 — 새 컨테이너, 빈 데이터." },
+      { title: "다시 쓰기", command: "kubectl exec {pod:client} -- curl http://kv:8080", expect: "visits=1 — 처음부터입니다. DB 처럼 데이터를 남겨야 하면 PVC(와 보통 StatefulSet)가 필요합니다." },
+    ],
+  },
 ];
 
 
@@ -922,6 +986,7 @@ export const EXAMPLE_GROUPS: { label: string; ids: string[] }[] = [
   { label: "자원", ids: ["oom", "node-oom", "throttle"] },
   { label: "설정", ids: ["config-env", "config-checksum", "config-missing"] },
   { label: "네트워크 정책", ids: ["netpol-basics", "netpol-egress", "netpol-ingress"] },
+  { label: "상태 있는 앱", ids: ["sts-basics", "sts-node-down", "deployment-db"] },
   { label: "GitOps", ids: ["gitops"] },
 ];
 

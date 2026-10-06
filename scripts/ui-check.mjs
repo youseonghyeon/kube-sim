@@ -104,7 +104,7 @@ await page.screenshot({ path: `${OUT}/05-scaled-drift.png` });
 // 3b) 예제 메뉴: 묶음별 열 + 검색
 console.log("3b) 예제 메뉴 묶음·검색");
 await page.click(".menu-btn");
-check((await page.locator(".menu-group").count()) === 10, "예제 메뉴가 묶음 10개로 나뉜다", "examples.ts EXAMPLE_GROUPS / App.tsx ExampleMenu");
+check((await page.locator(".menu-group").count()) === 11, "예제 메뉴가 묶음 11개로 나뉜다", "examples.ts EXAMPLE_GROUPS / App.tsx ExampleMenu");
 await page.screenshot({ path: `${OUT}/05b-example-menu.png` });
 await page.keyboard.type("readiness");
 const found = await page.locator(".example-item").evaluateAll((els) => els.map((e) => e.getAttribute("data-example")));
@@ -435,6 +435,24 @@ await page.locator('.node .pod[data-pod^="web-"]').first().click();
 await page.locator(".tabs button", { hasText: "개요" }).click();
 check((await page.locator(".insp-body").textContent())?.includes("NetworkPolicy"), "Pod 개요에 NetworkPolicy 격리 표시", "Inspector PodNetpol");
 await page.screenshot({ path: `${OUT}/23g-netpol-pod.png` });
+
+// 15e) StatefulSet·PVC
+console.log("15e) StatefulSet·PVC");
+await page.click(".menu-btn");
+await page.click('.menu-item[data-example="sts-basics"]');
+await page.selectOption(".transport .speed", "10");
+await waitFor(async () => (await page.locator('[data-tree="statefulset/db"] .tree-count').textContent()) === "3/3", "db 3/3", 40000);
+check((await page.locator('[data-tree^="pvc/data-db-"]').count()) === 3, "목록에 PVC 3개 (번호마다)", "Sidebar StatefulSet section");
+check((await page.locator(".node .disk-chip").count()) === 3, "노드 칸에 디스크(PV) 칩 3개", "Canvas node-disks / view.ts disks");
+check((await page.locator(".node .pod .pod-name").allTextContents()).filter((t) => /^db-\d$/.test(t)).sort().join(",") === "db-0,db-1,db-2", "Pod 이름이 db-0·1·2 로 고정", "statefulset.ts createPod");
+await page.locator('[data-tree="statefulset/db"]').click();
+await page.locator(".tabs button", { hasText: "개요" }).click();
+await page.locator("button", { hasText: "로 줄이기" }).click();
+await waitFor(async () => (await page.locator('[data-tree^="pvc/data-db-"].faded').count()) === 1, "줄인 번호의 PVC 가 흐리게 남음", 20000);
+check(true, "줄여도 PVC 는 남고 목록에 흐리게");
+await page.screenshot({ path: `${OUT}/23h-sts.png` });
+await page.locator('[data-tree="pvc/data-db-0"]').click();
+check((await page.locator(".insp-body").textContent())?.includes("에만 갈 수 있음"), "PVC 개요에 디스크가 묶인 노드", "Inspector PvcOverview");
 
 // 16) 패널 크기: 인스펙터 폭·서랍 높이 끌기, 접기·펴기, 저장
 console.log("16) 패널 크기");

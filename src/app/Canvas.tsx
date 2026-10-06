@@ -247,7 +247,7 @@ function ServiceBox({ s, selected }: { s: ServiceView; selected: boolean }) {
         <span class="svc-type">{s.svc.spec.type}</span>
       </span>
       <span class="svc-addr mono">
-        {s.svc.spec.clusterIP}:{p?.port} → :{p?.targetPort}
+        {s.svc.spec.clusterIP === "None" ? `headless — DNS 가 Pod IP 를 바로 (:${p?.targetPort})` : `${s.svc.spec.clusterIP}:${p?.port} → :${p?.targetPort}`}
         {p?.nodePort ? ` · NodePort ${p.nodePort}` : ""}
       </span>
       {s.lbIP && (
@@ -330,6 +330,25 @@ function NodeCard({ n, now, flashes, focus, selected }: { n: NodeView; now: numb
         </span>
       </button>
       {story && <div class={`node-story t-${story.tone}`}>{story.text}</div>}
+      {n.disks.length > 0 && (
+        <div class="node-disks" title="이 노드의 디스크(local-path PV) — 여기 묶인 PVC 를 쓰는 Pod 는 이 노드에만 갈 수 있다">
+          <span class="res-label">디스크</span>
+          {n.disks.map((d) => (
+            <button
+              key={d.pv}
+              class={`disk-chip${d.pod ? "" : " idle"}`}
+              title={`PV ${d.pv} · PVC ${d.claim ?? "(없음)"} · ${fmtMem(d.size)}${d.pod ? ` · ${d.pod} 이(가) 씀` : " · 지금 쓰는 Pod 없음"}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                selection.value = d.claim ? { kind: "PersistentVolumeClaim", namespace: "default", name: d.claim } : { kind: "PersistentVolume", name: d.pv };
+              }}
+            >
+              <span class="mono">{d.claim ?? d.pv}</span>
+              <span class="disk-size">{fmtMem(d.size)}</span>
+            </button>
+          ))}
+        </div>
+      )}
       <div class="node-res">
         <ResBar label="cpu" used={n.cpu.used} actual={n.powered ? n.cpu.actual : undefined} total={n.cpu.total} fmt={fmtCpu} />
         <ResBar label="memory" used={n.memory.used} actual={n.powered ? n.memory.actual : undefined} total={n.memory.total} fmt={fmtMem} />

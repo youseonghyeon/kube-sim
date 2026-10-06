@@ -167,3 +167,39 @@ describe("볼륨 없는 Deployment 와 PVC 삭제", () => {
     expect(c.api.events.some((e) => e.reason === "FailedScheduling" && e.message === '0/2 nodes are available: persistentvolumeclaim "nope" not found.')).toBe(true);
   });
 });
+
+describe("예제 '상태 있는 앱' 이 학습 포인트를 실제로 보여 준다", () => {
+  const load = async (id: string) => {
+    const { DefSync } = await import("../src/model/defSync");
+    const { exampleById } = await import("../src/model/examples");
+    const s = new DefSync();
+    s.reset(exampleById(id)!.build(), id);
+    s.cluster.runFor(60_000);
+    return s.cluster;
+  };
+
+  test("sts-node-down: db-0 은 worker-1 · 끄면 Terminating 멈춤 → --force → volume node affinity conflict → 켜면 데이터 그대로", async () => {
+    const c = await load("sts-node-down");
+    expect(pod(c, "db-0")!.spec.nodeName).toBe("worker-1");
+    expect(visits(c, "db-0.db")).toBe("1");
+    c.setNodePower("worker-1", false);
+    c.runFor(7 * 60_000);
+    expect(kubectl(c, "kubectl get pods").output).toMatch(/db-0\s+1\/1\s+Terminating/);
+    expect(kubectl(c, "kubectl delete pod db-0 --force --grace-period=0").ok).toBe(true);
+    c.runFor(20_000);
+    expect(kubectl(c, "kubectl describe pod db-0").output).toContain("1 node(s) had volume node affinity conflict");
+    c.setNodePower("worker-1", true);
+    c.runFor(60_000);
+    expect(visits(c, "db-0.db")).toBe("2");
+  });
+
+  test("deployment-db: Pod 를 지우면 visits 가 처음부터", async () => {
+    const c = await load("deployment-db");
+    const kv = () => /visits=(\d+)/.exec(c.requestFromPod(client(c), "curl", "http://kv:8080").output)?.[1];
+    expect(kv()).toBe("1");
+    expect(kv()).toBe("2");
+    kubectl(c, `kubectl delete pod ${pods(c).find((p) => p.metadata.labels.app === "kv")!.metadata.name}`);
+    c.runFor(30_000);
+    expect(kv()).toBe("1");
+  });
+});

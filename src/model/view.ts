@@ -1,5 +1,5 @@
 // 화면에 그릴 모양을 클러스터에서 뽑는다 (순수 함수 — 테스트 가능).
-import { controllerOf, isNodeReady, isPodReady, limitOf, NODE_LEASE_NS, SERVICE_NAME_LABEL, type Application, type Deployment, type Ingress, type Node, type Pod, type ReplicaSet, type Service } from "../core/api/types";
+import { controllerOf, isNodeReady, isPodReady, limitOf, NODE_LEASE_NS, SERVICE_NAME_LABEL, type Application, type Deployment, type Ingress, type Node, type Pod, type ReplicaSet, type Service, type PersistentVolumeClaim, type StatefulSet } from "../core/api/types";
 import type { Cluster } from "../core/cluster";
 import { nodeStatusText, podReadyText, podStatusText } from "../core/kubectl";
 import { DEFAULT_TOLERATION_SECONDS } from "../core/api/server";
@@ -7,6 +7,8 @@ import { deploymentHash, HASH_LABEL, revisionOf } from "../core/controllers/depl
 import { NODE_MONITOR_GRACE_MS } from "../core/controllers/nodelifecycle";
 import { nodeUsage } from "../core/scheduler";
 import { isolation } from "../core/net/netpol";
+import { pvNode } from "../core/storage";
+import { claimName, ordinalOf } from "../core/controllers/statefulset";
 import type { ObjRef, TraceEvent } from "../core/trace";
 
 export type Tone = "ok" | "wait" | "bad" | "gone";
@@ -55,6 +57,8 @@ export interface NodeView {
   cpu: { used: number; total: number; actual: number };
   memory: { used: number; total: number; actual: number };
   pods: PodView[];
+  /** 이 노드에 묶인 PV (local-path) */
+  disks: DiskView[];
 }
 
 export interface DeploymentView {
@@ -97,7 +101,25 @@ export interface GitView {
   commits: number;
 }
 
+/** StatefulSet 과 번호마다의 Pod·PVC */
+export interface StatefulSetView {
+  sts: StatefulSet;
+  name: string;
+  colorIndex: number;
+  ordinals: { i: number; pod?: Pod; pvcs: PersistentVolumeClaim[] }[];
+}
+
+/** 노드에 묶인 디스크 (local-path PV) */
+export interface DiskView {
+  pv: string;
+  claim?: string;
+  size: number;
+  /** 지금 이 디스크를 쓰는 Pod */
+  pod?: string;
+}
+
 export interface ClusterView {
+  statefulSets: StatefulSetView[];
   gits: GitView[];
   apps: AppView[];
   ingresses: IngressView[];
@@ -152,7 +174,11 @@ export function buildView(c: Cluster): ClusterView {
   // api.list 와 같은 이름순 (색·자리가 만든 순서에 따라 바뀌지 않게)
   const deps = [...c.api.peekList("Deployment", "default")].sort(byName);
   const rss = [...c.api.peekList("ReplicaSet", "default")].sort(byName);
-  const colorOf = new Map(deps.map((d, i) => [d.metadata.name, i % OWNER_COLORS]));
+  const stss = [...c.api.peekList("StatefulSet", "default")].sort(byName);
+  // 색은 Deployment·StatefulSet 을 함께 이름순으로 (Pod 칩의 왼쪽 띠 — 주인이 같으면 같은 색)
+  const colorOf = new Map([...deps, ...stss].map((d) => d.metadata.name).sort().map((n, i) => [n, i % OWNER_COLORS]));
+  const pvcs = [...c.api.peekList("PersistentVolumeClaim", "default")].sort(byName);
+  const pvs = [...c.api.peekList("PersistentVolume")].sort(byName);
   const rsOwner = new Map(rss.map((r) => [r.metadata.uid, controllerOf(r.metadata)?.name]));
   const rsName = new Map(rss.map((r) => [r.metadata.uid, r.metadata.name]));
   const rsRev = new Map(rss.map((r) => [r.metadata.uid, revisionOf(r)]));
@@ -203,6 +229,14 @@ export function buildView(c: Cluster): ClusterView {
       cpu: { used: u.requested.cpu, total: n.status.allocatable.cpu, actual: actual.cpu },
       memory: { used: u.requested.memory, total: n.status.allocatable.memory, actual: actual.memory },
       pods: mine.sort(byCreation),
+      disks: pvs
+        .filter((v) => pvNode(v) === n.metadata.name)
+        .map((v) => ({
+          pv: v.metadata.name,
+          claim: v.spec.claimRef?.name,
+          size: v.spec.capacity.storage,
+          pod: allPods.find((p) => p.metadata.deletionTimestamp === undefined && (p.spec.volumes ?? []).some((x) => x.persistentVolumeClaim?.claimName === v.spec.claimRef?.name))?.metadata.name,
+        })),
     };
   });
   const slices = c.api.list("EndpointSlice", "default");
@@ -239,7 +273,32 @@ export function buildView(c: Cluster): ClusterView {
   }
   const gits: GitView[] = [...c.git.values()].map((r) => ({ url: r.url, head: r.head ? { sha: r.head.sha, message: r.head.message, author: r.head.author } : undefined, commits: r.commits.length }));
   const apps: AppView[] = c.api.list("Application", "argocd").map((app) => ({ app, name: app.metadata.name, seen: c.argocd.fetchedRevision(app.metadata.name), head: c.git.get(app.spec.source.repoURL)?.head?.sha }));
+  const statefulSets: StatefulSetView[] = stss.map((s) => {
+    const name = s.metadata.name;
+    const owned = allPods.filter((p) => controllerOf(p.metadata)?.uid === s.metadata.uid);
+    // 보일 번호: 원하는 수까지 + 아직 남은 Pod + 남아 있는 PVC (줄였을 때 디스크가 남은 것을 보이려고)
+    const nums = new Set(Array.from({ length: s.spec.replicas }, (_, i) => i));
+    for (const p of owned) {
+      const i = ordinalOf(name, p.metadata.name);
+      if (i !== undefined) nums.add(i);
+    }
+    for (const t of s.spec.volumeClaimTemplates ?? []) for (const v of pvcs) if (v.metadata.name.startsWith(`${t.metadata.name}-${name}-`)) nums.add(Number(v.metadata.name.slice(`${t.metadata.name}-${name}-`.length)));
+    return {
+      sts: s,
+      name,
+      colorIndex: colorOf.get(name) ?? 0,
+      ordinals: [...nums]
+        .filter((i) => Number.isInteger(i))
+        .sort((a, b) => a - b)
+        .map((i) => ({
+          i,
+          pod: owned.find((p) => p.metadata.name === `${name}-${i}`),
+          pvcs: (s.spec.volumeClaimTemplates ?? []).flatMap((t) => pvcs.filter((v) => v.metadata.name === claimName(t.metadata.name, name, i))),
+        })),
+    };
+  });
   return {
+    statefulSets,
     gits,
     apps,
     ingresses,

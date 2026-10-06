@@ -63,7 +63,7 @@
 - 메모: 사용자의 실제 구성(Tailscale funnel → Ingress → Service)을 예제로 만들 수 있다
 
 ## 5. 운영 (후보 — 시작할 때 고른다)
-- 후보: requests/limits 와 OOMKilled·CPU throttling(5a ✅), ConfigMap/Secret 변경과 재시작(5b ✅), NetworkPolicy(5c ✅), HPA(메트릭 흉내로 replicas 조정), StatefulSet + PVC(순서·고정 이름·고정 볼륨)
+- 후보: requests/limits 와 OOMKilled·CPU throttling(5a ✅), ConfigMap/Secret 변경과 재시작(5b ✅), NetworkPolicy(5c ✅), StatefulSet + PVC(5d ✅), HPA(메트릭 흉내로 replicas 조정)
 
 ### 5a. requests/limits · OOMKilled · CPU throttling ✅ 2026-10-06 (사용자 선택)
 - 된 것: `resources.limits`(requests > limits 거절, limits 만 적으면 requests = limits), QoS 클래스, 이미지별 메모리(램프·누수)·CPU(수요·요청당 일) 모양, cgroup OOM·노드 OOM(oom_score·SystemOOM 이벤트), CPU 나눠 받기(requests 비율)·throttling → 응답 시간·probe timeout, `kubectl top pods|nodes`·`set resources --limits`·describe 의 Limits/QoS/OOMKilled·describe node 의 Limits·overcommit, 인스펙터(limits 편집·Pod 자원 막대·OOMKilled 이유), 노드 칸의 요청·사용, Pod 칩 배지(mem %·throttled), 예제 묶음 "자원" 3개
@@ -105,7 +105,9 @@
 - 만들 것: NetworkPolicy 오브젝트(podSelector · policyTypes · ingress/egress 규칙 — podSelector·namespaceSelector·ipBlock·ports), 요청 경로의 검사(egress → ingress, DNS 포함, 막히면 DROP), `kubectl get/describe/delete networkpolicy`, 화면(목록 +·인스펙터 개요와 규칙 편집·Pod 의 격리 표시·칩 배지), 예제 묶음 "네트워크 정책"
 - 완료 기준: 예제의 "해 볼 것" 이 위 학습 포인트를 curl 결과·단계·로그로 보여 주고, 판단 규칙이 테스트로 고정된다. 네 가지 검증 통과
 
-### 5d. StatefulSet + PVC (2026-10-06 시작, 사용자 승인 — 5c 다음 후보)
+### 5d. StatefulSet + PVC ✅ 2026-10-06 (사용자 승인 — 5c 다음 후보)
+- 된 것: StatefulSet 컨트롤러, PVC·PV·StorageClass·local-path 프로비저너, 스케줄러 볼륨 필터, kubelet PVC 마운트, headless Service DNS, 방문 수 DB 앱(PV·컨테이너), `kubectl get/describe sts·pvc·pv`·`get sc`·`scale sts`·`rollout status|restart sts`·`delete pvc`, 화면(목록의 StatefulSet·번호별 PVC(+), 노드 칸의 디스크 칩, 인스펙터 StatefulSet·PVC·PV·Pod 의 디스크, StatefulSet 설정), 예제 묶음 "상태 있는 앱" 3개
+- 축소판: ARCHITECTURE 3-4
 - 왜: 홈 클러스터(k3s)의 기본 스토리지 local-path 는 디스크가 노드 하나에 묶인다. DB 를 올렸을 때 "Pod 를 지웠는데 데이터가 남나", "노드가 죽었는데 DB 가 왜 다른 노드로 안 옮겨지나" 를 추측하지 않고 보게 한다.
 - 배우는 것
   - StatefulSet: 고정 이름(db-0, db-1), 순서대로 생성(앞 번호가 Ready 여야 다음)·역순 삭제, 지운 Pod 는 **같은 이름·같은 디스크**로 돌아온다, 업데이트는 큰 번호부터 하나씩

@@ -85,6 +85,18 @@
 | 정책에 Service 포트(80)를 열었는데 막힘 | 정책은 DNAT 뒤의 Pod 포트(targetPort)로 판단 | targetPort(예: 8080)를 연다 |
 | Ingress 로 오는 요청을 클라이언트 IP(ipBlock)로 허용했는데 막힘 | Ingress 뒤의 Pod 가 보는 출발지는 ingress-nginx Pod | from 에 ingress-nginx Pod(podSelector)를 허용 |
 
+## StatefulSet·PVC (5d)
+
+| 증상 / 출력 | 원인 | 고치는 법 |
+|---|---|---|
+| `db-1` 이 안 생김 | OrderedReady — 앞 번호(db-0)가 Running·Ready 가 돼야 다음 | db-0 을 먼저 고친다 (`kubectl describe pod db-0`) |
+| PVC 가 `Pending` (`waiting for first consumer to be created before binding`) | local-path 는 WaitForFirstConsumer — 쓰는 Pod 가 노드에 정해져야 디스크를 만든다 | 정상. 그 PVC 를 쓰는 Pod 를 띄운다 |
+| `0/2 nodes are available: … volume node affinity conflict` | PVC 의 디스크(PV)가 다른 노드(죽은 노드)에 묶여 있다 — local-path 는 노드 디렉터리 | 그 노드를 살리거나, 데이터를 버리고 PVC 를 지운다. 노드 장애를 넘기려면 복제 스토리지(Longhorn 등) |
+| 노드가 죽었는데 StatefulSet Pod 가 `Terminating` 에서 안 바뀌고 새 Pod 도 없음 | 같은 이름의 Pod 를 둘 두지 않는다(at most one) — 정리할 kubelet 이 없음 | 노드가 정말 죽었는지 확인한 뒤 `kubectl delete pod <이름> --force --grace-period=0` |
+| `persistentvolumeclaim "x" not found` | Pod 가 없는 PVC 를 가리킴 | PVC 를 만들거나 이름을 고친다 |
+| scale down 했는데 PVC 가 남음 | StatefulSet 의 PVC 는 지우지 않는다(Retain) | 필요 없으면 `kubectl delete pvc` (데이터도 지워짐) |
+| headless Service 로 curl 하니 연결 거부 | headless 는 DNAT 가 없어 Service 포트가 아니라 Pod 포트로 간다 | Pod 의 포트(예: 8080)로 접속 |
+
 ## GitOps (6단계)
 
 | 증상 / 출력 | 원인 | 고치는 법 |

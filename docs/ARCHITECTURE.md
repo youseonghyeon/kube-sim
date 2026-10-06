@@ -1,6 +1,6 @@
 # kube-sim 코어 설계
 
-만들면서 고쳐 온 지금의 설계다 (0~4·6단계 2026-10-02, 5a·5b·5c 2026-10-06). 바뀌면 이 문서를 먼저 고친다. 실제와 다르게 줄인 것은 "축소판" 으로 적는다. 남은 결정은 맨 끝 "열린 결정".
+만들면서 고쳐 온 지금의 설계다 (0~4·6단계 2026-10-02, 5a~5d 2026-10-06). 바뀌면 이 문서를 먼저 고친다. 실제와 다르게 줄인 것은 "축소판" 으로 적는다. 남은 결정은 맨 끝 "열린 결정".
 
 ## 1. 시계와 이벤트 큐 (`clock.ts`, `model/simClock.ts`)
 - 이벤트 = `{ at(ms), seq, actor, run() }`. `at` 다음 `seq`(넣은 순서) 로 정렬 → 결정론. 코어에 `Math.random`·`Date.now` 없음 (난수는 `rng.ts` 시드 고정).
@@ -48,6 +48,13 @@
 
 ### 3-3. PDB·drain (3단계, `drain.ts`)
 - `DrainJob`: cordon → 시작할 때 고른 Pod(Terminating 포함)만 대상 → evict → 429 면 5초 뒤 다시 → Pod 가 사라지면 "evicted" → 모두 사라지면 "drained". 출력 줄이 시간이 지나며 늘어난다. 10분 넘게 못 끝내면 포기(축소판 — 실제 기본은 무한 대기).
+
+### 3-4. StatefulSet·스토리지 (5d, 2026-10-06, `controllers/statefulset.ts`, `storage.ts`)
+- StatefulSet: Pod 이름 `<이름>-<번호>`, 라벨 controller-revision-hash(템플릿 해시)·pod-name·pod-index, spec.hostname/subdomain(= serviceName). OrderedReady 면 앞 번호가 Running·Ready 일 때만 다음을 하나 만들고, 줄일 때는 지우는 중인 Pod 가 없을 때 큰 번호부터 하나. 같은 이름의 Pod 가 아직 있으면(Terminating) 기다린다 — 노드가 죽으면 대신할 Pod 가 생기지 않는다(at most one). 롤링은 모두 Ready 일 때 큰 번호부터 하나씩 지워 새 템플릿으로. PVC 는 `<템플릿>-<이름>-<번호>` 로 만들고 주인을 달지 않아(Retain) 남는다.
+- local-path(k3s 기본): StorageClass 는 클러스터를 만들 때 하나 둔다(default). PVC 는 WaitForFirstConsumer — 스케줄러가 Pod 를 바인딩할 때 PVC 에 selected-node 를 적으면 프로비저너가 그 노드의 `/var/lib/rancher/k3s/storage/...` 로 PV(nodeAffinity = 그 노드)를 만들어 묶는다. PVC 를 지우면 reclaim Delete 로 PV·데이터도 지운다. 데이터(앱이 적은 것)는 API 밖 `Cluster.volumeData`(PV 이름 → 내용), 볼륨 없는 컨테이너 데이터는 `containerData`(Pod uid/재시작 횟수).
+- 스케줄러 VolumeBinding: 없는 PVC 면 노드를 보지 않고 `persistentvolumeclaim "x" not found`, 묶인 PV 가 노드를 정하면 다른 노드는 `volume node affinity conflict` (자원 검사 뒤). kubelet 은 PVC 가 Bound·이 노드의 PV 일 때만 마운트(아니면 FailedMount 재시도).
+- headless Service(clusterIP None): API 가 주소를 주지 않고 kube-proxy 규칙도 없다. DNS 는 ready 엔드포인트 IP 들, `<hostname>.<svc>` 는 그 Pod IP — 요청은 DNAT 없이 Pod 포트로 바로.
+- 축소판: ControllerRevision 오브젝트·partition·persistentVolumeClaimRetentionPolicy·pvc-protection finalizer·용량 검사·정적 PV 짝짓기·다른 StorageClass 없음, PV 프로비저닝을 기다린 뒤 바인딩하지 않는다(PreBind 생략).
 
 ## 4. 스케줄러 (`scheduler.ts`)
 - 노드가 없는 Pod 를 큐에 → 필터(cordon, untolerated taint(NotReady 포함), nodeSelector, Too many pods, Insufficient cpu/memory — Terminating Pod 도 자리를 차지) → 점수 LeastAllocated(동점은 노드 이름 순) → `spec.nodeName` 바인딩.
@@ -119,4 +126,4 @@
 - 노드 간 Pod 트래픽을 패킷 단위(VXLAN 캡슐화)로 그릴지 — 지금은 문구로만
 - kube-proxy IPVS·nftables 모드 비교
 - conntrack(같은 연결은 같은 대상)·headless Service
-- 5단계(운영) 남은 후보: HPA(실사용 모양이 생겼으니 metrics 를 그대로 쓸 수 있다), StatefulSet+PVC. 5a 뒤: kubelet node-pressure eviction(Evicted Pod)을 보여 줄지
+- 5단계(운영) 남은 후보: HPA(실사용 모양이 생겼으니 metrics 를 그대로 쓸 수 있다). 5d 뒤: pvc-protection(Terminating PVC), Longhorn 같은 복제 스토리지로 노드 장애를 넘기는 것 5a 뒤: kubelet node-pressure eviction(Evicted Pod)을 보여 줄지

@@ -1,7 +1,7 @@
 // 오른쪽 인스펙터: 고른 오브젝트의 개요·설정·describe·YAML. 아무것도 안 골랐으면 예제의 "해 볼 것".
 import { useSignal } from "@preact/signals";
 import { useEffect, useMemo, useRef } from "preact/hooks";
-import { controllerOf, isNodeReady, limitOf, NODE_LEASE_NS, qosClass, type Application, type ConfigMap, type NetworkPolicy, type Secret, type Deployment, type Ingress, type KObject, type Node, type Pod, type ReplicaSet, type Service } from "../core/api/types";
+import { controllerOf, isNodeReady, limitOf, NODE_LEASE_NS, qosClass, type Application, type ConfigMap, type NetworkPolicy, type PersistentVolume, type PersistentVolumeClaim, type Secret, type StatefulSet, type Deployment, type Ingress, type KObject, type Node, type Pod, type ReplicaSet, type Service } from "../core/api/types";
 import type { DeploymentManifest, Manifest } from "../core/cluster";
 import { eventSource, nodeStatusText, podRestartsText, podStatusText, rolloutStatusLine, runKubectl } from "../core/kubectl";
 import { fmtAge, fmtCpu, fmtMem, parseCpu, parseMem } from "../core/units";
@@ -10,8 +10,8 @@ import { NODE_MONITOR_GRACE_MS } from "../core/controllers/nodelifecycle";
 import { exampleById, resolveCommand, type TryAction } from "../model/examples";
 import { appGet } from "../core/gitops/cli";
 import { deploymentHash, HASH_LABEL, revisionOf } from "../core/controllers/deployment";
-import { sim, simTime, simVersion } from "../model/sim";
-import { addManifest, clusterDef, drawerOpen, drawerTab, exampleId, findManifest, updateConfigManifest, updateIngressManifest, updateNetpolManifest, INSPECTOR_MIN, INSPECTOR_WIDE, inspectorOpen, inspectorWidth, setInspectorWidth, toggleInspector, toggleInspectorWide, removeManifest, selection, updateManifest, updateNodeDef, updateServiceManifest } from "../model/store";
+import { currentView, sim, simTime, simVersion } from "../model/sim";
+import { addManifest, clusterDef, drawerOpen, drawerTab, exampleId, findManifest, updateConfigManifest, updateIngressManifest, updateNetpolManifest, updateStsManifest, INSPECTOR_MIN, INSPECTOR_WIDE, inspectorOpen, inspectorWidth, setInspectorWidth, toggleInspector, toggleInspectorWide, removeManifest, selection, updateManifest, updateNodeDef, updateServiceManifest } from "../model/store";
 import { toneOf } from "../model/view";
 import { toYaml } from "../core/yaml";
 import { flattenRules, hostError, ingressNginxManifests, pathError, setRules, type RuleRow } from "../model/ingressForm";
@@ -19,6 +19,7 @@ import { NGINX_SERVICE } from "../core/net/ingress";
 import { b64decode } from "../core/base64";
 import { configUsers } from "../model/configUse";
 import { isolation, selects, selectorText } from "../core/net/netpol";
+import { pvNode } from "../core/storage";
 import { netpolRows, parsePorts, ruleText, setNetpolRows, type NetpolRow } from "../model/netpolForm";
 import { Icon } from "./Icons";
 
@@ -108,7 +109,7 @@ function InspectorPanel() {
     obj?.kind === "Node" ||
     (obj?.kind === "Service" && !!findManifest("Service", obj.metadata.name)) ||
     (obj?.kind === "Ingress" && !!findManifest("Ingress", obj.metadata.name)) ||
-    ((obj?.kind === "ConfigMap" || obj?.kind === "Secret" || obj?.kind === "NetworkPolicy") && !!findManifest(obj.kind, obj.metadata.name));
+    ((obj?.kind === "ConfigMap" || obj?.kind === "Secret" || obj?.kind === "NetworkPolicy" || obj?.kind === "StatefulSet") && !!findManifest(obj.kind, obj.metadata.name));
   const hasIptables = obj?.kind === "Node";
   useEffect(() => {
     if ((tab.value === "settings" && !hasSettings) || (tab.value === "iptables" && !hasIptables)) tab.value = "overview";
@@ -166,6 +167,7 @@ function InspectorPanel() {
         {tab.value === "settings" && obj.kind === "Ingress" && <IngressSettings name={obj.metadata.name} />}
         {tab.value === "settings" && (obj.kind === "ConfigMap" || obj.kind === "Secret") && <ConfigSettings kind={obj.kind} name={obj.metadata.name} />}
         {tab.value === "settings" && obj.kind === "NetworkPolicy" && <NetpolSettings name={obj.metadata.name} />}
+        {tab.value === "settings" && obj.kind === "StatefulSet" && <StsSettings name={obj.metadata.name} />}
         {tab.value === "iptables" && obj.kind === "Node" && <IptablesView node={obj.metadata.name} />}
         {tab.value === "describe" && (
           <pre class="term">{obj.kind === "Application" ? appGet(sim.cluster, obj) : runKubectl(sim.cluster, `describe ${obj.kind.toLowerCase()} ${obj.metadata.name}`).output}</pre>
@@ -227,6 +229,12 @@ function Overview({ obj }: { obj: KObject }) {
       return <ConfigOverview obj={obj} />;
     case "NetworkPolicy":
       return <NetpolOverview np={obj} />;
+    case "StatefulSet":
+      return <StsOverview sts={obj} />;
+    case "PersistentVolumeClaim":
+      return <PvcOverview pvc={obj} />;
+    case "PersistentVolume":
+      return <PvOverview pv={obj} />;
     case "PodDisruptionBudget":
       return (
         <>
@@ -375,6 +383,7 @@ function PodOverview({ p }: { p: Pod }) {
       <PodResources p={p} />
       <PodConfig p={p} />
       <PodNetpol p={p} />
+      <PodDisks p={p} />
       <h3>이벤트</h3>
       <Events uid={p.metadata.uid} />
     </>
@@ -1582,6 +1591,181 @@ function maskIfSecret(p: Pod, key: string, v: string): string {
   const ct = p.spec.containers[0]!;
   const fromSecret = ct.env?.some((e) => e.name === key && e.valueFrom?.secretKeyRef) || (ct.envFrom ?? []).some((f) => f.secretRef && sim.cluster.api.get("Secret", f.secretRef.name, "default")?.data[key] !== undefined);
   return fromSecret ? "•••••• (Secret)" : v;
+}
+
+// ---------- StatefulSet·PVC (5d) ----------
+
+function StsOverview({ sts }: { sts: StatefulSet }) {
+  const view = currentView().statefulSets.find((s) => s.name === sts.metadata.name);
+  const name = sts.metadata.name;
+  return (
+    <>
+      <div class="callout">
+        <div class="small">
+          Pod 이름이 {name}-0, {name}-1 … 로 고정되고 Pod 마다 자기 PVC(디스크)를 가집니다. 앞 번호가 Running·Ready 여야 다음을 만들고(OrderedReady), 줄이거나 업데이트할 때는 큰 번호부터 하나씩. 지운 Pod 는 같은 이름·같은 PVC 로
+          돌아오는데, 옛 Pod 가 다 지워질 때까지 기다립니다 — 노드가 죽어 Terminating 에 멈추면 대신할 Pod 도 생기지 않습니다.
+        </div>
+      </div>
+      <Rows
+        rows={[
+          ["replicas", `원하는 ${sts.spec.replicas} · 있는 ${sts.status.replicas} · Ready ${sts.status.readyReplicas} · 새 리비전 ${sts.status.updatedReplicas}`],
+          ["serviceName", <span class="mono">{sts.spec.serviceName} (headless — {name}-0.{sts.spec.serviceName} 처럼 Pod 마다 DNS 이름)</span>],
+          ["만드는 순서", (sts.spec.podManagementPolicy ?? "OrderedReady") === "OrderedReady" ? "OrderedReady — 앞 번호가 Ready 여야 다음" : "Parallel — 한꺼번에"],
+          ["리비전", <span class="mono">{sts.status.updateRevision ?? "—"}</span>],
+        ]}
+      />
+      <h3>번호별</h3>
+      <ul class="list sts-ords">
+        {(view?.ordinals ?? []).map((o) => (
+          <li key={o.i} class={o.i >= sts.spec.replicas ? "faded" : ""}>
+            <span>
+              {o.pod ? <Link kind="Pod" name={o.pod.metadata.name} /> : <span class="mono muted">{`${name}-${o.i}`}</span>}{" "}
+              <span class="small muted">{o.pod ? `${podStatusText(o.pod)}${o.pod.spec.nodeName ? ` · ${o.pod.spec.nodeName}` : ""}` : o.i >= sts.spec.replicas ? "줄여서 없음" : "아직 없음"}</span>
+            </span>
+            <span class="small">
+              {o.pvcs.map((v) => (
+                <span key={v.metadata.uid}>
+                  <Link kind="PersistentVolumeClaim" name={v.metadata.name} /> <span class="muted">{v.status.phase}</span>
+                </span>
+              ))}
+            </span>
+          </li>
+        ))}
+      </ul>
+      <div class="actions">
+        <button class="btn sm" onClick={() => runAndShow(`kubectl scale sts/${name} --replicas=${sts.spec.replicas + 1}`)}>
+          {sts.spec.replicas + 1} 로 늘리기
+        </button>
+        <button class="btn sm" disabled={sts.spec.replicas <= 0} onClick={() => runAndShow(`kubectl scale sts/${name} --replicas=${Math.max(0, sts.spec.replicas - 1)}`)}>
+          {Math.max(0, sts.spec.replicas - 1)} 로 줄이기
+        </button>
+        <button class="btn sm" onClick={() => runAndShow(`kubectl rollout restart sts/${name}`)}>
+          rollout restart
+        </button>
+      </div>
+      <h3>이벤트</h3>
+      <Events uid={sts.metadata.uid} />
+    </>
+  );
+}
+
+function StsSettings({ name }: { name: string }) {
+  const m = findManifest("StatefulSet", name);
+  if (!m) return <p class="note">이 StatefulSet 은 매니페스트에 없습니다.</p>;
+  const ct = m.spec.template.spec.containers[0]!;
+  return (
+    <>
+      <p class="note">여기서 바꾸면 매니페스트를 고쳐 kubectl apply 한 것과 같습니다. 이미지를 바꾸면 큰 번호부터 하나씩 새 Pod 로 바뀝니다.</p>
+      <Field label="replicas" hint="줄여도 PVC(디스크)는 남습니다">
+        <div class="stepper">
+          <button class="btn sm" disabled={m.spec.replicas <= 0} onClick={() => updateStsManifest(name, (x) => (x.spec.replicas = Math.max(0, x.spec.replicas - 1)))} aria-label="replicas 줄이기">
+            −
+          </button>
+          <span class="mono stepper-num">{m.spec.replicas}</span>
+          <button class="btn sm" disabled={m.spec.replicas >= 10} onClick={() => updateStsManifest(name, (x) => (x.spec.replicas = Math.min(10, x.spec.replicas + 1)))} aria-label="replicas 늘리기">
+            +
+          </button>
+        </div>
+      </Field>
+      <Field label="이미지" hint={IMAGES[ct.image]?.description ?? "레지스트리에 없는 이미지 — pull 이 실패합니다"}>
+        <TextInput value={ct.image} list="kube-sim-images" onCommit={(v) => updateStsManifest(name, (x) => (x.spec.template.spec.containers[0]!.image = v))} validate={(v) => (v.trim() ? undefined : "이미지 이름을 쓰세요")} />
+      </Field>
+      <div class="actions">
+        <button
+          class="btn danger"
+          onClick={() => {
+            removeManifest("StatefulSet", name);
+            selection.value = null;
+          }}
+          title="Pod 는 함께 지워지지만 PVC(디스크)는 남습니다"
+        >
+          <Icon name="trash" size={14} />
+          StatefulSet 지우기 (PVC 는 남음)
+        </button>
+      </div>
+    </>
+  );
+}
+
+function PvcOverview({ pvc }: { pvc: PersistentVolumeClaim }) {
+  const c = sim.cluster;
+  const pv = pvc.spec.volumeName ? c.api.get("PersistentVolume", pvc.spec.volumeName) : undefined;
+  const node = pv ? pvNode(pv) : undefined;
+  const users = c.api.list("Pod", "default").filter((p) => (p.spec.volumes ?? []).some((v) => v.persistentVolumeClaim?.claimName === pvc.metadata.name));
+  const data = pv ? c.volumeData.get(pv.metadata.name) : undefined;
+  return (
+    <>
+      {pvc.status.phase === "Pending" && (
+        <div class="callout warn">
+          <div class="callout-title">Pending — 쓰는 Pod 가 노드에 정해지기를 기다림</div>
+          <div class="small">StorageClass {pvc.spec.storageClassName} 는 WaitForFirstConsumer 라, 이 PVC 를 쓰는 Pod 가 노드에 정해져야 그 노드에 디스크를 만듭니다.</div>
+        </div>
+      )}
+      <Rows
+        rows={[
+          ["상태", pvc.status.phase],
+          ["StorageClass", pvc.spec.storageClassName ?? "—"],
+          ["요청", `${fmtMem(pvc.spec.resources.requests.storage)} · ${pvc.spec.accessModes.join(", ")}`],
+          ["PV", pv ? <Link kind="PersistentVolume" name={pv.metadata.name} /> : <span class="muted">아직 없음</span>],
+          ["디스크 위치", node ? <span>{node} — 이 PVC 를 쓰는 Pod 는 {node} 에만 갈 수 있음</span> : <span class="muted">—</span>],
+          ["쓰는 Pod", users.length ? <span class="lines">{users.map((p) => <Link key={p.metadata.uid} kind="Pod" name={p.metadata.name} />)}</span> : <span class="muted">없음</span>],
+          ["데이터", data && Object.keys(data).length ? <span class="mono small">{Object.entries(data).map(([k, v]) => `${k}=${v}`).join(" · ")}</span> : <span class="muted">비어 있음</span>],
+        ]}
+      />
+      <div class="actions">
+        <button class="btn sm danger" onClick={() => runAndShow(`kubectl delete pvc ${pvc.metadata.name}`)} title="reclaimPolicy Delete — PV 와 노드의 데이터도 지워집니다">
+          <Icon name="trash" size={14} />
+          PVC 지우기 (데이터도)
+        </button>
+      </div>
+      <h3>이벤트</h3>
+      <Events uid={pvc.metadata.uid} />
+    </>
+  );
+}
+
+function PvOverview({ pv }: { pv: PersistentVolume }) {
+  const node = pvNode(pv);
+  return (
+    <>
+      <Rows
+        rows={[
+          ["상태", pv.status.phase],
+          ["용량", fmtMem(pv.spec.capacity.storage)],
+          ["Claim", pv.spec.claimRef ? <Link kind="PersistentVolumeClaim" name={pv.spec.claimRef.name} /> : <span class="muted">없음</span>],
+          ["nodeAffinity", node ? `kubernetes.io/hostname in [${node}] — 이 노드에 묶임` : "없음"],
+          ["경로", <span class="mono small">{pv.spec.hostPath.path}</span>],
+          ["reclaimPolicy", `${pv.spec.persistentVolumeReclaimPolicy} — PVC 를 지우면 ${pv.spec.persistentVolumeReclaimPolicy === "Delete" ? "이 PV 와 데이터도 지움" : "남김"}`],
+        ]}
+      />
+    </>
+  );
+}
+
+/** Pod 가 쓰는 PVC → PV → 노드 */
+function PodDisks({ p }: { p: Pod }) {
+  const c = sim.cluster;
+  const claims = (p.spec.volumes ?? []).flatMap((v) => (v.persistentVolumeClaim ? [{ vol: v.name, claim: v.persistentVolumeClaim.claimName }] : []));
+  if (!claims.length) return null;
+  return (
+    <>
+      <h3>디스크</h3>
+      <ul class="list">
+        {claims.map(({ vol, claim }) => {
+          const pvc = c.api.get("PersistentVolumeClaim", claim);
+          const pv = pvc?.spec.volumeName ? c.api.get("PersistentVolume", pvc.spec.volumeName) : undefined;
+          return (
+            <li key={vol}>
+              <span>
+                <Link kind="PersistentVolumeClaim" name={claim} /> <span class="muted small">({vol})</span>
+              </span>
+              <span class="small">{pvc ? (pv ? `${pvc.status.phase} · ${pvNode(pv) ?? "?"} 의 디스크` : pvc.status.phase) : <span class="warn-text">PVC 없음</span>}</span>
+            </li>
+          );
+        })}
+      </ul>
+    </>
+  );
 }
 
 // ---------- NetworkPolicy (5c) ----------
