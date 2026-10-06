@@ -1,7 +1,7 @@
 // 오른쪽 인스펙터: 고른 오브젝트의 개요·설정·describe·YAML. 아무것도 안 골랐으면 예제의 "해 볼 것".
 import { useSignal } from "@preact/signals";
 import { useEffect, useMemo, useRef } from "preact/hooks";
-import { controllerOf, isNodeReady, limitOf, NODE_LEASE_NS, qosClass, type Application, type ConfigMap, type Secret, type Deployment, type Ingress, type KObject, type Node, type Pod, type ReplicaSet, type Service } from "../core/api/types";
+import { controllerOf, isNodeReady, limitOf, NODE_LEASE_NS, qosClass, type Application, type ConfigMap, type NetworkPolicy, type Secret, type Deployment, type Ingress, type KObject, type Node, type Pod, type ReplicaSet, type Service } from "../core/api/types";
 import type { DeploymentManifest, Manifest } from "../core/cluster";
 import { eventSource, nodeStatusText, podRestartsText, podStatusText, rolloutStatusLine, runKubectl } from "../core/kubectl";
 import { fmtAge, fmtCpu, fmtMem, parseCpu, parseMem } from "../core/units";
@@ -11,13 +11,15 @@ import { exampleById, resolveCommand, type TryAction } from "../model/examples";
 import { appGet } from "../core/gitops/cli";
 import { deploymentHash, HASH_LABEL, revisionOf } from "../core/controllers/deployment";
 import { sim, simTime, simVersion } from "../model/sim";
-import { addManifest, clusterDef, drawerOpen, drawerTab, exampleId, findManifest, updateConfigManifest, updateIngressManifest, INSPECTOR_MIN, INSPECTOR_WIDE, inspectorOpen, inspectorWidth, setInspectorWidth, toggleInspector, toggleInspectorWide, removeManifest, selection, updateManifest, updateNodeDef, updateServiceManifest } from "../model/store";
+import { addManifest, clusterDef, drawerOpen, drawerTab, exampleId, findManifest, updateConfigManifest, updateIngressManifest, updateNetpolManifest, INSPECTOR_MIN, INSPECTOR_WIDE, inspectorOpen, inspectorWidth, setInspectorWidth, toggleInspector, toggleInspectorWide, removeManifest, selection, updateManifest, updateNodeDef, updateServiceManifest } from "../model/store";
 import { toneOf } from "../model/view";
 import { toYaml } from "../core/yaml";
 import { flattenRules, hostError, ingressNginxManifests, pathError, setRules, type RuleRow } from "../model/ingressForm";
 import { NGINX_SERVICE } from "../core/net/ingress";
 import { b64decode } from "../core/base64";
 import { configUsers } from "../model/configUse";
+import { isolation, selects, selectorText } from "../core/net/netpol";
+import { netpolRows, parsePorts, ruleText, setNetpolRows, type NetpolRow } from "../model/netpolForm";
 import { Icon } from "./Icons";
 
 type Tab = "overview" | "settings" | "iptables" | "describe" | "yaml";
@@ -106,7 +108,7 @@ function InspectorPanel() {
     obj?.kind === "Node" ||
     (obj?.kind === "Service" && !!findManifest("Service", obj.metadata.name)) ||
     (obj?.kind === "Ingress" && !!findManifest("Ingress", obj.metadata.name)) ||
-    ((obj?.kind === "ConfigMap" || obj?.kind === "Secret") && !!findManifest(obj.kind, obj.metadata.name));
+    ((obj?.kind === "ConfigMap" || obj?.kind === "Secret" || obj?.kind === "NetworkPolicy") && !!findManifest(obj.kind, obj.metadata.name));
   const hasIptables = obj?.kind === "Node";
   useEffect(() => {
     if ((tab.value === "settings" && !hasSettings) || (tab.value === "iptables" && !hasIptables)) tab.value = "overview";
@@ -163,6 +165,7 @@ function InspectorPanel() {
         {tab.value === "settings" && obj.kind === "Service" && <ServiceSettings name={obj.metadata.name} />}
         {tab.value === "settings" && obj.kind === "Ingress" && <IngressSettings name={obj.metadata.name} />}
         {tab.value === "settings" && (obj.kind === "ConfigMap" || obj.kind === "Secret") && <ConfigSettings kind={obj.kind} name={obj.metadata.name} />}
+        {tab.value === "settings" && obj.kind === "NetworkPolicy" && <NetpolSettings name={obj.metadata.name} />}
         {tab.value === "iptables" && obj.kind === "Node" && <IptablesView node={obj.metadata.name} />}
         {tab.value === "describe" && (
           <pre class="term">{obj.kind === "Application" ? appGet(sim.cluster, obj) : runKubectl(sim.cluster, `describe ${obj.kind.toLowerCase()} ${obj.metadata.name}`).output}</pre>
@@ -220,6 +223,8 @@ function Overview({ obj }: { obj: KObject }) {
     case "ConfigMap":
     case "Secret":
       return <ConfigOverview obj={obj} />;
+    case "NetworkPolicy":
+      return <NetpolOverview np={obj} />;
     case "PodDisruptionBudget":
       return (
         <>
@@ -367,6 +372,7 @@ function PodOverview({ p }: { p: Pod }) {
       {cs && "running" in cs.state && !deleting && <CurlFrom pod={p.metadata.name} />}
       <PodResources p={p} />
       <PodConfig p={p} />
+      <PodNetpol p={p} />
       <h3>이벤트</h3>
       <Events uid={p.metadata.uid} />
     </>
@@ -900,6 +906,12 @@ function ExamplePanel() {
               <li key={i} class="try">
                 <div class="try-title">{t.title}</div>
                 {t.action && <TryActionRow action={t.action} />}
+                {t.action?.type === "apply" && (
+                  <details class="try-yaml">
+                    <summary>YAML 보기</summary>
+                    <pre class="term small-term">{toYaml(t.action.manifest)}</pre>
+                  </details>
+                )}
                 {t.command && (
                   <div class="try-cmd">
                     <code class="mono">{cmd ?? t.command}</code>
@@ -926,6 +938,7 @@ function actionLabel(a: TryAction): string {
   if (a.type === "prestop") return `${a.deployment} 에 preStop sleep ${a.seconds}초 넣기 (apply)`;
   if (a.type === "ci-bump") return `CI: 새 이미지 빌드 → Git 의 ${a.file.split("/").pop()} 태그 커밋`;
   if (a.type === "git-rm") return `Git 에서 ${a.file.split("/").pop()} 지우고 커밋`;
+  if (a.type === "apply") return `kubectl apply -f ${a.manifest.metadata.name}.yaml  (${a.manifest.kind})`;
   if (a.type === "helm-upgrade") return `helm upgrade — ${Object.entries(a.data).map(([k, v]) => `${k}=${v}`).join(", ")}${a.checksum ? " (checksum/config 주석 있음)" : " (checksum 주석 없음)"}`;
   return `(클러스터 밖에서) curl ${a.node}:<${a.service} 의 NodePort>`;
 }
@@ -1567,6 +1580,218 @@ function maskIfSecret(p: Pod, key: string, v: string): string {
   const ct = p.spec.containers[0]!;
   const fromSecret = ct.env?.some((e) => e.name === key && e.valueFrom?.secretKeyRef) || (ct.envFrom ?? []).some((f) => f.secretRef && sim.cluster.api.get("Secret", f.secretRef.name, "default")?.data[key] !== undefined);
   return fromSecret ? "•••••• (Secret)" : v;
+}
+
+// ---------- NetworkPolicy (5c) ----------
+
+/** 정책 개요: 무엇을 고르고, 방향마다 격리하는지와 허용하는 것 (문장으로) */
+function NetpolOverview({ np }: { np: NetworkPolicy }) {
+  const c = sim.cluster;
+  const chosen = c.api.list("Pod", "default").filter((p) => p.metadata.deletionTimestamp === undefined && selects(np.spec.podSelector, p.metadata.labels));
+  const types = np.spec.policyTypes ?? ["Ingress"];
+  const dir = (d: "ingress" | "egress") => {
+    const on = types.includes(d === "ingress" ? "Ingress" : "Egress");
+    const rules = (d === "ingress" ? np.spec.ingress : np.spec.egress) ?? [];
+    return (
+      <>
+        <h3>{d === "ingress" ? "들어오는 것 (ingress)" : "나가는 것 (egress)"}</h3>
+        {!on ? (
+          <p class="muted small">이 정책은 {d} 에 영향이 없습니다.</p>
+        ) : !rules.length ? (
+          <p class="small warn-text">격리 — 허용 규칙이 없어 모두 막힙니다{d === "egress" ? " (DNS 도)" : ""}.</p>
+        ) : (
+          <ul class="list netpol-rules">
+            {rules.map((r, i) => (
+              <li key={i}>
+                <span class="small">허용: {ruleText(d, r)}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </>
+    );
+  };
+  return (
+    <>
+      <div class="callout">
+        <div class="small">
+          이 정책이 고른 Pod 는 켠 방향이 <b>기본 차단</b>으로 바뀌고, 규칙에 맞는 것만 지나갑니다. 같은 Pod 를 고르는 정책이 여럿이면 허용은 <b>더해집니다</b>. 막힌 트래픽은 버려져(DROP) 보내는 쪽이 시간 초과까지 기다립니다. Pod 가 도는 노드에서 오는 것(probe 등)은 늘 허용됩니다.
+        </div>
+      </div>
+      <Rows
+        rows={[
+          ["podSelector", <span class="mono">{selectorText(np.spec.podSelector) === "<none>" ? "{} (이 네임스페이스의 모든 Pod)" : selectorText(np.spec.podSelector)}</span>],
+          ["policyTypes", types.join(", ")],
+          ["고른 Pod", chosen.length ? <span class="lines">{chosen.map((p) => <Link key={p.metadata.uid} kind="Pod" name={p.metadata.name} />)}</span> : <span class="muted">없음</span>],
+        ]}
+      />
+      {dir("ingress")}
+      {dir("egress")}
+    </>
+  );
+}
+
+/** 정책 편집: 고를 Pod · 방향 · 규칙 줄(방향 · 상대 · 포트) */
+function NetpolSettings({ name }: { name: string }) {
+  const m = findManifest("NetworkPolicy", name);
+  if (!m) return <p class="note">이 NetworkPolicy 는 매니페스트에 없습니다 (kubectl 로 만듦).</p>;
+  const apps = [...new Set(sim.cluster.api.list("Deployment", "default").map((d) => d.spec.template.metadata.labels.app).filter((x): x is string => !!x))];
+  const rows = netpolRows(m.spec);
+  const types = m.spec.policyTypes ?? ["Ingress"];
+  const setRows = (next: NetpolRow[]) => updateNetpolManifest(name, (x) => setNetpolRows(x.spec, next));
+  const setRow = (i: number, patch: Partial<NetpolRow>) => setRows(rows.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  const appOptions = (cur: string) => (
+    <>
+      {cur && !apps.includes(cur) && <option value={cur}>{cur} (없음)</option>}
+      {apps.map((a) => (
+        <option key={a} value={a}>
+          app={a}
+        </option>
+      ))}
+    </>
+  );
+  const sel = m.spec.podSelector.matchLabels?.app ?? "";
+  return (
+    <>
+      <p class="note">여기서 바꾸면 매니페스트를 고쳐 kubectl apply 한 것과 같습니다. 포트는 DNAT 뒤 Pod 의 포트(Service 의 targetPort)입니다.</p>
+      <Field label="podSelector" hint="이 정책이 고를 Pod — 고른 Pod 는 아래 켠 방향이 기본 차단이 됩니다">
+        <select class="input" value={sel} onChange={(e) => updateNetpolManifest(name, (x) => (x.spec.podSelector = e.currentTarget.value ? { matchLabels: { app: e.currentTarget.value } } : {}))}>
+          <option value="">{"{} — 모든 Pod"}</option>
+          {appOptions(sel)}
+        </select>
+      </Field>
+      <div class="field">
+        <span class="field-label">policyTypes</span>
+        <div class="checks">
+          {(["Ingress", "Egress"] as const).map((t) => (
+            <label key={t} class="check">
+              <input
+                type="checkbox"
+                checked={types.includes(t)}
+                disabled={types.includes(t) && types.length === 1}
+                onChange={(e) =>
+                  updateNetpolManifest(name, (x) => {
+                    const cur = new Set(x.spec.policyTypes ?? ["Ingress"]);
+                    if (e.currentTarget.checked) cur.add(t);
+                    else cur.delete(t);
+                    x.spec.policyTypes = (["Ingress", "Egress"] as const).filter((k) => cur.has(k));
+                  })
+                }
+              />
+              {t === "Ingress" ? "Ingress (들어오는 것 격리)" : "Egress (나가는 것 격리 — DNS 도 막힘)"}
+            </label>
+          ))}
+        </div>
+      </div>
+      <h3>허용 규칙</h3>
+      <div class="rules">
+        {rows.map((r, i) => (
+          <div key={i} class="np-row" data-np-rule={i}>
+            <select class="input" value={r.dir} onChange={(e) => setRow(i, { dir: e.currentTarget.value as NetpolRow["dir"] })} aria-label="방향">
+              <option value="ingress">들어옴 ←</option>
+              <option value="egress">나감 →</option>
+            </select>
+            {r.peer === "other" ? (
+              <>
+                <span class="small muted np-other">{ruleText(r.dir, r.raw ?? {})} (YAML 로만)</span>
+                <span />
+              </>
+            ) : (
+              <>
+                <select
+                  class="input"
+                  value={r.peer}
+                  aria-label="상대"
+                  onChange={(e) => {
+                    const peer = e.currentTarget.value as NetpolRow["peer"];
+                    setRow(i, { peer, value: peer === "app" ? (apps[0] ?? "") : peer === "cidr" ? "10.0.0.0/8" : "", ...(peer === "dns" ? { ports: "53/UDP, 53" } : {}) });
+                  }}
+                >
+                  <option value="any">어디든</option>
+                  <option value="app">Pod app=</option>
+                  <option value="dns">CoreDNS</option>
+                  <option value="cidr">IP 대역</option>
+                </select>
+                {r.peer === "app" ? (
+                  <select class="input" value={r.value} onChange={(e) => setRow(i, { value: e.currentTarget.value })} aria-label="app">
+                    {appOptions(r.value)}
+                  </select>
+                ) : r.peer === "cidr" ? (
+                  <div class="rule-cell">
+                    <TextInput value={r.value} validate={(v) => (/^(\d{1,3}\.){3}\d{1,3}\/(\d|[12]\d|3[0-2])$/.test(v) ? undefined : "10.0.0.0/8 처럼")} onCommit={(v) => setRow(i, { value: v })} />
+                  </div>
+                ) : (
+                  <span />
+                )}
+              </>
+            )}
+            <div class="rule-cell">
+              {r.peer === "other" ? <span class="mono small">{r.ports || "모든 포트"}</span> : <TextInput value={r.ports} placeholder="모든 포트" validate={(v) => { const p = parsePorts(v); return "error" in p ? p.error : undefined; }} onCommit={(v) => setRow(i, { ports: v })} />}
+            </div>
+            <button class="icon-btn sm" title="이 규칙 지우기" aria-label="규칙 지우기" onClick={() => setRows(rows.filter((_, j) => j !== i))}>
+              <Icon name="trash" size={14} />
+            </button>
+          </div>
+        ))}
+        {!rows.length && <p class="muted small">허용 규칙 없음 — 켠 방향은 모두 막힙니다.</p>}
+      </div>
+      <div class="actions">
+        <button class="btn sm" onClick={() => setRows([...rows, { dir: types.includes("Ingress") ? "ingress" : "egress", peer: "app", value: apps[0] ?? "", ports: "" }])}>
+          <Icon name="plus" size={14} />
+          규칙 더하기
+        </button>
+        {types.includes("Egress") && !rows.some((r) => r.dir === "egress" && r.peer === "dns") && (
+          <button class="btn sm" onClick={() => setRows([...rows, { dir: "egress", peer: "dns", value: "", ports: "53/UDP, 53" }])} title="egress 를 격리하면 이름 풀기(UDP 53)부터 막힙니다">
+            DNS 허용 더하기
+          </button>
+        )}
+      </div>
+      <div class="actions">
+        <button
+          class="btn danger"
+          onClick={() => {
+            removeManifest("NetworkPolicy", name);
+            selection.value = null;
+          }}
+        >
+          <Icon name="trash" size={14} />
+          NetworkPolicy 지우기
+        </button>
+      </div>
+    </>
+  );
+}
+
+/** Pod 를 고르는 정책들과 격리 여부 */
+function PodNetpol({ p }: { p: Pod }) {
+  const iso = isolation(sim.cluster, p);
+  const any = sim.cluster.api.list("NetworkPolicy", "default").length > 0;
+  if (!any) return null;
+  const line = (d: "ingress" | "egress", list: NetworkPolicy[]) =>
+    list.length ? (
+      <span>
+        격리 — {list.map((np, i) => (
+          <span key={np.metadata.uid}>
+            {i ? ", " : ""}
+            <Link kind="NetworkPolicy" name={np.metadata.name} />
+          </span>
+        ))}{" "}
+        의 허용만
+      </span>
+    ) : (
+      <span class="muted">모두 허용 (이 Pod 를 고르는 {d} 정책 없음)</span>
+    );
+  return (
+    <>
+      <h3>NetworkPolicy</h3>
+      <Rows
+        rows={[
+          ["ingress", line("ingress", iso.ingress)],
+          ["egress", line("egress", iso.egress)],
+        ]}
+      />
+    </>
+  );
 }
 
 // ---------- GitOps (6단계) ----------

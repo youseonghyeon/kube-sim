@@ -2073,3 +2073,54 @@ body.resizing-row * {
   max-height: 160px;
   overflow: auto;
 }
+
+/* ---- NetworkPolicy: 칩 배지 · 규칙 줄 · 예제 카드의 YAML ---- */
+.pod-badge.np {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.np-row {
+  display: grid;
+  grid-template-columns: 76px 88px minmax(0, 1fr) 24px;
+  grid-template-areas: "dir peer val del" "ports ports ports .";
+  gap: 4px;
+  align-items: start;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.np-row > :nth-child(1) {
+  grid-area: dir;
+}
+.np-row > :nth-child(2) {
+  grid-area: peer;
+}
+.np-row > :nth-child(3) {
+  grid-area: val;
+}
+.np-row > :nth-child(4) {
+  grid-area: ports;
+}
+.np-row > :nth-child(5) {
+  grid-area: del;
+}
+.np-row .np-other {
+  grid-column: 2 / 4;
+  align-self: center;
+}
+.np-row .input {
+  min-width: 0;
+  padding-left: 6px;
+  padding-right: 6px;
+}
+.checks {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+}
+.try-yaml summary {
+  margin-top: 4px;
+  color: var(--ink-3);
+  font-size: 11px;
+  cursor: pointer;
+}

@@ -104,7 +104,7 @@ await page.screenshot({ path: `${OUT}/05-scaled-drift.png` });
 // 3b) 예제 메뉴: 묶음별 열 + 검색
 console.log("3b) 예제 메뉴 묶음·검색");
 await page.click(".menu-btn");
-check((await page.locator(".menu-group").count()) === 9, "예제 메뉴가 묶음 9개로 나뉜다", "examples.ts EXAMPLE_GROUPS / App.tsx ExampleMenu");
+check((await page.locator(".menu-group").count()) === 10, "예제 메뉴가 묶음 10개로 나뉜다", "examples.ts EXAMPLE_GROUPS / App.tsx ExampleMenu");
 await page.screenshot({ path: `${OUT}/05b-example-menu.png` });
 await page.keyboard.type("readiness");
 const found = await page.locator(".example-item").evaluateAll((els) => els.map((e) => e.getAttribute("data-example")));
@@ -409,6 +409,32 @@ check((await page.locator(".kv-list").textContent())?.includes("•••••�
 await page.locator("button", { hasText: "값 보기" }).click();
 check((await page.locator(".kv-list").textContent())?.includes("s3cr3t!"), "값 보기로 base64 를 풀어 보인다", "Inspector ConfigOverview b64decode");
 await page.screenshot({ path: `${OUT}/23e-secret.png` });
+
+// 15d) NetworkPolicy
+console.log("15d) NetworkPolicy");
+await page.click(".menu-btn");
+await page.click('.menu-item[data-example="netpol-basics"]');
+await waitFor(async () => (await page.locator('[data-tree="service/web"] .tree-count').textContent()) === "2", "web 엔드포인트 2", 30000);
+await page.waitForTimeout(400);
+await page.locator(".try", { hasText: "web 을 고르는 deny 정책" }).locator(".try-cmd button").click();
+await waitFor(async () => (await page.locator('.node .pod[data-pod^="web-"] .pod-badge.np').count()) === 2, "격리 배지", 5000);
+check(true, "deny 정책을 apply 하면 web Pod 칩에 격리 배지");
+check((await page.locator(".try", { hasText: "web 을 고르는 deny 정책" }).locator("details.try-yaml").count()) === 1, "apply 카드에 YAML 보기", "Inspector ExamplePanel try-yaml");
+await page.locator(".try", { hasText: "다시 curl" }).first().locator("button").click();
+await page.waitForTimeout(300);
+check((await page.locator(".drawer").textContent())?.includes("Connection timed out"), "막히면 거부가 아니라 시간 초과", "request.ts dropped / netpol.ts check");
+check((await page.locator(".drawer").textContent())?.includes("DROP"), "단계에 kube-router 의 DROP 이유", "request.ts dropped");
+await page.locator('[data-tree="networkpolicy/deny-web"]').click();
+check((await page.locator(".insp-body").textContent())?.includes("격리 — 허용 규칙이 없어 모두 막힙니다"), "정책 개요가 격리를 문장으로", "Inspector NetpolOverview");
+await page.locator(".tabs button", { hasText: "설정" }).click();
+await page.locator("button", { hasText: "규칙 더하기" }).click();
+await waitFor(async () => (await page.locator(".np-row").count()) === 1, "규칙 줄", 3000);
+check(true, "설정 탭에서 허용 규칙을 더한다");
+await page.screenshot({ path: `${OUT}/23f-netpol-settings.png` });
+await page.locator('.node .pod[data-pod^="web-"]').first().click();
+await page.locator(".tabs button", { hasText: "개요" }).click();
+check((await page.locator(".insp-body").textContent())?.includes("NetworkPolicy"), "Pod 개요에 NetworkPolicy 격리 표시", "Inspector PodNetpol");
+await page.screenshot({ path: `${OUT}/23g-netpol-pod.png` });
 
 // 16) 패널 크기: 인스펙터 폭·서랍 높이 끌기, 접기·펴기, 저장
 console.log("16) 패널 크기");

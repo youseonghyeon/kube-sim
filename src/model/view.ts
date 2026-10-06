@@ -6,6 +6,7 @@ import { DEFAULT_TOLERATION_SECONDS } from "../core/api/server";
 import { deploymentHash, HASH_LABEL, revisionOf } from "../core/controllers/deployment";
 import { NODE_MONITOR_GRACE_MS } from "../core/controllers/nodelifecycle";
 import { nodeUsage } from "../core/scheduler";
+import { isolation } from "../core/net/netpol";
 import type { ObjRef, TraceEvent } from "../core/trace";
 
 export type Tone = "ok" | "wait" | "bad" | "gone";
@@ -25,6 +26,8 @@ export interface PodView {
   memOfLimit?: number;
   /** CPU 를 원하는 만큼 못 받음: limit = throttling, node = 노드 CPU 부족 */
   cpuShort?: "limit" | "node";
+  /** 이 Pod 를 고른 NetworkPolicy (방향별 이름) — 하나라도 있으면 그 방향은 기본 차단 */
+  netpol?: { ingress: string[]; egress: string[] };
   /** 주인 Deployment (없으면 ReplicaSet, 그것도 없으면 undefined) */
   owner?: string;
   rs?: string;
@@ -146,21 +149,25 @@ export function toneOf(p: Pod, status: string): Tone {
 }
 
 export function buildView(c: Cluster): ClusterView {
-  const deps = c.api.list("Deployment", "default");
-  const rss = c.api.list("ReplicaSet", "default");
+  const deps = [...c.api.peekList("Deployment", "default")];
+  const rss = [...c.api.peekList("ReplicaSet", "default")];
   const colorOf = new Map(deps.map((d, i) => [d.metadata.name, i % OWNER_COLORS]));
   const rsOwner = new Map(rss.map((r) => [r.metadata.uid, controllerOf(r.metadata)?.name]));
   const rsName = new Map(rss.map((r) => [r.metadata.uid, r.metadata.name]));
   const rsRev = new Map(rss.map((r) => [r.metadata.uid, revisionOf(r)]));
   const depByName = new Map(deps.map((d) => [d.metadata.name, d]));
-  const allPods = c.api.list("Pod");
+  // 저장소의 오브젝트는 바뀔 때 통째로 바뀌므로(제자리 수정 없음) 복사 없이 읽는다 — 화면은 이것을 고치지 않는다
+  const allPods = [...c.api.peekList("Pod")];
+  const netpols = c.api.peekList("NetworkPolicy").length > 0;
   const pods: PodView[] = allPods.map((p) => {
     const status = podStatusText(p);
     const ref = controllerOf(p.metadata);
     const owner = ref ? (rsOwner.get(ref.uid) ?? ref.name) : undefined;
     const m = c.podMetrics(p);
     const memLimit = p.spec.containers[0] ? limitOf(p.spec.containers[0], "memory") : undefined;
+    const iso = netpols ? isolation(c, p) : undefined;
     return {
+      netpol: iso && (iso.ingress.length || iso.egress.length) ? { ingress: iso.ingress.map((n) => n.metadata.name), egress: iso.egress.map((n) => n.metadata.name) } : undefined,
       usage: m ? { cpu: m.cpu, memory: m.memory } : undefined,
       memOfLimit: m && memLimit ? m.memory / memLimit : undefined,
       cpuShort: m?.cpuState.reason,
@@ -176,7 +183,7 @@ export function buildView(c: Cluster): ClusterView {
       colorIndex: owner !== undefined ? (colorOf.get(owner) ?? hashIndex(owner)) : 0,
     };
   });
-  const nodes: NodeView[] = c.api.list("Node").map((n) => {
+  const nodes: NodeView[] = [...c.api.peekList("Node")].map((n) => {
     const u = nodeUsage(allPods, n.metadata.name);
     const mine = pods.filter((p) => p.pod.spec.nodeName === n.metadata.name);
     const actual = mine.reduce((a, p) => ({ cpu: a.cpu + (p.usage?.cpu ?? 0), memory: a.memory + (p.usage?.memory ?? 0) }), { cpu: 0, memory: 0 });

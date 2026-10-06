@@ -453,6 +453,8 @@ function secretData(o: KObject): void {
   if (o.kind === "NetworkPolicy") {
     // policyTypes 를 비우면: Ingress 는 늘, egress 규칙이 있으면 Egress 도 (실제 기본값)
     if (!o.spec.policyTypes?.length) o.spec.policyTypes = o.spec.egress?.length ? ["Ingress", "Egress"] : ["Ingress"];
+    // 포트의 protocol 을 비우면 TCP (실제 기본값)
+    for (const r of [...(o.spec.ingress ?? []), ...(o.spec.egress ?? [])]) for (const p of r.ports ?? []) p.protocol ??= "TCP";
     const peers = [...(o.spec.ingress ?? []).flatMap((r) => r.from ?? []), ...(o.spec.egress ?? []).flatMap((r) => r.to ?? [])];
     for (const p of peers) {
       const cidrs = p.ipBlock ? [p.ipBlock.cidr, ...(p.ipBlock.except ?? [])] : [];

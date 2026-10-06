@@ -75,6 +75,16 @@
 | `either \`defaultBackend\` or \`rules\` must be specified` | 규칙도 기본 backend 도 없는 Ingress | 규칙 하나나 기본 backend 를 둔다 |
 | `cannot add key "A", another key by that name already exists` / `is not a valid key name` | `--from-literal` 키가 겹치거나 `/` 같은 글자가 있다 | 키는 영문·숫자·`-`·`_`·`.` 만, 한 번씩 |
 
+## NetworkPolicy (5c)
+
+| 증상 / 출력 | 원인 | 고치는 법 |
+|---|---|---|
+| `curl: (28) … Connection timed out` (거부가 아니라 시간 초과) | NetworkPolicy 가 DROP — 받는 Pod 의 ingress 나 보내는 Pod 의 egress 가 격리돼 있고 맞는 허용 규칙이 없다 | `kubectl get netpol`·`describe networkpolicy` 로 그 Pod 를 고르는 정책을 찾아 허용 규칙을 더한다 |
+| deny 정책을 지웠는데도 막힘 | 다른 정책(허용 정책 포함)이 아직 그 Pod 를 고른다 — 고른 것 자체가 격리 | 그 Pod 를 고르는 정책을 모두 확인 |
+| egress 정책을 넣자 `Could not resolve host` · `;; connection timed out; no servers could be reached` | DNS(UDP 53) 도 나가는 트래픽이다 | kube-system 의 k8s-app=kube-dns 로 UDP·TCP 53 을 허용 |
+| 정책에 Service 포트(80)를 열었는데 막힘 | 정책은 DNAT 뒤의 Pod 포트(targetPort)로 판단 | targetPort(예: 8080)를 연다 |
+| Ingress 로 오는 요청을 클라이언트 IP(ipBlock)로 허용했는데 막힘 | Ingress 뒤의 Pod 가 보는 출발지는 ingress-nginx Pod | from 에 ingress-nginx Pod(podSelector)를 허용 |
+
 ## GitOps (6단계)
 
 | 증상 / 출력 | 원인 | 고치는 법 |

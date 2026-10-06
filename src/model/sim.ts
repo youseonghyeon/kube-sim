@@ -10,7 +10,8 @@ import { exampleById, type TryAction } from "./examples";
 import { advanceClock, EVENT_BURST_LIMIT } from "./simClock";
 import { CHECKSUM_ANNOTATION, helmUpgrade, helmUpgradeBlocked } from "./helm";
 import { buildView, type ClusterView } from "./view";
-import { clusterDef, exampleId, updateManifest } from "./store";
+import { clusterDef, exampleId, updateManifest, upsertManifest } from "./store";
+import { stableJson } from "../core/rng";
 
 /** 보관하는 트레이스 상한 (넘으면 오래된 것부터) */
 const TRACE_CAP = 20_000;
@@ -153,7 +154,10 @@ class SimController {
       });
     } else if (a.type === "ci-bump") this.ciBump(a.repo, a.file);
     else if (a.type === "git-rm") this.gitRemove(a.repo, a.file);
-    else if (a.type === "helm-upgrade") {
+    else if (a.type === "apply") {
+      c.trace.add("user", "user", `kubectl apply -f ${a.manifest.metadata.name}.yaml (${a.manifest.kind})`, { kind: a.manifest.kind, namespace: "default", name: a.manifest.metadata.name });
+      upsertManifest(a.manifest);
+    } else if (a.type === "helm-upgrade") {
       c.trace.add("user", "user", `helm upgrade: ConfigMap ${a.configMap} 의 설정 ${Object.entries(a.data).map(([k, v]) => `${k}=${v}`).join(", ")}${a.checksum ? ` · Pod 템플릿의 ${CHECKSUM_ANNOTATION} 주석 갱신` : " (차트에 checksum 주석 없음)"}`);
       clusterDef.value = helmUpgrade(clusterDef.peek(), a);
     } else this.curlNodePort(a.node, c.api.get("Service", a.service, "default")!.spec.ports[0]!.nodePort!);
@@ -182,6 +186,11 @@ class SimController {
       return head.files[a.file] ? undefined : `Git 에 ${a.file} 이(가) 없습니다${a.type === "git-rm" ? " (이미 지움)" : ""}`;
     }
     if (a.type === "helm-upgrade") return helmUpgradeBlocked(clusterDef.peek(), a);
+    if (a.type === "apply") {
+      const cur = clusterDef.peek().manifests.find((m) => m.kind === a.manifest.kind && m.metadata.name === a.manifest.metadata.name);
+      const live = c.api.get(a.manifest.kind, a.manifest.metadata.name, a.manifest.kind === "Application" ? "argocd" : "default");
+      return cur && live && stableJson(cur) === stableJson(a.manifest) ? "이미 적용했습니다" : undefined;
+    }
     if (a.type === "prestop") {
       const m = clusterDef.peek().manifests.find((x): x is DeploymentManifest => x.kind === "Deployment" && x.metadata.name === a.deployment);
       if (!m) return `Deployment ${a.deployment} 매니페스트가 없습니다`;

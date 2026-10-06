@@ -1,6 +1,6 @@
 # kube-sim 코어 설계
 
-만들면서 고쳐 온 지금의 설계다 (0~4·6단계 2026-10-02, 5a·5b 2026-10-06). 바뀌면 이 문서를 먼저 고친다. 실제와 다르게 줄인 것은 "축소판" 으로 적는다. 남은 결정은 맨 끝 "열린 결정".
+만들면서 고쳐 온 지금의 설계다 (0~4·6단계 2026-10-02, 5a·5b·5c 2026-10-06). 바뀌면 이 문서를 먼저 고친다. 실제와 다르게 줄인 것은 "축소판" 으로 적는다. 남은 결정은 맨 끝 "열린 결정".
 
 ## 1. 시계와 이벤트 큐 (`clock.ts`, `model/simClock.ts`)
 - 이벤트 = `{ at(ms), seq, actor, run() }`. `at` 다음 `seq`(넣은 순서) 로 정렬 → 결정론. 코어에 `Math.random`·`Date.now` 없음 (난수는 `rng.ts` 시드 고정).
@@ -94,6 +94,13 @@
 - 바깥 DNS: Ingress 규칙의 host 는 그 Ingress 의 ADDRESS 로 풀린다고 가정.
 - 축소판: MetalLB·오퍼레이터는 Pod 없는 부가 기능(장애 감지 즉시), 프록시는 StatefulSet 대신 Deployment, tailnet 이름은 가짜. Cluster 정책의 SNAT 출발지를 노드 InternalIP 로 보여 준다 — 실제(k3s flannel VXLAN)에서는 flannel.1·cni0 주소로 보일 수 있다(확인 안 함 — 추정).
 
+### 6-2. NetworkPolicy (5c, 2026-10-06, `net/netpol.ts`)
+- k3s 처럼 kube-router 가 노드에서 건다고 본다 (flannel 만으로는 정책이 무시되지만 k3s 는 kube-router 를 함께 돌린다).
+- 판단(`check`): 먼저 보내는 Pod 의 egress, 다음 받는 Pod 의 ingress. Pod 를 고르는 정책이 하나라도 있으면 그 방향은 기본 차단, 고른 정책들 중 어느 규칙이든 상대·포트가 맞으면 허용(합집합). 상대는 podSelector(같은 네임스페이스)·namespaceSelector(+podSelector)·ipBlock(except). 포트는 **DNAT 뒤** Pod 포트, ports 를 비우면 모든 프로토콜(ICMP 포함), 적으면 TCP/UDP 만.
+- 요청 흉내의 세 곳: 이름을 풀기 전 CoreDNS(가상 Pod: kube-system · k8s-app=kube-dns, UDP 53)로 가는 egress, Pod 로 배달하기 직전(egress → ingress), 노드 IP 로 가는 egress(ipBlock). 막히면 RST 가 아니라 DROP 이라 curl 은 연결 시간 초과(130초 문구), DNS 는 `Could not resolve host`·`connection timed out`. Pod 가 도는 노드에서 오는 트래픽(바깥 → NodePort 가 같은 노드로 와서 노드 IP 로 SNAT 된 것 포함)은 늘 허용.
+- API 서버: policyTypes 기본값(Ingress, egress 규칙이 있으면 Egress 도), 포트 protocol 기본 TCP, CIDR 검사, ipBlock 과 셀렉터를 한 상대에 같이 쓰면 거절.
+- 축소판: 네임스페이스는 default 와 kube-system(CoreDNS) 둘, named port·endPort·SCTP 없음, 연결 추적(응답 방향)은 따로 그리지 않음, 정책이 바뀌어도 이미 맺은 연결 개념 없음(요청 단위).
+
 ## 7. GitOps (6단계, `gitops/`)
 - Git 은 클러스터 밖의 사실이라 API 오브젝트가 아니다(`Cluster.git`). 커밋 = 파일 전체 스냅샷, SHA 는 내용으로 정해짐(결정론). Helm 렌더링 결과가 저장소에 있다고 본다(축소판).
 - Argo CD 는 Application 마다 "가져온 리비전"(과 source)을 따로 기억한다 → push 해도 다음 폴링(배경 3분)이나 Refresh 전에는 모른다. source 가 바뀌면 다시 가져온다. 라이브는 watch 로 바로 본다. 손으로 하는 sync 는 그때 HEAD 를 다시 읽는다.
@@ -111,4 +118,4 @@
 - 노드 간 Pod 트래픽을 패킷 단위(VXLAN 캡슐화)로 그릴지 — 지금은 문구로만
 - kube-proxy IPVS·nftables 모드 비교
 - conntrack(같은 연결은 같은 대상)·headless Service
-- 5단계(운영) 남은 후보: HPA(실사용 모양이 생겼으니 metrics 를 그대로 쓸 수 있다), NetworkPolicy, StatefulSet+PVC. 5a 뒤: kubelet node-pressure eviction(Evicted Pod)을 보여 줄지
+- 5단계(운영) 남은 후보: HPA(실사용 모양이 생겼으니 metrics 를 그대로 쓸 수 있다), StatefulSet+PVC. 5a 뒤: kubelet node-pressure eviction(Evicted Pod)을 보여 줄지

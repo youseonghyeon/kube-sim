@@ -133,3 +133,35 @@ describe("kubectl · API", () => {
     expect(c.api.get("NetworkPolicy", "eg")!.spec.policyTypes).toEqual(["Ingress", "Egress"]);
   });
 });
+
+describe("인스펙터 폼 ↔ spec (netpolForm)", () => {
+  test("규칙 줄로 펴고 다시 쓰면 같은 spec, DNS·IP 대역·어디든·여러 상대(그대로 둠)", async () => {
+    const { netpolRows, setNetpolRows, parsePorts, ruleText } = await import("../src/model/netpolForm");
+    const spec = {
+      podSelector: { matchLabels: { app: "client" } },
+      policyTypes: ["Ingress", "Egress"] as ("Ingress" | "Egress")[],
+      ingress: [{ from: [{ podSelector: { matchLabels: { app: "a" } } }, { ipBlock: { cidr: "10.0.0.0/8" } }] }],
+      egress: [
+        { to: [{ podSelector: { matchLabels: { app: "api" } } }], ports: [{ protocol: "TCP" as const, port: 8080 }] },
+        { to: [{ namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": "kube-system" } }, podSelector: { matchLabels: { "k8s-app": "kube-dns" } } }], ports: [{ protocol: "UDP" as const, port: 53 }, { protocol: "TCP" as const, port: 53 }] },
+        { to: [{ ipBlock: { cidr: "192.168.0.0/24" } }] },
+        {},
+      ],
+    };
+    const rows = netpolRows(spec);
+    expect(rows.map((r) => [r.dir, r.peer, r.value, r.ports])).toEqual([
+      ["ingress", "other", "", ""],
+      ["egress", "app", "api", "8080"],
+      ["egress", "dns", "", "53/UDP, 53"],
+      ["egress", "cidr", "192.168.0.0/24", ""],
+      ["egress", "any", "", ""],
+    ]);
+    const copy = structuredClone(spec);
+    setNetpolRows(copy, rows);
+    expect(copy).toEqual(spec);
+    expect(parsePorts("80, 53/udp, */UDP")).toEqual({ ports: [{ protocol: "TCP", port: 80 }, { protocol: "UDP", port: 53 }, { protocol: "UDP" }] });
+    expect("error" in parsePorts("http")).toBe(true);
+    expect(ruleText("egress", spec.egress[1]!)).toBe("CoreDNS (kube-system) 로 · UDP 53, TCP 53");
+    expect(ruleText("ingress", spec.ingress[0]!)).toBe("app=a Pod 또는 10.0.0.0/8 에서 · 모든 포트");
+  });
+});

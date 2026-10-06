@@ -52,9 +52,18 @@ describe("예제", () => {
   for (const ex of EXAMPLES) {
     test(`${ex.id}: 불러와서 2분 돌려도 오류 없이 돌고, 해 볼 것의 명령이 모두 실행된다`, () => {
       const s = new DefSync();
-      s.reset(ex.build(), `예제 ${ex.title}`);
+      const def = ex.build();
+      s.reset(def, `예제 ${ex.title}`);
       s.cluster.runFor(120_000);
       for (const t of ex.tries) {
+        // kubectl apply -f 동작은 화면처럼 매니페스트에 더하고 반영한다 (다른 동작은 이 테스트에서 건너뜀)
+        if (t.action?.type === "apply") {
+          const m = t.action.manifest;
+          def.manifests = [...def.manifests.filter((x) => !(x.kind === m.kind && x.metadata.name === m.metadata.name)), structuredClone(m)];
+          s.sync(def);
+          s.cluster.runFor(5_000);
+          continue;
+        }
         if (!t.command) continue;
         const cmd = resolveCommand(s.cluster.api.list("Pod"), t.command)!;
         // curl 로 시작하면 클러스터 밖에서 (화면의 kubectl 창과 같음)

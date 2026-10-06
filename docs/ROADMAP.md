@@ -63,7 +63,7 @@
 - 메모: 사용자의 실제 구성(Tailscale funnel → Ingress → Service)을 예제로 만들 수 있다
 
 ## 5. 운영 (후보 — 시작할 때 고른다)
-- 후보: requests/limits 와 OOMKilled·CPU throttling(5a ✅), ConfigMap/Secret 변경과 재시작(5b ✅), HPA(메트릭 흉내로 replicas 조정), NetworkPolicy(기본 허용 → 정책이 하나라도 걸리면 기본 차단), StatefulSet + PVC(순서·고정 이름·고정 볼륨)
+- 후보: requests/limits 와 OOMKilled·CPU throttling(5a ✅), ConfigMap/Secret 변경과 재시작(5b ✅), NetworkPolicy(5c ✅), HPA(메트릭 흉내로 replicas 조정), StatefulSet + PVC(순서·고정 이름·고정 볼륨)
 
 ### 5a. requests/limits · OOMKilled · CPU throttling ✅ 2026-10-06 (사용자 선택)
 - 된 것: `resources.limits`(requests > limits 거절, limits 만 적으면 requests = limits), QoS 클래스, 이미지별 메모리(램프·누수)·CPU(수요·요청당 일) 모양, cgroup OOM·노드 OOM(oom_score·SystemOOM 이벤트), CPU 나눠 받기(requests 비율)·throttling → 응답 시간·probe timeout, `kubectl top pods|nodes`·`set resources --limits`·describe 의 Limits/QoS/OOMKilled·describe node 의 Limits·overcommit, 인스펙터(limits 편집·Pod 자원 막대·OOMKilled 이유), 노드 칸의 요청·사용, Pod 칩 배지(mem %·throttled), 예제 묶음 "자원" 3개
@@ -92,7 +92,9 @@
 - 만들 것: ConfigMap·Secret 오브젝트(Argo CD·apply 포함), 컨테이너 `env`·`envFrom`·`volumeMounts`(subPath)·`volumes`, kubelet 의 시작 시 해석·없을 때 오류와 재시도·volume 갱신 지연, 설정을 읽어 보여 주는 앱 이미지, `kubectl create configmap|secret`·`patch configmap|secret`·`get -o yaml`·`exec -- env|cat`, `base64 -d`, 화면(목록·인스펙터 편집·Pod 의 설정 출처), 예제 묶음 "설정"
 - 완료 기준: 예제의 "해 볼 것" 이 위 학습 포인트를 kubectl 출력·로그로 보여 주고 코어 동작이 트레이스 테스트로 고정된다. 네 가지 검증 통과
 
-### 5c. NetworkPolicy (2026-10-06 시작, 사용자 승인 — 5b 다음 후보)
+### 5c. NetworkPolicy ✅ 2026-10-06 (사용자 승인 — 5b 다음 후보)
+- 된 것: NetworkPolicy(기본값·검사), 요청 경로의 egress·ingress 검사(DNS·DNAT 뒤 포트·노드 예외·ICMP, DROP=시간 초과), `kubectl get/describe/delete networkpolicy`, Argo CD 추적, 화면(목록 +·개요 문장·규칙 편집 폼·Pod 의 격리·칩 배지 '격리 ←/→/⇄'), 예제 동작 `apply`(kubectl apply -f, 카드에 YAML), 예제 묶음 "네트워크 정책" 3개
+- 축소판: ARCHITECTURE 6-2
 - 왜: 홈 클러스터(k3s)는 flannel 위에 kube-router 가 NetworkPolicy 를 실제로 건다. 정책 하나 넣었더니 "갑자기 아무것도 안 되는" 일(시간 초과, DNS 실패)의 이유를 추측하지 않고 보게 한다.
 - 배우는 것
   - 기본은 모두 허용. Pod 를 고르는 정책이 **하나라도** 생기면 그 방향(ingress·egress)은 기본 차단으로 바뀌고, 정책들의 허용은 **더해진다**(합집합) — allow 정책만 남겨도 여전히 격리

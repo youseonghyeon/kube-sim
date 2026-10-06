@@ -400,6 +400,14 @@ function PodChip({ p, flash, focus }: { p: PodView; flash?: string; focus: Focus
             mem {Math.round(p.memOfLimit * 100)}%
           </span>
         )}
+        {p.netpol && (
+          <span
+            class="pod-badge np"
+            title={`NetworkPolicy 로 격리됨${p.netpol.ingress.length ? ` · 들어오는 것: ${p.netpol.ingress.join(", ")} 의 허용만` : ""}${p.netpol.egress.length ? ` · 나가는 것: ${p.netpol.egress.join(", ")} 의 허용만` : ""}`}
+          >
+            {p.netpol.ingress.length && p.netpol.egress.length ? "격리 ⇄" : p.netpol.ingress.length ? "격리 ←" : "격리 →"}
+          </span>
+        )}
         {p.cpuShort === "limit" && (
           <span class="pod-badge wait" title="CPU 를 원하는 만큼 못 받음 — limits.cpu 에 막혀 throttling (느려질 뿐 죽지 않음)">
             throttled

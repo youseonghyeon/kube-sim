@@ -1,5 +1,5 @@
 // 예제: 노드 + 매니페스트 + "해 볼 것"(학습 포인트를 직접 확인하는 행동).
-import { application, configMap, deployment, ingress, pdb, secret, service, type Manifest } from "../core/cluster";
+import { application, configMap, deployment, ingress, networkPolicy, pdb, secret, service, type Manifest } from "../core/cluster";
 
 const NET_SIM_REPO = "https://github.com/youseonghyeon/net-sim.git";
 import type { Pod } from "../core/api/types";
@@ -31,7 +31,9 @@ export interface TryStep {
     /** Git 에서 파일을 지우고 커밋 */
     | { type: "git-rm"; repo: string; file: string }
     /** helm upgrade 흉내: values 의 설정으로 ConfigMap 을 바꾸고, checksum 이면 Pod 템플릿의 checksum/config 주석도 (설정 해시) */
-    | { type: "helm-upgrade"; configMap: string; deployment: string; data: Record<string, string>; checksum: boolean };
+    | { type: "helm-upgrade"; configMap: string; deployment: string; data: Record<string, string>; checksum: boolean }
+    /** kubectl apply -f: 매니페스트를 더하거나 같은 이름의 것을 바꾼다 (카드에 YAML 이 보인다) */
+    | { type: "apply"; manifest: Manifest };
   /** 무엇을 보게 되나 (학습 포인트) */
   expect: string;
   /** 실패하는 것이 학습 포인트인 명령 (예: ClusterIP 로 ping) */
@@ -803,6 +805,106 @@ export const EXAMPLES: Example[] = [
       { title: "base64 풀기", command: "echo czNjcjN0IQ== | base64 -d", expect: "s3cr3t! — 그래서 Secret 은 Git 에 그대로 올리면 안 됩니다 (Sealed Secrets·External Secrets 같은 도구를 씁니다)." },
     ],
   },
+  {
+    id: "netpol-basics",
+    title: "NetworkPolicy 하나로 격리, 허용은 더하기",
+    summary: "정책이 없으면 모든 Pod 가 서로 닿습니다. web 을 고르는 정책이 하나라도 생기면 web 으로 들어오는 것은 기본 차단 — 허용 규칙을 가진 정책을 더해야 그만큼 열립니다. 막힌 요청은 거부가 아니라 버려져(DROP) 시간 초과가 됩니다.",
+    build: () => ({
+      nodes: [node("worker-1"), node("worker-2")],
+      manifests: [
+        deployment("web", { replicas: 2, image: "nginx:1.27", cpu: 50, memory: 32, port: 80 }),
+        service("web", { selector: { app: "web" }, port: 80 }),
+        deployment("client", { replicas: 1, image: "curlimages/curl:8.10.1", cpu: 50, memory: 32 }),
+        deployment("other", { replicas: 1, image: "curlimages/curl:8.10.1", cpu: 50, memory: 32 }),
+      ],
+    }),
+    tries: [
+      { title: "정책 없이", command: "kubectl exec {pod:other} -- curl http://web", expect: "아무 정책도 없으니 다 닿습니다 (기본 허용)." },
+      {
+        title: "web 을 고르는 deny 정책",
+        action: { type: "apply", manifest: networkPolicy("deny-web", { podSelector: { matchLabels: { app: "web" } }, policyTypes: ["Ingress"] }) },
+        expect: "web Pod 칩에 '격리 ←' 배지가 붙습니다. 허용 규칙이 없으니 web 으로 들어오는 것은 모두 막힙니다.",
+      },
+      { title: "다시 curl", command: "kubectl exec {pod:client} -- curl http://web", expectFail: true, expect: "curl: (28) … Connection timed out — 연결 거부가 아니라 시간 초과입니다. kube-router 가 패킷을 버려(DROP) 아무 답도 오지 않기 때문입니다. 단계의 kube-router 줄을 보세요." },
+      {
+        title: "client 만 허용하는 정책 더하기",
+        action: { type: "apply", manifest: networkPolicy("allow-client", { podSelector: { matchLabels: { app: "web" } }, ingress: [{ from: [{ podSelector: { matchLabels: { app: "client" } } }], ports: [{ protocol: "TCP", port: 80 }] }] }) },
+        expect: "deny-web 은 그대로 두고 정책을 더했습니다. 허용은 정책들의 합집합입니다.",
+      },
+      { title: "client 에서", command: "kubectl exec {pod:client} -- curl http://web", expect: "됩니다 — 단계에 'ingress 를 allow-client 가 허용' 이 보입니다." },
+      { title: "other 에서", command: "kubectl exec {pod:other} -- curl http://web", expectFail: true, expect: "여전히 시간 초과." },
+      { title: "deny-web 지우기", command: "kubectl delete networkpolicy deny-web", expect: "deny 를 지워도 allow-client 가 web 을 고르고 있으니 web 은 여전히 격리입니다. other 에서 다시 curl 해 보세요 — 그래도 막힙니다. '허용 정책' 도 고른 Pod 를 격리합니다." },
+      { title: "정책 보기", command: "kubectl describe networkpolicy allow-client", expect: "Allowing ingress traffic — To Port: 80/TCP, From: PodSelector app=client." },
+    ],
+  },
+  {
+    id: "netpol-egress",
+    title: "egress 를 막으면 DNS 부터 (그리고 targetPort)",
+    summary: "client 의 나가는 트래픽을 api 로만 열었더니 curl http://api 가 'Could not resolve host' 로 실패합니다. 이름 풀기(CoreDNS, UDP 53)도 나가는 트래픽이라서입니다. 또 정책은 DNAT 뒤의 Pod 포트로 판단해, Service 포트(80)가 아니라 targetPort(8080)를 열어야 합니다.",
+    build: () => ({
+      nodes: [node("worker-1"), node("worker-2")],
+      manifests: [
+        deployment("api", { replicas: 1, image: "example/api:1.1", cpu: 50, memory: 32, port: 8080 }),
+        service("api", { selector: { app: "api" }, port: 80, targetPort: 8080 }),
+        deployment("client", { replicas: 1, image: "curlimages/curl:8.10.1", cpu: 50, memory: 32 }),
+      ],
+    }),
+    tries: [
+      { title: "정책 없이", command: "kubectl exec {pod:client} -- curl http://api", expect: "됩니다 (api 는 준비에 5초)." },
+      {
+        title: "client 의 egress 를 api:80 으로만",
+        action: { type: "apply", manifest: networkPolicy("client-egress", { podSelector: { matchLabels: { app: "client" } }, policyTypes: ["Egress"], egress: [{ to: [{ podSelector: { matchLabels: { app: "api" } } }], ports: [{ protocol: "TCP", port: 80 }] }] }) },
+        expect: "client Pod 칩에 '격리 →' 배지.",
+      },
+      { title: "curl", command: "kubectl exec {pod:client} -- curl http://api", expectFail: true, expect: "curl: (6) Could not resolve host: api — api 에 닿기도 전에 CoreDNS 로 가는 DNS 질의(UDP 53)가 막혔습니다." },
+      { title: "nslookup", command: "kubectl exec {pod:client} -- nslookup api", expectFail: true, expect: ";; connection timed out; no servers could be reached" },
+      {
+        title: "DNS 허용 정책 더하기",
+        action: {
+          type: "apply",
+          manifest: networkPolicy("allow-dns", {
+            podSelector: { matchLabels: { app: "client" } },
+            policyTypes: ["Egress"],
+            egress: [{ to: [{ namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": "kube-system" } }, podSelector: { matchLabels: { "k8s-app": "kube-dns" } } }], ports: [{ protocol: "UDP", port: 53 }, { protocol: "TCP", port: 53 }] }],
+          }),
+        },
+        expect: "egress 를 격리할 때 거의 늘 함께 쓰는 정책입니다.",
+      },
+      { title: "다시 curl", command: "kubectl exec {pod:client} -- curl http://api", expectFail: true, expect: "이름은 풀렸지만 이번에는 시간 초과 — 정책은 DNAT 뒤를 봅니다. Service 포트 80 이 아니라 Pod 포트 8080 으로 가는데, 정책은 80 만 열었습니다." },
+      {
+        title: "정책을 targetPort 8080 으로",
+        action: { type: "apply", manifest: networkPolicy("client-egress", { podSelector: { matchLabels: { app: "client" } }, policyTypes: ["Egress"], egress: [{ to: [{ podSelector: { matchLabels: { app: "api" } } }], ports: [{ protocol: "TCP", port: 8080 }] }] }) },
+        expect: "같은 이름으로 다시 apply 해 바꿉니다.",
+      },
+      { title: "마지막 curl", command: "kubectl exec {pod:client} -- curl http://api", expect: "됩니다 — 'egress 를 client-egress 가 허용 (포트 8080)'." },
+    ],
+  },
+  {
+    id: "netpol-ingress",
+    title: "Ingress 컨트롤러 뒤의 Pod 지키기",
+    summary: "shop 은 바깥에서 Ingress 로만 받게 하고 싶습니다. Ingress 를 지나온 요청은 shop 이 보기에 클라이언트가 아니라 ingress-nginx Pod 에서 옵니다 — 그 Pod 만 허용하면 클러스터 안의 다른 Pod 는 shop 에 직접 닿지 못합니다.",
+    build: () => ({
+      nodes: [node("worker-1"), node("worker-2")],
+      manifests: [
+        deployment("ingress-nginx-controller", { replicas: 1, image: "registry.k8s.io/ingress-nginx/controller:v1.11.2", cpu: 100, memory: 128, port: 80 }),
+        service("ingress-nginx-controller", { selector: { app: "ingress-nginx-controller" }, port: 80, type: "LoadBalancer" }),
+        deployment("shop", { replicas: 2, image: "traefik/whoami:v1.10", cpu: 50, memory: 32, port: 80 }),
+        service("shop", { selector: { app: "shop" }, port: 80 }),
+        ingress("shop", { className: "nginx", rules: [{ host: "shop.example.com", http: { paths: [{ path: "/", pathType: "Prefix", backend: { service: { name: "shop", port: { number: 80 } } } }] } }] }),
+        deployment("client", { replicas: 1, image: "curlimages/curl:8.10.1", cpu: 50, memory: 32 }),
+      ],
+    }),
+    tries: [
+      {
+        title: "shop 은 ingress-nginx 에서 온 것만",
+        action: { type: "apply", manifest: networkPolicy("shop-from-ingress", { podSelector: { matchLabels: { app: "shop" } }, ingress: [{ from: [{ podSelector: { matchLabels: { app: "ingress-nginx-controller" } } }], ports: [{ protocol: "TCP", port: 80 }] }] }) },
+        expect: "shop Pod 칩에 '격리 ←'.",
+      },
+      { title: "바깥에서 Ingress 로", command: "curl http://shop.example.com/", expect: "됩니다. 단계의 마지막에 'ingress 를 shop-from-ingress 가 허용' — shop 이 본 출발지는 ingress-nginx Pod 의 IP 입니다 (whoami 의 RemoteAddr)." },
+      { title: "client 가 직접", command: "kubectl exec {pod:client} -- curl http://shop", expectFail: true, expect: "시간 초과 — 클러스터 안이라도 shop 에는 Ingress 를 거쳐야만 닿습니다." },
+      { title: "Pod 에서 보기", command: "kubectl describe networkpolicy shop-from-ingress", expect: "PodSelector app=shop · From PodSelector app=ingress-nginx-controller · To Port 80/TCP." },
+    ],
+  },
 ];
 
 
@@ -819,6 +921,7 @@ export const EXAMPLE_GROUPS: { label: string; ids: string[] }[] = [
   { label: "바깥 트래픽", ids: ["ingress", "source-ip", "tailscale"] },
   { label: "자원", ids: ["oom", "node-oom", "throttle"] },
   { label: "설정", ids: ["config-env", "config-checksum", "config-missing"] },
+  { label: "네트워크 정책", ids: ["netpol-basics", "netpol-egress", "netpol-ingress"] },
   { label: "GitOps", ids: ["gitops"] },
 ];
 

@@ -2,7 +2,7 @@
 
 쿠버네티스가 왜 이렇게 동작하는지 직접 구성하고 한 단계씩 보며 익히는 학습 시뮬레이터입니다. 브라우저에서 돌고, 실제 클러스터에 연결하지 않으며, 모든 동작은 결정론적입니다. 자매 프로젝트: [net-sim](../net-sim) (네트워크).
 
-- 지금 상태 (2026-10-06): [로드맵](docs/ROADMAP.md) 0~4·6단계와 5a·5b 완료 — 컨트롤 루프(Deployment·ReplicaSet·스케줄러·kubelet), 노드 장애, Service 네트워킹(kube-proxy iptables·CoreDNS·readiness), 롤링 업데이트·종료·PDB/drain, LoadBalancer·Ingress·Tailscale funnel, Argo CD 식 GitOps, requests/limits·OOMKilled·CPU throttling, ConfigMap·Secret 과 재시작. 남은 것은 5단계(운영)의 나머지.
+- 지금 상태 (2026-10-06): [로드맵](docs/ROADMAP.md) 0~4·6단계와 5a·5b·5c 완료 — 컨트롤 루프(Deployment·ReplicaSet·스케줄러·kubelet), 노드 장애, Service 네트워킹(kube-proxy iptables·CoreDNS·readiness), 롤링 업데이트·종료·PDB/drain, LoadBalancer·Ingress·Tailscale funnel, Argo CD 식 GitOps, requests/limits·OOMKilled·CPU throttling, ConfigMap·Secret 과 재시작, NetworkPolicy. 남은 것은 5단계(운영)의 나머지(HPA·StatefulSet).
 - 예제: 상단바의 예제 메뉴에서 고르면 노드·매니페스트가 깔리고, 인스펙터의 "해 볼 것" 버튼으로 시나리오를 돌립니다. 아래 서랍에 `kubectl`·`curl`·`argocd`·`git` 을 칠 수 있습니다.
 - 실행: `npm install && npm run dev` → http://localhost:5173
 - 검증: `npm run typecheck` · `npm test` · `npm run ui-check` · `npm run perf-check`

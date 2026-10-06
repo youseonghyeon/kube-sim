@@ -1,5 +1,5 @@
 // 왼쪽: 오브젝트 나무 (Deployment → ReplicaSet → Pod 수) 와 노드 목록. 고르면 인스펙터에 보인다.
-import { configMap, deployment, service } from "../core/cluster";
+import { configMap, deployment, networkPolicy, service } from "../core/cluster";
 import type { ClusterView } from "../model/view";
 import { currentView, sim } from "../model/sim";
 import { addManifest, addNodeDef, clusterDef, removeNodeDef, selection, uniqueDeploymentName } from "../model/store";
@@ -12,6 +12,7 @@ export function Sidebar() {
   const pdbs = sim.cluster.api.list("PodDisruptionBudget", "default");
   const ings = sim.cluster.api.list("Ingress", "default");
   const apps = sim.cluster.api.list("Application", "argocd");
+  const netpols = sim.cluster.api.list("NetworkPolicy", "default");
   const configs = [...sim.cluster.api.list("ConfigMap", "default"), ...sim.cluster.api.list("Secret", "default")];
   const sel = selection.value;
   const isSel = (kind: string, name: string) => sel?.kind === kind && sel.name === name;
@@ -130,6 +131,32 @@ export function Sidebar() {
           </button>
         ))}
         {!configs.length && <div class="side-empty">없음. + 또는 kubectl create configmap</div>}
+      </div>
+      <div class="side-section">
+        <div class="side-head">
+          <span>NetworkPolicy</span>
+          <button
+            class="icon-btn sm"
+            title={view.deployments[0] ? `NetworkPolicy 추가 — app=${view.deployments[0].d.spec.template.metadata.labels.app} 로 들어오는 것을 막는 정책 (설정 탭에서 허용 규칙을 더하세요)` : "NetworkPolicy 추가 — 고를 Deployment 가 먼저 있어야 합니다"}
+            aria-label="NetworkPolicy 추가"
+            disabled={!view.deployments[0]}
+            onClick={() => {
+              const app = view.deployments[0]!.d.spec.template.metadata.labels.app ?? view.deployments[0]!.name;
+              const name = uniqueDeploymentName(`deny-${app}`, "NetworkPolicy");
+              addManifest(networkPolicy(name, { podSelector: { matchLabels: { app } }, policyTypes: ["Ingress"] }));
+              selection.value = { kind: "NetworkPolicy", namespace: "default", name };
+            }}
+          >
+            <Icon name="plus" size={15} />
+          </button>
+        </div>
+        {netpols.map((n) => (
+          <button key={n.metadata.uid} class={`tree-row${isSel("NetworkPolicy", n.metadata.name) ? " sel" : ""}`} data-tree={`networkpolicy/${n.metadata.name}`} onClick={() => (selection.value = { kind: "NetworkPolicy", namespace: "default", name: n.metadata.name })}>
+            <span class="tree-name">{n.metadata.name}</span>
+            <span class="tree-kind mono">{Object.entries(n.spec.podSelector.matchLabels ?? {}).map(([k, v]) => `${k}=${v}`).join(",") || "모든 Pod"}</span>
+          </button>
+        ))}
+        {!netpols.length && <div class="side-empty">없음 — 모든 트래픽 허용. + 로 추가</div>}
       </div>
       {apps.length > 0 && (
         <div class="side-section">
