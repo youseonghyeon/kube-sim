@@ -631,7 +631,7 @@ function top(c: Cluster, pos: string[]): string {
           }
         }
         const a = n.status.allocatable;
-        return [n.metadata.name, `${cpu}m`, `${Math.round((cpu / a.cpu) * 100)}%`, `${mem}Mi`, `${Math.round((mem / a.memory) * 100)}%`];
+        return [n.metadata.name, `${cpu}m`, `${Math.floor((cpu * 100) / a.cpu)}%`, `${mem}Mi`, `${Math.floor((mem * 100) / a.memory)}%`];
       }),
     );
   }

@@ -1,7 +1,7 @@
 // 오른쪽 인스펙터: 고른 오브젝트의 개요·설정·describe·YAML. 아무것도 안 골랐으면 예제의 "해 볼 것".
 import { useSignal } from "@preact/signals";
 import { useEffect, useMemo } from "preact/hooks";
-import { controllerOf, isNodeReady, NODE_LEASE_NS, qosClass, type Application, type Deployment, type Ingress, type KObject, type Node, type Pod, type ReplicaSet, type Service } from "../core/api/types";
+import { controllerOf, isNodeReady, limitOf, NODE_LEASE_NS, qosClass, type Application, type Deployment, type Ingress, type KObject, type Node, type Pod, type ReplicaSet, type Service } from "../core/api/types";
 import type { DeploymentManifest, Manifest } from "../core/cluster";
 import { eventSource, nodeStatusText, podRestartsText, podStatusText, rolloutStatusLine, runKubectl } from "../core/kubectl";
 import { fmtAge, fmtCpu, fmtMem, parseCpu, parseMem } from "../core/units";
@@ -313,7 +313,7 @@ function PodResources({ p }: { p: Pod }) {
   if (!ct) return null;
   const m = sim.cluster.podMetrics(p);
   const req = ct.resources.requests;
-  const lim = ct.resources.limits ?? {};
+  const lim = { cpu: limitOf(ct, "cpu"), memory: limitOf(ct, "memory") };
   const cpu = m?.cpuState;
   return (
     <>
@@ -339,7 +339,7 @@ function PodResources({ p }: { p: Pod }) {
       {cpu?.reason && (
         <p class="note">
           {cpu.reason === "limit"
-            ? `CPU throttling: 앱은 ${fmtCpu(cpu.want)} 를 원하지만 limits.cpu ${fmtCpu(cpu.limit ?? 0)} 에 막혀 그만큼만 받습니다. 죽지는 않지만 응답이 ${(cpu.want / cpu.got).toFixed(1)}배 느려집니다.`
+            ? `CPU throttling: 앱은 ${fmtCpu(cpu.want)} 를 원하지만 limits.cpu ${fmtCpu(cpu.limit ?? 0)} 에 막혀 그만큼만 받습니다. 죽지는 않지만 응답이 ${cpu.got ? `${(cpu.want / cpu.got).toFixed(1)}배` : "아주 많이"} 느려집니다.`
             : `노드 CPU 가 모자라 requests 비율로 나눠 받습니다 (원하는 ${fmtCpu(cpu.want)} 중 ${fmtCpu(cpu.got)}). requests 가 클수록 더 받습니다.`}
         </p>
       )}

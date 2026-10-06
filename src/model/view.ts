@@ -1,5 +1,5 @@
 // 화면에 그릴 모양을 클러스터에서 뽑는다 (순수 함수 — 테스트 가능).
-import { controllerOf, isNodeReady, isPodReady, NODE_LEASE_NS, SERVICE_NAME_LABEL, type Application, type Deployment, type Ingress, type Node, type Pod, type ReplicaSet, type Service } from "../core/api/types";
+import { controllerOf, isNodeReady, isPodReady, limitOf, NODE_LEASE_NS, SERVICE_NAME_LABEL, type Application, type Deployment, type Ingress, type Node, type Pod, type ReplicaSet, type Service } from "../core/api/types";
 import type { Cluster } from "../core/cluster";
 import { nodeStatusText, podReadyText, podStatusText } from "../core/kubectl";
 import { DEFAULT_TOLERATION_SECONDS } from "../core/api/server";
@@ -159,7 +159,7 @@ export function buildView(c: Cluster): ClusterView {
     const ref = controllerOf(p.metadata);
     const owner = ref ? (rsOwner.get(ref.uid) ?? ref.name) : undefined;
     const m = c.podMetrics(p);
-    const memLimit = p.spec.containers[0]?.resources.limits?.memory;
+    const memLimit = p.spec.containers[0] ? limitOf(p.spec.containers[0], "memory") : undefined;
     return {
       usage: m ? { cpu: m.cpu, memory: m.memory } : undefined,
       memOfLimit: m && memLimit ? m.memory / memLimit : undefined,

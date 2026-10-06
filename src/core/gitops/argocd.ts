@@ -6,8 +6,8 @@
 // - prune 이 켜져 있어야 Git 에서 지운 리소스를 지운다. 꺼져 있으면 OutOfSync(requiresPruning) 로 남는다.
 // 축소판: Argo CD 는 Pod 없는 부가 기능, 대상 네임스페이스는 default 하나, 비교는 "Git 에 적은 필드가 라이브와 같은가"(기본값으로 채워진 필드는 무시),
 //         sync 는 즉시 끝남, 훅·sync wave·리소스 finalizer 없음.
-import { defaultContainerResources, refOf } from "../api/server";
-import type { Application, Container, HealthStatus, KObject, SyncStatus } from "../api/types";
+import { refOf } from "../api/server";
+import type { Application, HealthStatus, KObject, SyncStatus } from "../api/types";
 import type { TimerHandle } from "../clock";
 import type { Manifest } from "../cluster";
 import { Controller, nsKey, splitKey, type ComponentContext } from "../controllers/base";
@@ -311,10 +311,7 @@ export function diffFields(m: Manifest, live: KObject): string[] {
     }
     if (want !== have) out.push(`${path}: Git ${short(want)} · 라이브 ${short(have)}`);
   };
-  // API 서버가 채우는 기본값(limits 만 적으면 requests = limits)은 같은 것으로 본다
-  const spec = structuredClone(m.spec) as unknown as { template?: { spec?: { containers?: Container[] } } };
-  for (const ct of spec.template?.spec?.containers ?? []) defaultContainerResources(ct);
-  walk(spec, (live as { spec?: unknown }).spec, "spec");
+  walk(m.spec, (live as { spec?: unknown }).spec, "spec");
   walk(m.metadata.labels ?? {}, live.metadata.labels, "metadata.labels");
   const ann = (m.metadata as { annotations?: Record<string, string> }).annotations;
   if (ann) walk(ann, live.metadata.annotations ?? {}, "metadata.annotations");

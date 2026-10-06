@@ -64,12 +64,12 @@
 
 ### 5-1. 자원 — requests·limits·실사용 (5a, 2026-10-06)
 - 세 숫자가 따로 산다: requests(API·스케줄러가 보는 예약), limits(커널 cgroup 상한), 실사용(이미지 모양에서 계산 — `workloads.ts` `memoryAt`·`cpuM`·`workMs`). `kubectl top` = 실사용(`Cluster.podMetrics`).
-- API 서버: limits 만 적고 requests 를 비우면(0) requests = limits(`defaultContainerResources`), requests > limits 면 Invalid. 비교하는 쪽(Argo CD `diffFields`, 화면 드리프트)도 같은 기본값을 채워 비교한다 — 안 그러면 selfHeal 이 끝없이 sync 한다.
+- API 서버: limits 만 적고 requests 를 비우면(0) **Pod 에만** requests = limits (실제 SetDefaults_Pod — 템플릿은 적은 그대로라 limits 를 바꾸면 새 Pod 가 새 limits 로 채워지고, Argo CD·드리프트 비교에 보정이 필요 없다). requests > limits 면 Invalid (템플릿 포함). limits 0 은 상한 없음(`limitOf`) — kubelet 이 0 을 쿼터 없음으로 보는 것과 같다.
 - 메모리: 컨테이너가 시작하면 0 → `memMi`(램프 `memRampMs`) → 누수(`leakMiPerMin`). 시간에 대해 줄지 않으므로 "다음 OOM 시각" 을 이분 탐색(ms)으로 찾아 **배경 타이머** 하나(`oomWatch`)로 건다 — 매초 검사하지 않는다. 컨테이너가 뜨고 죽을 때·노드 자원이 바뀔 때 다시 건다.
   - cgroup OOM: 사용 > limits.memory → `kubelet.oom` → crash(137, `OOMKilled`) → 보통의 재시작·백오프.
-  - 노드 OOM: 컨테이너 사용 합 > 노드 메모리 → oom_score = 사용/노드×1000 + oom_score_adj(Guaranteed -997 · BestEffort 1000 · Burstable 1000-1000×requests/노드 를 2~999)가 가장 큰 것 하나 → 노드에 `SystemOOM` 이벤트.
-- CPU: 컨테이너마다 원하는 만큼(`cpuM`, limits.cpu 까지). 합이 노드 CPU 를 넘으면 requests 비율(cpu.shares, 최소 2m)로 물 채우기 분배. 덜 받은 비율만큼 응답이 느려진다: 응답 = `workMs` × 원함/받음. probe 도 같은 응답 시간이라 timeoutSeconds(기본 1초)를 넘으면 실패(`context deadline exceeded`). 분배는 도는 컨테이너가 바뀔 때만 다시 계산(`cpuCache`).
-- 축소판: kubelet 의 node-pressure eviction(memory.available)·시스템 예약(kube-reserved)·페이지 캐시 없음, CPU 는 CFS 주기·버스트 없이 비율로만, 요청 수가 CPU 사용을 늘리지 않음(수요는 이미지마다 고정), metrics-server 지연(15초) 없음.
+  - 노드 OOM: 컨테이너 사용 합 > 노드 메모리 → oom_score = 사용/노드×1000 + oom_score_adj(Guaranteed -997 · BestEffort 1000 · Burstable 1000-1000×requests/노드 를 3~999)가 가장 큰 것 하나 → 노드에 `SystemOOM` 이벤트.
+- CPU: 컨테이너마다 원하는 만큼(`cpuM`, limits.cpu 까지). 합이 노드 CPU 를 넘으면 requests 비율(cpu.shares, 최소 2m)로 물 채우기 분배. 덜 받은 비율만큼 응답이 느려진다: 응답 = `workMs` × 원함/받음 (받음은 반올림 전 값, 바닥 1m — 화면의 `0m` 에서도 끝이 있는 값). 지워지는 중(watch 가 오기 전)에 죽은 컨테이너는 재시작하지 않고 종료 상태(예: OOMKilled)를 남긴 채 정리된다. probe 도 같은 응답 시간이라 timeoutSeconds(기본 1초)를 넘으면 실패(`context deadline exceeded`). 분배는 도는 컨테이너가 바뀔 때만 다시 계산(`cpuCache`).
+- 축소판: kubelet 의 node-pressure eviction(memory.available)·시스템 예약(kube-reserved)·페이지 캐시 없음, CPU 는 CFS 주기·버스트 없이 비율로만, 요청 수가 CPU 사용을 늘리지 않음(수요는 이미지마다 고정), metrics-server 지연(15초) 없음. `kubectl top` 은 실제처럼 Mi·% 를 버림.
 
 ## 6. 네트워크 — 요청 단위 (2·4단계, `net/`)
 - ClusterIP·NodePort 는 API 서버가 정한다. kube-proxy 는 노드마다 Service·EndpointSlice 를 watch 해 그 노드의 규칙을 **1초 뒤**(RULE_SYNC_MS) 다시 쓴다 — 이 틈 때문에 Pod 삭제·롤아웃 중 요청이 실패하고 preStop 이 그것을 막는다. 요청은 **출발 노드의 규칙**으로 DNAT 된다(꺼진 노드의 규칙은 멈춰 있다).

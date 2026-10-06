@@ -292,7 +292,7 @@ function deliverToIp(c: Cluster, src: Source, req: Req, ip: string, port: number
   const slowWhy =
     cpu.reason === undefined
       ? ""
-      : ` — 앱이 CPU ${cpu.want}m 를 원하지만 ${cpu.got}m 만 받음 (${cpu.reason === "limit" ? `cpu limit ${cpu.limit}m 에 막혀 throttling` : "노드 CPU 가 모자라 requests 비율로 나눔"}) → 평소 ${Math.round((app.latencyMs * cpu.got) / cpu.want)}ms 걸릴 일이 ${ms}ms`;
+      : ` — 앱이 CPU ${cpu.want}m 를 원하지만 ${cpu.got}m 만 받음 (${cpu.reason === "limit" ? `cpu limit ${cpu.limit}m 에 막혀 throttling` : "노드 CPU 가 모자라 requests 비율로 나눔"}) → 평소 ${Math.round(app.workMs)}ms 걸릴 일이 ${ms}ms`;
   const seen = `(응답한 Pod: ${pod.metadata.name} · 응답 ${ms}ms · 앱이 본 출발지 ${src.ip}${src.xff ? ` · X-Forwarded-For: ${src.xff}` : ""} — 실제 curl 은 이 줄을 찍지 않습니다)`;
   if (app.sick || !app.warm) {
     steps.push({ kind: "response", actor: pod.metadata.name, text: `${pod.metadata.name} 이(가) 받았지만 앱이 준비되지 않음 → HTTP 503`, at: { pod: pod.metadata.name } });

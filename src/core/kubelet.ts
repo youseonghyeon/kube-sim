@@ -5,7 +5,7 @@
 // 노드 OOM killer 가 oom_score 로 희생자를 고른다. CPU 는 원하는 만큼(limit 까지) 받고, 노드가 모자라면 requests 비율로 나눈다 — 덜 받은 만큼 응답이 느려진다.
 // 축소판: kubelet 의 node-pressure eviction(memory.available)·시스템 예약·페이지 캐시는 없다. 노드 메모리는 컨테이너 사용 합만 센다.
 import { refOf, type WatchEvent } from "./api/server";
-import { NODE_LEASE_NS, qosClass, type Container, type ContainerState, type Node, type Pod, type QosClass } from "./api/types";
+import { limitOf, NODE_LEASE_NS, qosClass, type Container, type ContainerState, type Node, type Pod, type QosClass } from "./api/types";
 import type { TimerHandle } from "./clock";
 import type { ComponentContext } from "./controllers/base";
 import { setCondition } from "./scheduler";
@@ -85,6 +85,8 @@ interface PodRt {
   ct: Container;
   image?: ImageSpec;
   qos: QosClass;
+  /** 지워지는 중에 죽은 컨테이너의 종료 (정리할 때 그대로 남긴다) */
+  lastExit?: { exitCode: number; reason: string };
 }
 
 export class Kubelet {
@@ -594,7 +596,7 @@ export class Kubelet {
   }
 
   /** 요청 흉내가 묻는 것: 이 Pod 의 컨테이너가 지금 돌고 있는지, 고장인지 */
-  appState(podUid: string): { running: boolean; sick: boolean; warm: boolean; latencyMs: number; cpu: CpuState } | undefined {
+  appState(podUid: string): { running: boolean; sick: boolean; warm: boolean; latencyMs: number; workMs: number; cpu: CpuState } | undefined {
     if (!this.powered) return undefined;
     const rt = this.pods.get(podUid);
     if (!rt) return undefined;
@@ -602,12 +604,33 @@ export class Kubelet {
     const running = rt.stage === "running" || (rt.stage === "terminating" && !rt.sigterm);
     const p = this.ctx.api.peekList("Pod").find((x) => x.metadata.uid === podUid);
     const warmup = p ? (imageSpec(p.spec.containers[0]!.image)?.warmupMs ?? 0) : 0;
-    return { running, sick: rt.sick, warm: this.ctx.clock.now - (rt.startedAt ?? 0) >= warmup, latencyMs: this.latencyMs(rt), cpu: this.cpuState(podUid) };
+    return { running, sick: rt.sick, warm: this.ctx.clock.now - (rt.startedAt ?? 0) >= warmup, latencyMs: this.latencyMs(rt), workMs: rt.image?.workMs ?? DEFAULT_WORK_MS, cpu: this.cpuState(podUid) };
   }
 
   private crash(rt: PodRt, exitCode: number, reason = "Error"): void {
     const p = this.livePod(rt);
-    if (!p) return;
+    if (!p) {
+      // API 에서는 이미 지워지는 중인데 watch 가 아직 오지 않은 사이에 프로세스가 죽음: 재시작하지 않고 종료 상태만 남긴다 (곧 terminate 가 정리)
+      if (rt.stage === "running" && this.pods.has(rt.uid)) {
+        rt.timer?.cancel();
+        this.stopProbes(rt);
+        rt.alive = false;
+        this.cpuCache = undefined;
+        rt.stage = "crash-backoff";
+        rt.lastExit = { exitCode, reason };
+        const now = this.ctx.clock.now;
+        this.patchPod(rt, (o) => {
+          const cs = o.status.containerStatuses[0];
+          if (cs) {
+            cs.state = { terminated: { reason, exitCode, startedAt: rt.startedAt, finishedAt: now } };
+            cs.ready = false;
+            cs.started = false;
+          }
+        });
+        this.rearmOom();
+      }
+      return;
+    }
     this.stopProbes(rt);
     rt.alive = false;
     this.cpuCache = undefined;
@@ -673,13 +696,14 @@ export class Kubelet {
   private terminate(rt: PodRt, p: Pod): void {
     rt.timer?.cancel();
     this.stopProbes(rt);
-    const wasRunning = rt.stage === "running";
+    const wasRunning = rt.stage === "running" && rt.alive;
     rt.stage = "terminating";
     const c = p.spec.containers[0]!;
     const grace = (p.metadata.deletionGracePeriodSeconds ?? p.spec.terminationGracePeriodSeconds) * 1000;
     if (!wasRunning) {
       this.ctx.trace.add(this.actor, "kubelet.kill", `${rt.name} 삭제 요청 — 돌고 있는 컨테이너 없음 → 바로 정리`, refOf(p));
-      rt.timer = this.ctx.clock.after(100, this.actor, () => this.finish(rt, 0));
+      const last = rt.lastExit;
+      rt.timer = this.ctx.clock.after(100, this.actor, () => (last ? this.finish(rt, last.exitCode, last.reason) : this.finish(rt, 0)));
       return;
     }
     this.event(p, "Normal", "Killing", `Stopping container ${c.name}`);
@@ -762,7 +786,7 @@ export class Kubelet {
   private computeCpuAlloc(): Map<string, number> {
     const rts = this.alive();
     const out = new Map<string, number>();
-    const capOf = (r: PodRt) => Math.min(r.image?.cpuM ?? DEFAULT_CPU_M, r.ct.resources.limits?.cpu ?? Number.POSITIVE_INFINITY);
+    const capOf = (r: PodRt) => Math.min(r.image?.cpuM ?? DEFAULT_CPU_M, limitOf(r.ct, "cpu") ?? Number.POSITIVE_INFINITY);
     const total = rts.reduce((n, r) => n + capOf(r), 0);
     if (total <= this.def.cpu) {
       for (const r of rts) out.set(r.uid, capOf(r));
@@ -789,9 +813,9 @@ export class Kubelet {
   /** 이 Pod 컨테이너가 원하는 CPU 와 받는 CPU. 컨테이너가 없으면 0/0 */
   cpuState(podUid: string): CpuState {
     const rt = this.pods.get(podUid);
-    if (!rt?.alive) return { want: 0, got: 0, limit: rt?.ct.resources.limits?.cpu };
+    if (!rt?.alive) return { want: 0, got: 0, limit: rt ? limitOf(rt.ct, "cpu") : undefined };
     const want = rt.image?.cpuM ?? DEFAULT_CPU_M;
-    const limit = rt.ct.resources.limits?.cpu;
+    const limit = limitOf(rt.ct, "cpu");
     const got = Math.round(this.cpuAlloc().get(podUid) ?? want);
     const reason = got >= want ? undefined : limit !== undefined && got >= limit ? "limit" : "node";
     return { want, got, limit, reason };
@@ -800,9 +824,11 @@ export class Kubelet {
   /** 요청 하나의 응답 시간 (ms): 원하는 CPU 를 다 받으면 workMs, 덜 받으면 그 비율만큼 늘어난다 (CFS 쿼터를 기다림) */
   private latencyMs(rt: PodRt): number {
     const work = rt.image?.workMs ?? DEFAULT_WORK_MS;
-    const { want, got } = this.cpuState(rt.uid);
-    if (!want) return work;
-    return got > 0 ? (work * Math.max(want, got)) / got : Number.POSITIVE_INFINITY;
+    if (!rt.alive) return work;
+    const want = rt.image?.cpuM ?? DEFAULT_CPU_M;
+    // 반올림 전 몫으로 (0m 로 보여도 아주 조금은 받는다). 노드 CPU 가 0 이어도 끝이 있게 1m 를 바닥으로
+    const got = Math.max(1, this.cpuAlloc().get(rt.uid) ?? want);
+    return got >= want ? work : (work * want) / got;
   }
 
   /** metrics-server 가 읽어 가는 실사용 (kubectl top). 컨테이너가 없으면 undefined */
@@ -810,7 +836,7 @@ export class Kubelet {
     if (!this.powered) return undefined;
     const rt = this.pods.get(podUid);
     if (!rt?.alive) return undefined;
-    return { cpu: this.cpuState(podUid).got, memory: Math.round(this.memOf(rt)) };
+    return { cpu: this.cpuState(podUid).got, memory: Math.floor(this.memOf(rt)) };
   }
 
   /** 다음 OOM 시각을 찾아 감시를 다시 건다: 컨테이너가 limits.memory 를 넘는 때, 또는 노드 메모리 합이 노드 메모리를 넘는 때 중 이른 것 */
@@ -823,7 +849,7 @@ export class Kubelet {
     const now = this.ctx.clock.now;
     let when = Number.POSITIVE_INFINITY;
     for (const r of rts) {
-      const lim = r.ct.resources.limits?.memory;
+      const lim = limitOf(r.ct, "memory");
       if (lim !== undefined) when = Math.min(when, firstAbove((t) => this.memOf(r, t), lim, now, now + OOM_HORIZON_MS));
     }
     when = Math.min(when, firstAbove((t) => rts.reduce((n, r) => n + this.memOf(r, t), 0), this.def.memory, now, now + OOM_HORIZON_MS));
@@ -838,7 +864,7 @@ export class Kubelet {
   private checkOom(): void {
     if (this.stopped || !this.powered) return;
     for (const r of this.alive()) {
-      const lim = r.ct.resources.limits?.memory;
+      const lim = limitOf(r.ct, "memory");
       if (lim !== undefined && this.memOf(r) > lim) this.oomKill(r, `메모리 사용이 limits.memory ${fmtMem(lim)} 에 닿음 (더 할당할 수 없음) → 커널의 cgroup OOM killer 가 컨테이너 프로세스를 죽임 (SIGKILL)`);
     }
     const rts = this.alive();
@@ -849,13 +875,13 @@ export class Kubelet {
 
   /**
    * 노드 메모리가 넘침 → 커널 OOM killer 가 oom_score 가 가장 큰 프로세스를 죽인다.
-   * oom_score ≈ 사용량/노드 메모리 × 1000 + oom_score_adj (kubelet 이 QoS 로 정함: Guaranteed -997, BestEffort 1000, Burstable 1000 - 1000×requests/노드 메모리 를 2~999 로)
+   * oom_score ≈ 사용량/노드 메모리 × 1000 + oom_score_adj (kubelet 이 QoS 로 정함: Guaranteed -997, BestEffort 1000, Burstable 1000 - 1000×requests/노드 메모리 를 3~999 로)
    */
   private nodeOom(rts: PodRt[]): void {
     const cap = this.def.memory;
     const scored = rts
       .map((r) => {
-        const adj = r.qos === "Guaranteed" ? -997 : r.qos === "BestEffort" ? 1000 : Math.min(999, Math.max(2, 1000 - Math.floor((1000 * r.ct.resources.requests.memory) / cap)));
+        const adj = r.qos === "Guaranteed" ? -997 : r.qos === "BestEffort" ? 1000 : Math.min(999, Math.max(3, 1000 - Math.floor((1000 * r.ct.resources.requests.memory) / cap)));
         return { r, score: Math.floor((this.memOf(r) * 1000) / cap) + adj };
       })
       .sort((a, b) => b.score - a.score || this.memOf(b.r) - this.memOf(a.r) || (a.r.name < b.r.name ? -1 : 1));

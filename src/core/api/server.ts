@@ -410,8 +410,8 @@ export class ApiServer {
 
 /** API 서버의 기본값 채우기 (Deployment): 전략 RollingUpdate 25%/25%, progressDeadlineSeconds 600, revisionHistoryLimit 10 */
 /**
- * 컨테이너 resources 의 기본값과 검사 (Pod·ReplicaSet·Deployment 템플릿):
- * limits 만 적고 requests 를 비우면 requests = limits, requests 가 limits 보다 크면 Invalid (실제 API 서버와 같은 문구).
+ * 컨테이너 resources 의 기본값과 검사: limits 만 적고 requests 를 비우면 Pod 에서 requests = limits,
+ * requests 가 limits 보다 크면 Invalid (Pod·ReplicaSet·Deployment 템플릿 모두, 실제 API 서버와 같은 문구).
  */
 function resourceDefaults(o: KObject): void {
   let containers: Container[] | undefined;
@@ -423,7 +423,8 @@ function resourceDefaults(o: KObject): void {
   }
   if (!containers) return;
   containers.forEach((c, i) => {
-    defaultContainerResources(c);
+    // 기본값은 Pod 에만 (실제 SetDefaults_Pod) — 템플릿은 적은 그대로 두어, limits 를 바꾸면 새 Pod 가 새 limits 로 채워진다
+    if (o.kind === "Pod") defaultContainerResources(c);
     const r = c.resources.requests;
     const l = c.resources.limits;
     if (!l) return;
@@ -434,8 +435,8 @@ function resourceDefaults(o: KObject): void {
   });
 }
 
-/** limits 만 적고 requests 를 비우면(0) requests = limits — API 서버의 기본값. 비교하는 쪽(Argo CD·드리프트)도 같은 기본값을 써야 끝없이 다르다고 보지 않는다 */
-export function defaultContainerResources(c: Container): void {
+/** limits 만 적고 requests 를 비우면(0) requests = limits — API 서버가 Pod 에만 채우는 기본값 (템플릿에는 채우지 않으므로 Argo CD·드리프트 비교는 보정이 필요 없다) */
+function defaultContainerResources(c: Container): void {
   const r = c.resources.requests;
   const l = c.resources.limits;
   if (!l) return;

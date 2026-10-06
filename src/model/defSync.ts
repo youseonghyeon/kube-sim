@@ -1,7 +1,6 @@
 // 편집 중인 정의(노드 + 매니페스트)를 살아 있는 클러스터에 반영한다 (net-sim netSync 처럼 diff).
 // 처리 순서가 곧 의미다: 노드를 먼저 더하고(새 Pod 가 갈 곳), 매니페스트를 적용하고, 지운 노드는 마지막에 뺀다.
 // 매니페스트가 바뀌면 kubectl apply 와 같다 — 라이브에서 kubectl 로 바꾼 값은 매니페스트에 있는 필드만 덮인다.
-import { defaultContainerResources } from "../core/api/server";
 import { Cluster, type DeploymentManifest, type Manifest } from "../core/cluster";
 import { stableJson } from "../core/rng";
 import type { ClusterDef } from "./examples";
@@ -81,13 +80,10 @@ export class DefSync {
     const mi = m.spec.template.spec.containers[0]?.image;
     const li = live.spec.template.spec.containers[0]?.image;
     if (mi !== li) out.push(`image: 매니페스트 ${mi} · 라이브 ${li}`);
-    // API 서버의 기본값(limits 만 적으면 requests = limits)을 매니페스트 쪽에도 채워 비교한다
-    const mct = m.spec.template.spec.containers[0] ? structuredClone(m.spec.template.spec.containers[0]) : undefined;
-    if (mct) defaultContainerResources(mct);
-    const mr = mct?.resources.requests;
+    const mr = m.spec.template.spec.containers[0]?.resources.requests;
     const lr = live.spec.template.spec.containers[0]?.resources.requests;
     if (mr && lr && (mr.cpu !== lr.cpu || mr.memory !== lr.memory)) out.push("requests 가 다름");
-    const ml = mct?.resources.limits;
+    const ml = m.spec.template.spec.containers[0]?.resources.limits;
     const ll = live.spec.template.spec.containers[0]?.resources.limits;
     if ((ml?.cpu ?? -1) !== (ll?.cpu ?? -1) || (ml?.memory ?? -1) !== (ll?.memory ?? -1)) out.push("limits 가 다름");
     return out;

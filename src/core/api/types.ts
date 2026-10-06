@@ -359,6 +359,12 @@ export function podRequests(spec: PodSpec): Resources {
 
 export type QosClass = "Guaranteed" | "Burstable" | "BestEffort";
 
+/** 컨테이너의 실제 상한: limits 를 적지 않았거나 0 이면 상한 없음 (kubelet 은 0 을 쿼터 없음으로 본다) */
+export function limitOf(c: Container, key: "cpu" | "memory"): number | undefined {
+  const v = c.resources.limits?.[key];
+  return v ? v : undefined;
+}
+
 /**
  * QoS 클래스: 모든 컨테이너가 cpu·memory limits 를 갖고 requests == limits 면 Guaranteed,
  * requests·limits 가 하나도 없으면 BestEffort, 나머지는 Burstable. (requests 0 = 적지 않음)
@@ -368,9 +374,10 @@ export function qosClass(spec: PodSpec): QosClass {
   let guaranteed = true;
   for (const c of spec.containers) {
     const r = c.resources.requests;
-    const l = c.resources.limits ?? {};
-    if (r.cpu || r.memory || l.cpu !== undefined || l.memory !== undefined) any = true;
-    if (l.cpu === undefined || l.memory === undefined || r.cpu !== l.cpu || r.memory !== l.memory) guaranteed = false;
+    const lc = limitOf(c, "cpu");
+    const lm = limitOf(c, "memory");
+    if (r.cpu || r.memory || lc !== undefined || lm !== undefined) any = true;
+    if (lc === undefined || lm === undefined || r.cpu !== lc || r.memory !== lm) guaranteed = false;
   }
   return !any ? "BestEffort" : guaranteed ? "Guaranteed" : "Burstable";
 }
