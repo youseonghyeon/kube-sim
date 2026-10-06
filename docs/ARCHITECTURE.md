@@ -91,7 +91,8 @@
 
 ## 6. 네트워크 — 요청 단위 (2·4단계, `net/`)
 - ClusterIP·NodePort 는 API 서버가 정한다. kube-proxy 는 노드마다 Service·EndpointSlice 를 watch 해 그 노드의 규칙을 **1초 뒤**(RULE_SYNC_MS) 다시 쓴다 — 이 틈 때문에 Pod 삭제·롤아웃 중 요청이 실패하고 preStop 이 그것을 막는다. 요청은 **출발 노드의 규칙**으로 DNAT 된다(꺼진 노드의 규칙은 멈춰 있다).
-- `iptables-save` 모양: filter(KUBE-SERVICES·KUBE-EXTERNAL-SERVICES 의 has no endpoints REJECT), nat(KUBE-SERVICES → KUBE-SVC → 확률 1/n → KUBE-SEP → DNAT, 바깥은 KUBE-EXT, Local 은 KUBE-SVL, Pod 대역은 "pod traffic" 규칙).
+- `iptables-save` 모양: filter(KUBE-SERVICES·KUBE-EXTERNAL-SERVICES 의 has no endpoints REJECT, Local 인데 이 노드에 엔드포인트가 없으면 has no local endpoints DROP), nat(KUBE-SERVICES → KUBE-SVC → 확률 1/n → KUBE-SEP → DNAT, 바깥은 KUBE-EXT, Local 은 KUBE-SVL, Pod 대역은 "pod traffic" 규칙).
+- 보낼 엔드포인트: ready 인 것. 하나도 없으면 지워지는 중이지만 serving 인 것(ProxyTerminatingEndpoints, 1.28 GA) — 하나뿐인 Pod 를 지워도 preStop 동안은 그 Pod 가 받는다. Local 은 노드마다 같은 규칙(pkg/proxy/topology.go). Pod 에서 노드IP:NodePort 로 보낸 것은 Local 이어도 "pod traffic" 규칙으로 모든 엔드포인트(SNAT 없음).
 - 요청 한 번(`request.ts`)은 시뮬레이션 시간을 쓰지 않고 지금 상태로 한 번에 계산한다: (CoreDNS: resolv.conf search·ndots:5) → 출발 노드 규칙 DNAT → 경로(같은 노드 cni0, 다른 노드 flannel VXLAN — 문구로만) → 앱 응답(200·503·거부·시간 초과). 확률 선택은 Pod 이름 난수와 분리한 `netRng`. 컨테이너 안 도구는 curl·wget·ping·nslookup 만(축소판). ClusterIP 로 ping 은 답이 없다.
 - 출발지 IP 를 따라간다: `Source.ip`(받는 쪽이 볼 출발지)와 X-Forwarded-For. SNAT 에서 노드 IP 로, 프록시(ingress-nginx·Tailscale)는 새 연결이라 자기 Pod IP 가 되고 원래 출발지를 XFF 에 붙인다.
 - 부하 발생기(`traffic.ts`): 배경 타이머로 요청을 계속 계산, 실패만 트레이스에 남긴다.

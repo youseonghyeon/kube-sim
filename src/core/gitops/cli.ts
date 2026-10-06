@@ -124,7 +124,7 @@ function appList(c: Cluster): string {
       a.spec.project,
       a.status.sync.status,
       a.status.health.status,
-      a.spec.syncPolicy?.automated ? (a.spec.syncPolicy.automated.prune ? "Auto-Prune" : "Auto") : "<none>",
+      a.spec.syncPolicy?.automated ? (a.spec.syncPolicy.automated.prune ? "Auto-Prune" : "Auto") : "Manual",
       "<none>",
       a.spec.source.repoURL,
       a.spec.source.path,

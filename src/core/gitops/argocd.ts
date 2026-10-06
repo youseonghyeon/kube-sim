@@ -371,6 +371,22 @@ export function healthOf(o: KObject): HealthStatus {
       return o.spec.type === "LoadBalancer" && !o.status.loadBalancer?.ingress?.length ? "Progressing" : "Healthy";
     case "Ingress":
       return o.status.loadBalancer.ingress?.length ? "Healthy" : "Progressing";
+    // gitops-engine health_statefulset.go: 새 리비전·Ready 수가 모자라면 Progressing
+    case "StatefulSet": {
+      const st = o.status;
+      if ((st.observedGeneration ?? 0) < (o.metadata.generation ?? 0)) return "Progressing";
+      if (st.readyReplicas < o.spec.replicas) return "Progressing";
+      if (st.updateRevision && st.currentRevision !== st.updateRevision) return "Progressing";
+      return "Healthy";
+    }
+    // gitops-engine health_hpa.go: 메트릭·대상을 못 얻으면 Degraded, AbleToScale·ScalingLimited 가 True 면 Healthy
+    case "HorizontalPodAutoscaler": {
+      const cond = (t: string) => o.status.conditions.find((c) => c.type === t);
+      const bad = ["FailedGetResourceMetric", "FailedGetScale", "FailedUpdateScale", "FailedGetExternalMetric", "FailedGetPodsMetric", "FailedGetObjectMetric", "InvalidMetricSourceType", "InvalidSelector"];
+      if (o.status.conditions.some((c) => c.status === "False" && bad.includes(c.reason ?? ""))) return "Degraded";
+      if (cond("AbleToScale")?.status === "True" || cond("ScalingLimited")?.status === "True") return "Healthy";
+      return "Progressing";
+    }
     default:
       return "Healthy";
   }

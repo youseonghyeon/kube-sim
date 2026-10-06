@@ -280,7 +280,7 @@ function parseFlags(args: string[]): { pos: string[]; flags: Map<string, string>
   const flags = new Map<string, string>();
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
-    if (a === "-o" || a === "-n" || a === "-p") {
+    if (a === "-o" || a === "-n" || a === "-p" || a === "-l") {
       flags.set(a.slice(1), args[++i] ?? "");
     } else if (a.startsWith("--")) {
       const eq = a.indexOf("=");
@@ -317,15 +317,44 @@ function needWorkload(kind: Res, allowed: Kind[], verb: string): Kind {
 
 // ---------- get ----------
 
+/** get 의 -l / --selector (k=v,k!=v,k — 같음·다름·있음) — pick 이 목록을 거른다 */
+let labelSelector: ((labels: Record<string, string>) => boolean) | undefined;
+
+function parseLabelSelector(s: string): (labels: Record<string, string>) => boolean {
+  const reqs = s.split(",").map((x) => x.trim()).filter(Boolean).map((x) => {
+    const m = /^([\w./-]+)\s*(!=|==|=)?\s*([\w./-]*)$/.exec(x);
+    if (!m) throw new KubectlError(`error: unable to parse requirement: "${x}" (예: -l app=web)`);
+    return { key: m[1]!, op: m[2], value: m[3] ?? "" };
+  });
+  return (labels) => reqs.every((r) => (r.op === "!=" ? labels[r.key] !== r.value : r.op ? labels[r.key] === r.value : r.key in labels));
+}
+
 function get(c: Cluster, pos: string[], flags: Map<string, string>): string {
+  const sel = flags.get("l") ?? flags.get("selector");
+  labelSelector = sel !== undefined ? parseLabelSelector(sel) : undefined;
+  try {
+    return getInner(c, pos, flags);
+  } finally {
+    labelSelector = undefined;
+  }
+}
+
+function getInner(c: Cluster, pos: string[], flags: Map<string, string>): string {
   const { kind, names } = resourceArgs(pos);
   const wide = flags.get("o") === "wide";
   if (flags.get("o") === "yaml") return getYaml(c, kind, names);
   if (flags.has("o") && !wide) throw new KubectlError(`error: 출력 형식 "${flags.get("o")}" 는 아직 없습니다 (wide · yaml 만)`);
   if (kind === "all") {
-    const stss = c.api.list("StatefulSet", "default");
+    const stss = pick(c, "StatefulSet", c.api.list("StatefulSet", "default"), []);
     const stsTable = stss.length ? table(["NAME", "READY", "AGE"], stss.map((s) => [`statefulset.apps/${s.metadata.name}`, `${s.status.readyReplicas}/${s.spec.replicas}`, fmtAge(c.now - s.metadata.creationTimestamp)])) : "";
-    const parts = [getPods(c, [], false, true), getServices(c, [], true), getDeploys(c, [], true), getRs(c, [], true), stsTable].filter(Boolean);
+    const hs = pick(c, "HorizontalPodAutoscaler", c.api.list("HorizontalPodAutoscaler", "default"), []);
+    const hpaTable = hs.length
+      ? table(
+          ["NAME", "REFERENCE", "TARGETS", "MINPODS", "MAXPODS", "REPLICAS", "AGE"],
+          hs.map((h) => [`horizontalpodautoscaler.autoscaling/${h.metadata.name}`, `${h.spec.scaleTargetRef.kind}/${h.spec.scaleTargetRef.name}`, hpaTargets(h), String(h.spec.minReplicas ?? 1), String(h.spec.maxReplicas), String(h.status.currentReplicas), fmtAge(c.now - h.metadata.creationTimestamp)]),
+        )
+      : "";
+    const parts = [getPods(c, [], false, true), getServices(c, [], true), getDeploys(c, [], true), getRs(c, [], true), stsTable, hpaTable].filter(Boolean);
     return parts.join("\n\n") || "No resources found in default namespace.";
   }
   switch (kind) {
@@ -427,7 +456,11 @@ function getYaml(c: Cluster, kind: Res, names: string[]): string {
     .join("\n---\n");
 }
 
-function pick<T extends { metadata: { name: string } }>(c: Cluster, kind: Kind, items: T[], names: string[]): T[] {
+function pick<T extends { metadata: { name: string; labels?: Record<string, string> } }>(c: Cluster, kind: Kind, items: T[], names: string[]): T[] {
+  if (labelSelector) {
+    const sel = labelSelector;
+    items = items.filter((o) => sel(o.metadata.labels ?? {}));
+  }
   if (!names.length) return items;
   return names.map((n) => {
     const found = items.find((o) => o.metadata.name === n);

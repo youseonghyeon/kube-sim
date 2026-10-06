@@ -138,7 +138,7 @@ describe("externalTrafficPolicy (NodePort·LoadBalancer 직접)", () => {
     expect(r.seenSource).toBe(CLIENT_IP);
     expect(c.metallb.announcer("default", "who")).toBe("w2");
     expect(c.requestExternal(`http://${c.api.get("Service", "who")!.status.loadBalancer!.ingress![0]!.ip}/`).seenSource).toBe(CLIENT_IP);
-    expect(c.kubeProxies.get("w1")!.iptablesSave()).toContain('"default/who has no local endpoints" -j KUBE-MARK-DROP');
+    expect(c.kubeProxies.get("w1")!.iptablesSave()).toMatch(/-A KUBE-EXTERNAL-SERVICES .*"default\/who has no local endpoints".* -j DROP/);
   });
 
   test("Local 인데 Pod 가 옮겨 가면 맡는 노드도 따라간다", () => {

@@ -105,6 +105,7 @@
 | 부하가 끝났는데 replicas 가 안 줄어듦 (AbleToScale ScaleDownStabilized) | 줄일 때는 지난 5분 추천 중 가장 큰 것을 따른다 | 정상 — 5분 기다린다 (`behavior.scaleDown.stabilizationWindowSeconds` 로 조절) |
 | 사용률이 높은데 더 안 늘어남 (ScalingLimited TooManyReplicas) | maxReplicas 에 닿았다 | maxReplicas 를 올리거나 앱·requests 를 본다 |
 | HPA 가 늘린 replicas 가 곧 원래대로, Pod 가 생겼다 지워지기를 되풀이 | Git(또는 kubectl apply 하는 매니페스트)에 replicas 가 있어 Argo CD selfHeal 이 되돌린다 | 매니페스트에서 replicas 를 뺀다 (HPA 에 맡김) |
+| Argo CD 에서 HPA 가 `Degraded` | HPA 조건 ScalingActive False FailedGetResourceMetric — 대개 requests.cpu 없음 | 컨테이너에 requests.cpu 를 적는다 |
 | kubectl scale 로 바꾼 replicas 가 15초 안에 되돌아감 | HPA 가 replicas 를 관리한다 | HPA 의 min/max 를 바꾼다 |
 
 ## GitOps (6단계)

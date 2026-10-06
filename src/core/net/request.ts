@@ -8,7 +8,7 @@ import { isPodReady, type Pod } from "../api/types";
 import type { Cluster } from "../cluster";
 import { imageSpec } from "../workloads";
 import { funnelOn, ingressAddress, lbIP, matchIngress, proxyName, readyEndpoints } from "./ingress";
-import type { SepRule, SvcRule } from "./kubeproxy";
+import { localSeps, type SepRule, type SvcRule } from "./kubeproxy";
 import { check, COREDNS, type Verdict } from "./netpol";
 import { pvNode } from "../storage";
 
@@ -238,8 +238,10 @@ function send(c: Cluster, src: Source, req: Req, ip: string, port: number, steps
 
 function viaService(c: Cluster, src: Source, rule: SvcRule, req: Req, steps: NetStep[], how?: "pod-to-lb"): NetResult {
   const where = `iptables@${src.node}`;
-  const local = !!src.outside && rule.externalTrafficPolicy === "Local";
-  const pool: SepRule[] = local ? rule.seps.filter((s) => s.nodeName === src.node) : rule.seps;
+  // Pod 에서 (자기 노드IP:NodePort·LB IP 로) 온 것은 KUBE-EXT 의 "pod traffic" 규칙이 KUBE-SVC 로 — Local 이어도 모든 엔드포인트, SNAT 없음
+  const podTraffic = !!src.outside && !!src.pod && rule.externalTrafficPolicy === "Local";
+  const local = !!src.outside && !podTraffic && rule.externalTrafficPolicy === "Local";
+  const pool: SepRule[] = local ? localSeps(rule, src.node) : rule.seps;
   if (!rule.seps.length) {
     const target = src.outside === "lb" || how ? `LoadBalancer IP ${rule.lbIP}:${rule.port} → filter 테이블 KUBE-EXTERNAL-SERVICES` : src.outside === "nodeport" ? `NodePort ${rule.nodePort} → filter 테이블 KUBE-EXTERNAL-SERVICES` : `${rule.clusterIP}:${rule.port} → filter 테이블 KUBE-SERVICES`;
     steps.push({
@@ -255,7 +257,7 @@ function viaService(c: Cluster, src: Source, rule: SvcRule, req: Req, steps: Net
     steps.push({
       kind: "dnat",
       actor: where,
-      text: `externalTrafficPolicy: Local — ${src.node} 에는 Service ${rule.name} 의 Ready Pod 가 없음 → KUBE-SVL 이 비어 있어 버림 (다른 노드로 넘기지 않는다)`,
+      text: `externalTrafficPolicy: Local — ${src.node} 에는 Service ${rule.name} 의 Ready Pod 가 없음 → filter 테이블 KUBE-EXTERNAL-SERVICES 의 "has no local endpoints" DROP 규칙으로 버림 (다른 노드로 넘기지 않는다)`,
       at: { service: rule.name, node: src.node },
     });
     steps.push({ kind: "fail", actor: "client", text: "응답 없음 → 연결 시간 초과 (Local 은 Pod 가 있는 노드로만 들어와야 한다 — LoadBalancer 는 그런 노드만 IP 를 맡는다)" });
@@ -268,14 +270,14 @@ function viaService(c: Cluster, src: Source, rule: SvcRule, req: Req, steps: Net
     src.outside === "lb"
       ? `LoadBalancer IP ${rule.lbIP}:${rule.port} → KUBE-EXT → `
       : src.outside === "nodeport"
-        ? `KUBE-NODEPORTS ${rule.nodePort} → KUBE-EXT → `
+        ? `KUBE-NODEPORTS ${rule.nodePort} → KUBE-EXT${podTraffic ? ` 의 "pod traffic" 규칙 (출발지가 Pod 대역이라 externalTrafficPolicy: Local 과 상관없이 모든 엔드포인트)` : ""} → `
         : how === "pod-to-lb"
           ? `LoadBalancer IP ${rule.lbIP}:${rule.port} → KUBE-EXT 의 "pod traffic" 규칙 (클러스터 안에서 온 것은 externalTrafficPolicy 와 상관없이) → `
           : `${rule.clusterIP}:${rule.port} 가 KUBE-SERVICES → `;
   const nodeIp = c.api.get("Node", src.node)?.status.addresses.find((a) => a.type === "InternalIP")?.address ?? src.node;
   let next = src;
   let snat = "";
-  if (src.outside && !local) {
+  if (src.outside && !local && !podTraffic) {
     // SNAT 뒤에는 받는 쪽이 보기에 출발지가 노드다 — Pod 이름표(podSelector)로는 알아볼 수 없다
     next = { ...src, ip: nodeIp, pod: undefined };
     snat = ` · externalTrafficPolicy: Cluster → 출발지 ${src.ip} 를 노드 IP ${nodeIp} 로 SNAT (어느 노드의 Pod 로 가도 응답이 이 노드로 돌아오게 — 원래 클라이언트 IP 는 사라짐)`;

@@ -19,6 +19,8 @@ export interface SepRule {
   port: number;
   pod: string;
   nodeName?: string;
+  /** false 면 지워지는 중(terminating)이지만 아직 serving — ready 인 것이 없을 때만 쓴다 */
+  ready: boolean;
 }
 
 export interface SvcRule {
@@ -32,8 +34,17 @@ export interface SvcRule {
   lbIP?: string;
   externalTrafficPolicy?: "Cluster" | "Local";
   chain: string;
-  /** ready 인 엔드포인트만 (iptables 모드) */
+  /** 보낼 엔드포인트: ready 인 것, 하나도 없으면 terminating·serving 인 것 (ProxyTerminatingEndpoints, 1.28 GA) */
   seps: SepRule[];
+  /** ready 이거나 terminating·serving 인 엔드포인트 전부 — Local 의 노드별 고르기에 쓴다 */
+  candidates: SepRule[];
+}
+
+/** externalTrafficPolicy: Local 에서 이 노드가 보낼 엔드포인트: 이 노드의 ready, 없으면 이 노드의 terminating·serving (pkg/proxy/topology.go) */
+export function localSeps(rule: SvcRule, node: string | undefined): SepRule[] {
+  const mine = rule.candidates.filter((s) => s.nodeName === node);
+  const ready = mine.filter((s) => s.ready);
+  return ready.length ? ready : mine;
 }
 
 export class KubeProxy {
@@ -83,9 +94,11 @@ export class KubeProxy {
     for (const r of next) {
       const old = before.get(r.chain);
       if (old && stableJson(old.seps) === stableJson(r.seps)) continue;
-      const what = r.seps.length
-        ? `엔드포인트 ${r.seps.length}개 (${r.seps.map((s) => `${s.ip}:${s.port}`).join(", ")}) 로 ${r.chain} 다시 씀`
-        : `ready 엔드포인트 없음 → REJECT 규칙 ("has no endpoints")`;
+      const what = !r.seps.length
+        ? `ready 엔드포인트 없음 → REJECT 규칙 ("has no endpoints")`
+        : r.seps[0]!.ready
+          ? `엔드포인트 ${r.seps.length}개 (${r.seps.map((s) => `${s.ip}:${s.port}`).join(", ")}) 로 ${r.chain} 다시 씀`
+          : `ready 엔드포인트 없음 → 지워지는 중이지만 아직 serving 인 ${r.seps.length}개 (${r.seps.map((s) => `${s.ip}:${s.port}`).join(", ")}) 로 보냄 (ProxyTerminatingEndpoints) — ${r.chain} 다시 씀`;
       this.ctx.trace.add(this.actor, "net.rules", `Service ${r.name}${r.portName ? `:${r.portName}` : ""} (${r.clusterIP}:${r.port}) → ${what}`, { kind: "Service", namespace: r.ns, name: r.name });
     }
     for (const [chain, old] of before) {
@@ -104,6 +117,13 @@ export class KubeProxy {
       // 바깥으로 열린 주소(LoadBalancer IP·NodePort)도 같은 이유로 거절
       if (r.lbIP) filter.push(`-A KUBE-EXTERNAL-SERVICES -d ${r.lbIP}/32 -p tcp -m comment --comment "${svc} has no endpoints" -m tcp --dport ${r.port} -j REJECT --reject-with icmp-port-unreachable`);
       if (r.nodePort) filter.push(`-A KUBE-EXTERNAL-SERVICES -p tcp -m comment --comment "${svc} has no endpoints" -m addrtype --dst-type LOCAL -m tcp --dport ${r.nodePort} -j REJECT --reject-with icmp-port-unreachable`);
+    }
+    // Local 인데 이 노드에 엔드포인트가 없으면: 바깥에서 온 것은 filter 테이블에서 버린다 (nat 의 KUBE-SVL 점프는 생략)
+    for (const r of this.rules) {
+      if (!r.seps.length || r.externalTrafficPolicy !== "Local" || localSeps(r, this.nodeName).length) continue;
+      const svc = `${r.ns}/${r.name}${r.portName ? `:${r.portName}` : ""}`;
+      if (r.lbIP) filter.push(`-A KUBE-EXTERNAL-SERVICES -d ${r.lbIP}/32 -p tcp -m comment --comment "${svc} has no local endpoints" -m tcp --dport ${r.port} -j DROP`);
+      if (r.nodePort) filter.push(`-A KUBE-EXTERNAL-SERVICES -p tcp -m comment --comment "${svc} has no local endpoints" -m addrtype --dst-type LOCAL -m tcp --dport ${r.nodePort} -j DROP`);
     }
     filter.push("COMMIT");
     const lines: string[] = ["*nat", ":KUBE-SERVICES - [0:0]", ":KUBE-NODEPORTS - [0:0]", ":KUBE-MARK-MASQ - [0:0]"];
@@ -124,9 +144,9 @@ export class KubeProxy {
           const svl = r.chain.replace("KUBE-SVC-", "KUBE-SVL-");
           // 클러스터 안(Pod 대역)에서 온 것은 Local 과 상관없이 모든 엔드포인트로
           lines.push(`-A ${ext} -s 10.244.0.0/16 -m comment --comment "pod traffic for ${svc} external destinations" -j ${r.chain}`);
-          lines.push(`-A ${ext} -m comment --comment "${svc} (externalTrafficPolicy: Local)" -j ${svl}`);
-          const local = r.seps.filter((s) => s.nodeName === this.nodeName);
-          if (!local.length) lines.push(`-A ${svl} -m comment --comment "${svc} has no local endpoints" -j KUBE-MARK-DROP`);
+          const local = localSeps(r, this.nodeName);
+          // 로컬 엔드포인트가 없으면 KUBE-SVL 로 넘기지 않는다 (filter 테이블의 DROP 이 맡음)
+          if (local.length) lines.push(`-A ${ext} -m comment --comment "${svc} (externalTrafficPolicy: Local)" -j ${svl}`);
           local.forEach((s, i) => {
             const left = local.length - i;
             const prob = left > 1 ? ` -m statistic --mode random --probability ${iptablesProbability(1 / left)}` : "";
@@ -161,15 +181,18 @@ export function buildRules(services: readonly Service[], slices: readonly Endpoi
     const mine = slices.filter((s) => (s.metadata.namespace ?? "default") === ns && s.metadata.labels["kubernetes.io/service-name"] === svc.metadata.name);
     for (const p of svc.spec.ports) {
       const key = `${ns}/${svc.metadata.name}${p.name ? `:${p.name}` : ""}`;
-      const seps: SepRule[] = [];
+      const candidates: SepRule[] = [];
       for (const sl of mine) {
         for (const e of sl.endpoints) {
-          if (!e.conditions.ready) continue;
+          const ready = e.conditions.ready;
+          if (!ready && !(e.conditions.serving && e.conditions.terminating)) continue;
           const ip = e.addresses[0]!;
-          seps.push({ chain: `KUBE-SEP-${chainHash(`${key}/tcp/${ip}:${p.targetPort}`)}`, ip, port: p.targetPort, pod: e.targetRef.name, nodeName: e.nodeName });
+          candidates.push({ chain: `KUBE-SEP-${chainHash(`${key}/tcp/${ip}:${p.targetPort}`)}`, ip, port: p.targetPort, pod: e.targetRef.name, nodeName: e.nodeName, ready });
         }
       }
-      seps.sort((a, b) => (a.ip < b.ip ? -1 : 1));
+      candidates.sort((a, b) => (a.ip < b.ip ? -1 : 1));
+      const readySeps = candidates.filter((s) => s.ready);
+      const seps = readySeps.length ? readySeps : candidates;
       out.push({
         ns,
         name: svc.metadata.name,
@@ -181,6 +204,7 @@ export function buildRules(services: readonly Service[], slices: readonly Endpoi
         externalTrafficPolicy: svc.spec.externalTrafficPolicy,
         chain: `KUBE-SVC-${chainHash(`${key}/tcp`)}`,
         seps,
+        candidates,
       });
     }
   }
