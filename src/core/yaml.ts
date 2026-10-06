@@ -30,6 +30,7 @@ function render(v: unknown, indent: number): string {
           const body = render(item, indent + 1).replace(/^\s+/, "");
           return `${pad}- ${body}`;
         }
+        if (item !== null && typeof item === "object") return `${pad}- ${Array.isArray(item) ? "[]" : "{}"}`;
         return `${pad}- ${scalar(item)}`;
       })
       .join("\n");

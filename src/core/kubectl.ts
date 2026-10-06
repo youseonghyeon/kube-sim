@@ -692,14 +692,13 @@ function describePod(c: Cluster, p: Pod): string {
 function describeNetpol(c: Cluster, o: NetworkPolicy): string {
   const peers = (list: NetworkPolicyPeer[] | undefined, label: string) => {
     if (!list?.length) return [`    ${label}: <any> (traffic not restricted by ${label === "From" ? "source" : "destination"})`];
-    return [
+    // 실제 출력처럼 상대마다 "From:"(To:) 머리를 따로
+    return list.flatMap((p) => [
       `    ${label}:`,
-      ...list.flatMap((p) =>
-        p.ipBlock
-          ? [`      IPBlock:`, `        CIDR: ${p.ipBlock.cidr}`, `        Except: ${(p.ipBlock.except ?? []).join(", ")}`]
-          : [...(p.namespaceSelector ? [`      NamespaceSelector: ${selectorText(p.namespaceSelector)}`] : []), ...(p.podSelector ? [`      PodSelector: ${selectorText(p.podSelector)}`] : [])],
-      ),
-    ];
+      ...(p.ipBlock
+        ? [`      IPBlock:`, `        CIDR: ${p.ipBlock.cidr}`, `        Except: ${(p.ipBlock.except ?? []).join(", ")}`]
+        : [...(p.namespaceSelector ? [`      NamespaceSelector: ${selectorText(p.namespaceSelector)}`] : []), ...(p.podSelector ? [`      PodSelector: ${selectorText(p.podSelector)}`] : [])]),
+    ]);
   };
   const ports = (ps: NetworkPolicyPort[] | undefined) => (ps?.length ? ps.map((p) => `    To Port: ${p.port ?? "<any>"}/${p.protocol ?? "TCP"}`) : ["    To Port: <any> (traffic allowed to all ports)"]);
   const types = o.spec.policyTypes ?? ["Ingress"];

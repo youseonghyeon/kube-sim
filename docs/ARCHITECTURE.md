@@ -72,6 +72,7 @@
 - 축소판: kubelet 의 node-pressure eviction(memory.available)·시스템 예약(kube-reserved)·페이지 캐시 없음, CPU 는 CFS 주기·버스트 없이 비율로만, 요청 수가 CPU 사용을 늘리지 않음(수요는 이미지마다 고정), metrics-server 지연(15초) 없음. `kubectl top` 은 실제처럼 Mi·% 를 버림.
 
 ### 5-2. 설정 — ConfigMap·Secret (5b, 2026-10-06)
+- Argo CD 비교는 Git 에 적은 필드 + 3-way(지난번 sync 가 넣었는데 Git 에서 지운 필드가 라이브에 남으면 OutOfSync).
 - 오브젝트: ConfigMap(data 평문), Secret(data base64 — 쓸 때 stringData 를 주면 API 서버가 data 로 바꾸고 stringData 는 저장하지 않음). spec 이 없어 `apply` 와 Argo CD 비교는 data 를 따로 다룬다 (Argo CD 는 Git 의 stringData 를 base64 로 바꿔 라이브 data 와 키 집합까지 비교).
 - kubelet 순서: 샌드박스 → **volume 마운트**(ConfigMap·Secret 이 없으면 FailedMount 로 ContainerCreating 에 머물며 2초부터 두 배·최대 2분 재시도 — 이미지 pull 도 안 함) → pull → 컨테이너 만들기 직전 **env 해석**(envFrom → env 순, 없으면 CreateContainerConfigError 로 10초마다 재시도).
 - env 는 컨테이너마다 시작할 때 한 번 (크래시 재시작이면 같은 Pod 라도 다시 해석; envFrom 에서 env 이름이 될 수 없는 키는 건너뛰고 InvalidEnvironmentVariableNames). volume 내용은 **Pod 단위**(`volData`): 마운트한 뒤로는 컨테이너가 돌든 아니든 ConfigMap·Secret 이 바뀌면 `VOLUME_SYNC_MS`(1분) 뒤 다시 맞추고, 컨테이너가 보는 파일은 거기서 만든다. subPath 는 컨테이너를 새로 만들 때(크래시 재시작 포함 — 그때 volume 도 다시 맞춤)만 다시 bind. 지워져도 이미 붙은 내용은 남긴다.
@@ -97,7 +98,7 @@
 ### 6-2. NetworkPolicy (5c, 2026-10-06, `net/netpol.ts`)
 - k3s 처럼 kube-router 가 노드에서 건다고 본다 (flannel 만으로는 정책이 무시되지만 k3s 는 kube-router 를 함께 돌린다).
 - 판단(`check`): 먼저 보내는 Pod 의 egress, 다음 받는 Pod 의 ingress. Pod 를 고르는 정책이 하나라도 있으면 그 방향은 기본 차단, 고른 정책들 중 어느 규칙이든 상대·포트가 맞으면 허용(합집합). 상대는 podSelector(같은 네임스페이스)·namespaceSelector(+podSelector)·ipBlock(except). 포트는 **DNAT 뒤** Pod 포트, ports 를 비우면 모든 프로토콜(ICMP 포함), 적으면 TCP/UDP 만.
-- 요청 흉내의 세 곳: 이름을 풀기 전 CoreDNS(가상 Pod: kube-system · k8s-app=kube-dns, UDP 53)로 가는 egress, Pod 로 배달하기 직전(egress → ingress), 노드 IP 로 가는 egress(ipBlock). 막히면 RST 가 아니라 DROP 이라 curl 은 연결 시간 초과(130초 문구), DNS 는 `Could not resolve host`·`connection timed out`. Pod 가 도는 노드에서 오는 트래픽(바깥 → NodePort 가 같은 노드로 와서 노드 IP 로 SNAT 된 것 포함)은 늘 허용.
+- 요청 흉내의 세 곳: 이름을 풀기 전 CoreDNS(가상 Pod: kube-system · k8s-app=kube-dns, UDP 53)로 가는 egress, Pod 로 배달하기 직전(egress → ingress), 노드 IP 로 가는 egress(ipBlock). 노드IP:NodePort 로 나간 것은 출발 노드에 DNAT 가 없으니 egress 를 거기서 한 번만 보고, 받는 노드가 SNAT 하면 출발지는 노드라 podSelector 로는 알아보지 못한다. 막히면 RST 가 아니라 DROP 이라 curl 은 연결 시간 초과(130초 문구), DNS 는 `Could not resolve host`·`connection timed out`. Pod 가 도는 노드에서 오는 트래픽(바깥 → NodePort 가 같은 노드로 와서 노드 IP 로 SNAT 된 것 포함)은 늘 허용.
 - API 서버: policyTypes 기본값(Ingress, egress 규칙이 있으면 Egress 도), 포트 protocol 기본 TCP, CIDR 검사, ipBlock 과 셀렉터를 한 상대에 같이 쓰면 거절.
 - 축소판: 네임스페이스는 default 와 kube-system(CoreDNS) 둘, named port·endPort·SCTP 없음, 연결 추적(응답 방향)은 따로 그리지 않음, 정책이 바뀌어도 이미 맺은 연결 개념 없음(요청 단위).
 

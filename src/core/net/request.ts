@@ -108,6 +108,8 @@ interface Source {
   xff?: string;
   /** 바깥에서 NodePort·LoadBalancer 로 들어옴 (KUBE-EXT 체인을 탐) */
   outside?: "nodeport" | "lb";
+  /** 보내는 Pod 의 egress 를 이미 출발 노드에서 봤음 (노드IP:NodePort 로 나간 것 — 받는 노드의 DNAT 뒤에 다시 보지 않는다) */
+  egressDone?: boolean;
 }
 
 /** Pod 안에서 도구를 실행했을 때 (kubectl exec <pod> -- curl …) */
@@ -165,6 +167,7 @@ function send(c: Cluster, src: Source, req: Req, ip: string, port: number, steps
     }
     const fromPod = src.pod ? c.api.peekList("Pod").find((p) => p.metadata.name === src.pod) : undefined;
     if (fromPod) {
+      // 출발 노드에서는 DNAT 가 없다 (KUBE-NODEPORTS 는 자기 노드 주소로 온 것만) → egress 는 노드IP:NodePort 로 여기서 한 번
       const v = check(c, { pod: fromPod, ip: src.ip }, { ip }, port, req.tool === "ping" ? "ICMP" : "TCP");
       if (!v.allowed) return dropped(req, steps, v, src.node, fromPod.metadata.name, ip, ip, port);
     }
@@ -177,7 +180,7 @@ function send(c: Cluster, src: Source, req: Req, ip: string, port: number, steps
       steps.push({ kind: "fail", actor: nn, text: `${nn}:${port} 에서 듣는 것도, KUBE-NODEPORTS 규칙도 없음 → 연결 거부`, at: { node: nn } });
       return refused(req, steps, ip, 1);
     }
-    return viaService(c, { ...src, node: nn, outside: "nodeport" }, np, req, steps);
+    return viaService(c, { ...src, node: nn, outside: "nodeport", egressDone: !!src.pod }, np, req, steps);
   }
   const proxy = c.kubeProxies.get(src.node);
   const rules = proxy?.currentRules ?? [];
@@ -247,7 +250,8 @@ function viaService(c: Cluster, src: Source, rule: SvcRule, req: Req, steps: Net
   let next = src;
   let snat = "";
   if (src.outside && !local) {
-    next = { ...src, ip: nodeIp };
+    // SNAT 뒤에는 받는 쪽이 보기에 출발지가 노드다 — Pod 이름표(podSelector)로는 알아볼 수 없다
+    next = { ...src, ip: nodeIp, pod: undefined };
     snat = ` · externalTrafficPolicy: Cluster → 출발지 ${src.ip} 를 노드 IP ${nodeIp} 로 SNAT (어느 노드의 Pod 로 가도 응답이 이 노드로 돌아오게 — 원래 클라이언트 IP 는 사라짐)`;
   } else if (local) snat = ` · externalTrafficPolicy: Local → 이 노드의 Pod 만 고르고 SNAT 하지 않음 (출발지 ${src.ip} 그대로)`;
   steps.push({
@@ -290,7 +294,7 @@ function deliverToIp(c: Cluster, src: Source, req: Req, ip: string, port: number
   }
   // NetworkPolicy: 보내는 Pod 의 egress, 받는 Pod 의 ingress (DNAT 뒤의 Pod IP·포트로 판단). 막히면 버림 → 시간 초과
   const fromPod = src.pod ? c.api.peekList("Pod").find((p) => p.metadata.name === src.pod) : undefined;
-  const v = check(c, { pod: fromPod, ip: src.ip }, { pod, ip }, port, req.tool === "ping" ? "ICMP" : "TCP");
+  const v = check(c, { pod: fromPod, ip: src.ip }, { pod, ip }, port, req.tool === "ping" ? "ICMP" : "TCP", { skipEgress: src.egressDone });
   if (!v.allowed) return dropped(req, steps, v, v.blockedAt === "egress" ? src.node : dst, v.blockedAt === "egress" ? src.pod! : pod.metadata.name, src.pod ? `${src.pod} (${src.ip})` : src.ip, ip, port);
   if (v.allowedBy.egress || v.allowedBy.ingress)
     steps.push({

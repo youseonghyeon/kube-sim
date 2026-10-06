@@ -4,6 +4,7 @@ import type { Clock } from "../clock";
 import { stableJson } from "../rng";
 import { b64encode } from "../base64";
 import { fmtCpu, fmtMem } from "../units";
+import { inCidr } from "../net/netpol";
 import type { Trace } from "../trace";
 import { CLUSTER_SCOPED, type Container, type Deployment, type KEvent, type KObject, type Kind, type ObjectMeta, type ObjectOf, type Pod, type PodDisruptionBudget, type Service } from "./types";
 
@@ -440,6 +441,15 @@ function resourceDefaults(o: KObject): void {
 
 const CIDR_RE = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d|[12]\d|3[0-2])$/;
 
+function validCidr(s: string): boolean {
+  const m = CIDR_RE.exec(s);
+  return !!m && [m[1], m[2], m[3], m[4]].every((x) => Number(x) <= 255);
+}
+
+function cidrBits(s: string): number {
+  return Number(s.split("/")[1]);
+}
+
 /** ConfigMap·Secret 의 키 규칙 (파일 이름이 되므로 / 같은 것은 안 된다) */
 export const CONFIG_KEY_RE = /^[-._a-zA-Z0-9]+$/;
 
@@ -457,8 +467,12 @@ function secretData(o: KObject): void {
     for (const r of [...(o.spec.ingress ?? []), ...(o.spec.egress ?? [])]) for (const p of r.ports ?? []) p.protocol ??= "TCP";
     const peers = [...(o.spec.ingress ?? []).flatMap((r) => r.from ?? []), ...(o.spec.egress ?? []).flatMap((r) => r.to ?? [])];
     for (const p of peers) {
+      if (!p.ipBlock && !p.podSelector && !p.namespaceSelector) throw new ApiError("Invalid", `NetworkPolicy.networking.k8s.io "${o.metadata.name}" is invalid: spec: Required value: must specify a peer`);
       const cidrs = p.ipBlock ? [p.ipBlock.cidr, ...(p.ipBlock.except ?? [])] : [];
-      for (const cidr of cidrs) if (!CIDR_RE.test(cidr)) throw new ApiError("Invalid", `NetworkPolicy.networking.k8s.io "${o.metadata.name}" is invalid: ipBlock.cidr: Invalid value: "${cidr}": must be a valid CIDR value, (e.g. 10.9.8.0/24 or 2001:db8::/64)`);
+      for (const cidr of cidrs) if (!validCidr(cidr)) throw new ApiError("Invalid", `NetworkPolicy.networking.k8s.io "${o.metadata.name}" is invalid: ipBlock.cidr: Invalid value: "${cidr}": must be a valid CIDR value, (e.g. 10.9.8.0/24 or 2001:db8::/64)`);
+      for (const ex of p.ipBlock?.except ?? [])
+        if (!(cidrBits(ex) > cidrBits(p.ipBlock!.cidr) && inCidr(ex.split("/")[0]!, p.ipBlock!.cidr)))
+          throw new ApiError("Invalid", `NetworkPolicy.networking.k8s.io "${o.metadata.name}" is invalid: ipBlock.except: Invalid value: "${ex}": must be a strict subset of \`cidr\``);
       if (p.ipBlock && (p.podSelector || p.namespaceSelector)) throw new ApiError("Invalid", `NetworkPolicy.networking.k8s.io "${o.metadata.name}" is invalid: may not specify more than 1 peer type (ipBlock 은 podSelector·namespaceSelector 와 같은 항목에 쓸 수 없습니다)`);
     }
     return;

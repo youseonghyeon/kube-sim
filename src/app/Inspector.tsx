@@ -1637,7 +1637,8 @@ function NetpolSettings({ name }: { name: string }) {
   if (!m) return <p class="note">이 NetworkPolicy 는 매니페스트에 없습니다 (kubectl 로 만듦).</p>;
   const apps = [...new Set(sim.cluster.api.list("Deployment", "default").map((d) => d.spec.template.metadata.labels.app).filter((x): x is string => !!x))];
   const rows = netpolRows(m.spec);
-  const types = m.spec.policyTypes ?? ["Ingress"];
+  // 매니페스트에 policyTypes 가 없으면 API 서버의 기본값과 같게 (egress 규칙이 있으면 Egress 도)
+  const types = m.spec.policyTypes ?? (m.spec.egress?.length ? ["Ingress", "Egress"] : ["Ingress"]);
   const setRows = (next: NetpolRow[]) => updateNetpolManifest(name, (x) => setNetpolRows(x.spec, next));
   const setRow = (i: number, patch: Partial<NetpolRow>) => setRows(rows.map((r, j) => (j === i ? { ...r, ...patch } : r)));
   const appOptions = (cur: string) => (
@@ -1671,7 +1672,7 @@ function NetpolSettings({ name }: { name: string }) {
                 disabled={types.includes(t) && types.length === 1}
                 onChange={(e) =>
                   updateNetpolManifest(name, (x) => {
-                    const cur = new Set(x.spec.policyTypes ?? ["Ingress"]);
+                    const cur = new Set(x.spec.policyTypes ?? types);
                     if (e.currentTarget.checked) cur.add(t);
                     else cur.delete(t);
                     x.spec.policyTypes = (["Ingress", "Egress"] as const).filter((k) => cur.has(k));
@@ -1687,7 +1688,7 @@ function NetpolSettings({ name }: { name: string }) {
       <div class="rules">
         {rows.map((r, i) => (
           <div key={i} class="np-row" data-np-rule={i}>
-            <select class="input" value={r.dir} onChange={(e) => setRow(i, { dir: e.currentTarget.value as NetpolRow["dir"] })} aria-label="방향">
+            <select class="input" value={r.dir} disabled={r.peer === "other"} onChange={(e) => setRow(i, { dir: e.currentTarget.value as NetpolRow["dir"] })} aria-label="방향">
               <option value="ingress">들어옴 ←</option>
               <option value="egress">나감 →</option>
             </select>

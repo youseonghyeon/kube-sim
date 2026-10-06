@@ -156,6 +156,8 @@ class SimController {
     else if (a.type === "git-rm") this.gitRemove(a.repo, a.file);
     else if (a.type === "apply") {
       c.trace.add("user", "user", `kubectl apply -f ${a.manifest.metadata.name}.yaml (${a.manifest.kind})`, { kind: a.manifest.kind, namespace: "default", name: a.manifest.metadata.name });
+      // 매니페스트가 그대로여도 다시 적용 (kubectl delete 로 라이브만 지운 뒤 같은 apply 를 다시 누른 경우)
+      this.syncer.forget(a.manifest.kind, a.manifest.metadata.name);
       upsertManifest(a.manifest);
     } else if (a.type === "helm-upgrade") {
       c.trace.add("user", "user", `helm upgrade: ConfigMap ${a.configMap} 의 설정 ${Object.entries(a.data).map(([k, v]) => `${k}=${v}`).join(", ")}${a.checksum ? ` · Pod 템플릿의 ${CHECKSUM_ANNOTATION} 주석 갱신` : " (차트에 checksum 주석 없음)"}`);

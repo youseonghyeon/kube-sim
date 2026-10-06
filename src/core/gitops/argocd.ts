@@ -325,11 +325,34 @@ export function diffFields(m: Manifest, live: KObject): string[] {
       /* 주석이 깨졌으면 지난번 것을 모른다고 본다 */
     }
     for (const k of new Set([...Object.keys(want), ...Object.keys(have).filter((x) => applied.has(x))])) if (want[k] !== have[k]) out.push(`data.${k}: Git ${short(m.kind === "Secret" ? (want[k] === undefined ? undefined : "(값)") : want[k])} · 라이브 ${short(m.kind === "Secret" ? (have[k] === undefined ? undefined : "(값)") : have[k])}`);
-  } else walk(m.spec, (live as { spec?: unknown }).spec, "spec");
+  } else {
+    walk(m.spec, (live as { spec?: unknown }).spec, "spec");
+    // 3-way: 지난번 sync 가 넣었는데 Git 에서 지운 필드가 라이브에 남아 있으면 다름 (예: NetworkPolicy 의 ingress 를 통째로 지움 = 모두 차단)
+    const removed = (applied: unknown, want: unknown, have: unknown, path: string) => {
+      if (!isObj(applied) || !isObj(have)) return;
+      for (const [k, a] of Object.entries(applied)) {
+        const w = isObj(want) ? want[k] : undefined;
+        const h = have[k];
+        if (w === undefined && h !== undefined) out.push(`${path}.${k}: Git (없음) · 라이브 ${short(h)}`);
+        else if (w !== undefined) removed(a, w, h, `${path}.${k}`);
+      }
+    };
+    let last: { spec?: unknown } | undefined;
+    try {
+      last = JSON.parse(live.metadata.annotations?.[LAST_APPLIED] ?? "null") ?? undefined;
+    } catch {
+      /* 주석이 깨졌으면 지난번 것을 모른다고 본다 */
+    }
+    removed(last?.spec, m.spec, (live as { spec?: unknown }).spec, "spec");
+  }
   walk(m.metadata.labels ?? {}, live.metadata.labels, "metadata.labels");
   const ann = (m.metadata as { annotations?: Record<string, string> }).annotations;
   if (ann) walk(ann, live.metadata.annotations ?? {}, "metadata.annotations");
   return out;
+}
+
+function isObj(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
 }
 
 function short(v: unknown): string {

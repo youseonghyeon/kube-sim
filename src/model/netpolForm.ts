@@ -63,7 +63,11 @@ export function netpolRows(spec: Spec): NetpolRow[] {
 }
 
 function ruleOf(row: NetpolRow): Rule {
-  if (row.peer === "other" && row.raw) return structuredClone(row.raw);
+  if (row.peer === "other" && row.raw) {
+    // 방향을 바꿔도 상대는 그대로 옮긴다 (from ↔ to) — 빠뜨리면 "어디든 허용" 이 된다
+    const peers = row.raw.from ?? row.raw.to;
+    return { ...(peers ? { [row.dir === "ingress" ? "from" : "to"]: structuredClone(peers) } : {}), ...(row.raw.ports ? { ports: structuredClone(row.raw.ports) } : {}) };
+  }
   const parsed = parsePorts(row.ports);
   const ports = "ports" in parsed ? parsed.ports : undefined;
   const peer: NetworkPolicyPeer | undefined =

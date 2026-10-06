@@ -149,8 +149,9 @@ export function toneOf(p: Pod, status: string): Tone {
 }
 
 export function buildView(c: Cluster): ClusterView {
-  const deps = [...c.api.peekList("Deployment", "default")];
-  const rss = [...c.api.peekList("ReplicaSet", "default")];
+  // api.list 와 같은 이름순 (색·자리가 만든 순서에 따라 바뀌지 않게)
+  const deps = [...c.api.peekList("Deployment", "default")].sort(byName);
+  const rss = [...c.api.peekList("ReplicaSet", "default")].sort(byName);
   const colorOf = new Map(deps.map((d, i) => [d.metadata.name, i % OWNER_COLORS]));
   const rsOwner = new Map(rss.map((r) => [r.metadata.uid, controllerOf(r.metadata)?.name]));
   const rsName = new Map(rss.map((r) => [r.metadata.uid, r.metadata.name]));
@@ -183,7 +184,7 @@ export function buildView(c: Cluster): ClusterView {
       colorIndex: owner !== undefined ? (colorOf.get(owner) ?? hashIndex(owner)) : 0,
     };
   });
-  const nodes: NodeView[] = [...c.api.peekList("Node")].map((n) => {
+  const nodes: NodeView[] = [...c.api.peekList("Node")].sort(byName).map((n) => {
     const u = nodeUsage(allPods, n.metadata.name);
     const mine = pods.filter((p) => p.pod.spec.nodeName === n.metadata.name);
     const actual = mine.reduce((a, p) => ({ cpu: a.cpu + (p.usage?.cpu ?? 0), memory: a.memory + (p.usage?.memory ?? 0) }), { cpu: 0, memory: 0 });
@@ -254,6 +255,10 @@ export function buildView(c: Cluster): ClusterView {
     replicaSets: rss,
     pods,
   };
+}
+
+function byName(a: { metadata: { name: string } }, b: { metadata: { name: string } }): number {
+  return a.metadata.name < b.metadata.name ? -1 : a.metadata.name > b.metadata.name ? 1 : 0;
 }
 
 function byCreation(a: PodView, b: PodView): number {

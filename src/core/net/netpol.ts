@@ -34,7 +34,8 @@ export function selects(sel: Selector | undefined, labels: Record<string, string
 }
 
 export function selectorText(sel: Selector | undefined): string {
-  const e = Object.entries(sel?.matchLabels ?? {});
+  // kubectl 의 FormatLabelSelector 처럼 키 순
+  const e = Object.entries(sel?.matchLabels ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
   return e.length ? e.map(([k, v]) => `${k}=${v}`).join(",") : "<none>";
 }
 
@@ -86,9 +87,9 @@ export function isolation(c: Cluster, pod: Pod): { ingress: NetworkPolicy[]; egr
 }
 
 /** from → to (port, proto) 가 지나가는가: 먼저 보내는 Pod 의 egress, 다음 받는 Pod 의 ingress */
-export function check(c: Cluster, from: Peer, to: Peer, port: number | undefined, proto: Proto): Verdict {
+export function check(c: Cluster, from: Peer, to: Peer, port: number | undefined, proto: Proto, opts: { skipEgress?: boolean } = {}): Verdict {
   const allowedBy: Verdict["allowedBy"] = {};
-  if (from.pod) {
+  if (from.pod && !opts.skipEgress) {
     const iso = isolation(c, from.pod).egress;
     const toNode = !to.pod && !to.labels && from.pod.status.hostIP === to.ip;
     if (iso.length && !toNode) {
