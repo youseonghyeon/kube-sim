@@ -1,7 +1,7 @@
 image:
   repository: ghcr.io/youseonghyeon/kube-sim
   # CI가 main push마다 커밋 SHA로 갱신한다. 첫 CI 전에는 latest.
-  tag: "544886e7e8431d2e39cc5b10befb45575b19c284"
+  tag: "c2677b739f3f497115c31e629643298d4f0f5d34"
   pullPolicy: IfNotPresent
 
 # ghcr 패키지가 private이면 pull secret 이름을 넣는다. public이면 비워 둔다.
