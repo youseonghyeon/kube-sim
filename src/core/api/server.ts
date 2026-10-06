@@ -438,14 +438,27 @@ function resourceDefaults(o: KObject): void {
   });
 }
 
-/** Secret 의 stringData(평문)는 저장하지 않고 data(base64)에 합친다 — 실제 API 서버와 같음 (같은 키면 stringData 가 이김) */
+/** ConfigMap·Secret 의 키 규칙 (파일 이름이 되므로 / 같은 것은 안 된다) */
+export const CONFIG_KEY_RE = /^[-._a-zA-Z0-9]+$/;
+
+/**
+ * Secret 의 stringData(평문)는 저장하지 않고 data(base64)에 합친다 — 실제 API 서버와 같음 (같은 키면 stringData 가 이김).
+ * ConfigMap·Secret 의 키 검사, Ingress 의 "규칙이나 기본 backend 중 하나는 있어야" 검사도 여기서.
+ */
 function secretData(o: KObject): void {
+  if (o.kind === "Ingress" && !o.spec.rules?.length && !o.spec.defaultBackend)
+    throw new ApiError("Invalid", `Ingress.networking.k8s.io "${o.metadata.name}" is invalid: spec: Invalid value: "": either \`defaultBackend\` or \`rules\` must be specified`);
+  if (o.kind !== "ConfigMap" && o.kind !== "Secret") return;
   if (o.kind === "ConfigMap") o.data ??= {};
-  if (o.kind !== "Secret") return;
-  o.type ??= "Opaque";
-  o.data = { ...(o.data ?? {}) };
-  for (const [k, v] of Object.entries(o.stringData ?? {})) o.data[k] = b64encode(v);
-  delete o.stringData;
+  else {
+    o.type ??= "Opaque";
+    o.data = { ...(o.data ?? {}) };
+    for (const [k, v] of Object.entries(o.stringData ?? {})) o.data[k] = b64encode(v);
+    delete o.stringData;
+  }
+  for (const k of Object.keys(o.data))
+    if (!CONFIG_KEY_RE.test(k))
+      throw new ApiError("Invalid", `${o.kind} "${o.metadata.name}" is invalid: data[${k}]: Invalid value: "${k}": a valid config key must consist of alphanumeric characters, '-', '_' or '.' (e.g. 'key.name',  or 'KEY_NAME',  or 'key-name', regex used for validation is '[-._a-zA-Z0-9]+')`);
 }
 
 /** limits 만 적고 requests 를 비우면(0) requests = limits — API 서버가 Pod 에만 채우는 기본값 (템플릿에는 채우지 않으므로 Argo CD·드리프트 비교는 보정이 필요 없다) */

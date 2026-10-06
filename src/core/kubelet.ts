@@ -36,6 +36,8 @@ export const CONFIG_RETRY_MS = 10_000;
 /** volume 을 못 붙일 때(FailedMount) 다시 시도: 2초부터 두 배, 최대 2분 (실제 kubelet 의 durationBeforeRetry 와 비슷) */
 export const MOUNT_RETRY_BASE_MS = 2_000;
 export const MOUNT_RETRY_MAX_MS = 120_000;
+/** env 이름 규칙 (v1.31 기본 — RelaxedEnvironmentVariableValidation 은 아직 꺼짐). envFrom 의 키가 어기면 건너뛴다 */
+const ENV_NAME_RE = /^[-._a-zA-Z][-._a-zA-Z0-9]*$/;
 /** OOM 시각을 찾을 때 내다보는 범위 — 이보다 먼 OOM 은 그때 가서 다시 찾는다 */
 const OOM_HORIZON_MS = 6 * 3600_000;
 
@@ -111,6 +113,10 @@ interface PodRt {
   /** 마운트한 파일들 (경로 → 내용) */
   files: Map<string, string>;
   mountBackoff: number;
+  /** volume 이 붙었는지 (그 뒤로는 컨테이너 상태와 상관없이 동기화한다) */
+  mounted: boolean;
+  /** volume 이름 → kubelet 이 마지막으로 맞춘 ConfigMap·Secret 내용 (Pod 단위) */
+  volData: Map<string, Record<string, string>>;
   /** 바뀐 ConfigMap·Secret 을 파일에 반영할 예약 */
   volumeSync?: TimerHandle;
 }
@@ -367,6 +373,8 @@ export class Kubelet {
       env: [],
       files: new Map(),
       mountBackoff: 0,
+      mounted: false,
+      volData: new Map(),
     };
     this.pods.set(rt.uid, rt);
     const now = this.ctx.clock.now;
@@ -484,6 +492,7 @@ export class Kubelet {
       return;
     }
     rt.env = env.env;
+    for (const msg of env.skipped) this.event(p, "Warning", "InvalidEnvironmentVariableNames", msg);
     rt.stage = "running";
     rt.startedAt = now;
     rt.alive = true;
@@ -621,8 +630,6 @@ export class Kubelet {
   private stopProbes(rt: PodRt): void {
     rt.probe?.cancel();
     rt.live?.cancel();
-    rt.volumeSync?.cancel();
-    rt.volumeSync = undefined;
   }
 
   private setReady(rt: PodRt, ready: boolean, now: number): void {
@@ -733,9 +740,9 @@ export class Kubelet {
     if (!p) return;
     rt.restarts++;
     rt.sick = false; // 새 프로세스 — 멈춰 있던 앱은 재시작으로 풀린다
-    // 같은 Pod 의 volume 은 그대로 (kubelet 이 맞춰 둔 최신 내용). env 는 start 에서 새로 만든다
-    const r = this.buildFiles(rt, rt.ns, true);
-    if (!("error" in r)) rt.files = r.files;
+    // 새 컨테이너를 만드는 Pod 동기화: volume 내용을 지금의 ConfigMap·Secret 으로 다시 맞추고, subPath 도 다시 bind. env 는 start 에서 새로 만든다
+    this.refreshVolumes(rt);
+    rt.files = this.deriveFiles(rt, true);
     this.event(p, "Normal", "Pulled", `Container image "${p.spec.containers[0]!.image}" already present on machine`);
     this.patchPod(rt, (o) => {
       const cs = o.status.containerStatuses[0];
@@ -747,6 +754,7 @@ export class Kubelet {
   private terminate(rt: PodRt, p: Pod): void {
     rt.timer?.cancel();
     this.stopProbes(rt);
+    rt.volumeSync?.cancel();
     const wasRunning = rt.stage === "running" && rt.alive;
     rt.stage = "terminating";
     const c = p.spec.containers[0]!;
@@ -821,15 +829,21 @@ export class Kubelet {
     return Object.fromEntries(Object.entries(o.data).map(([k, v]) => [k, b64decode(v) ?? ""]));
   }
 
-  /** env·envFrom → [이름, 값]. 없는 ConfigMap·Secret·키면 kubelet 의 실제 문구로 오류 */
-  private resolveEnv(c: Container, ns = "default"): { env: [string, string][] } | { error: string } {
+  /** env·envFrom → [이름, 값]. 없는 ConfigMap·Secret·키면 kubelet 의 실제 문구로 오류. env 이름이 될 수 없는 envFrom 키는 건너뛰고 알린다 */
+  private resolveEnv(c: Container, ns = "default"): { env: [string, string][]; skipped: string[] } | { error: string } {
     const out = new Map<string, string>();
+    const skipped: string[] = [];
     for (const f of c.envFrom ?? []) {
       const kind = f.configMapRef ? "ConfigMap" : "Secret";
       const name = f.configMapRef?.name ?? f.secretRef?.name ?? "";
       const data = this.readConfig(kind, name, ns);
       if (!data) return { error: `${kind.toLowerCase()} "${name}" not found` };
-      for (const [k, v] of Object.entries(data)) out.set(k, v);
+      const bad: string[] = [];
+      for (const [k, v] of Object.entries(data)) {
+        if (ENV_NAME_RE.test(k)) out.set(k, v);
+        else bad.push(k);
+      }
+      if (bad.length) skipped.push(`Keys [${bad.join(", ")}] from the EnvFrom ${kind === "ConfigMap" ? "configMap" : "secret"} ${ns}/${name} were skipped since they are considered invalid environment variable names.`);
     }
     for (const e of c.env ?? []) {
       const ref = e.valueFrom?.configMapKeyRef ?? e.valueFrom?.secretKeyRef;
@@ -843,32 +857,40 @@ export class Kubelet {
       if (!(ref.key in data)) return { error: `couldn't find key ${ref.key} in ${kind} ${ns}/${ref.name}` };
       out.set(e.name, data[ref.key]!);
     }
-    return { env: [...out] };
+    return { env: [...out], skipped };
   }
 
-  /** volume 내용을 파일로. subPath 마운트(frozenOnly=false 일 때만 새로 씀)는 처음 붙일 때만 */
-  private buildFiles(rt: PodRt, ns: string, onlyRefresh: boolean): { files: Map<string, string> } | { error: string; volume: string } {
-    const files = new Map(onlyRefresh ? rt.files : []);
+  /** 마운트에 쓰이는 ConfigMap·Secret volume 들 */
+  private configVolumes(rt: PodRt): { v: NonNullable<Pod["spec"]["volumes"]>[number]; kind: "ConfigMap" | "Secret"; name: string }[] {
+    const used = new Set((rt.ct.volumeMounts ?? []).map((m) => m.name));
+    return rt.volumes.filter((v) => used.has(v.name) && (v.configMap || v.secret)).map((v) => ({ v, kind: v.configMap ? "ConfigMap" : "Secret", name: v.configMap?.name ?? v.secret?.secretName ?? "" }));
+  }
+
+  /**
+   * volume 내용(Pod 단위, kubelet 이 맞춰 둔 것) → 컨테이너가 보는 파일. 디렉터리 마운트는 늘 volume 내용대로,
+   * subPath 는 컨테이너를 만들 때(withSubPath)만 그때의 volume 내용으로 — 돌고 있는 동안은 갱신되지 않는다.
+   */
+  private deriveFiles(rt: PodRt, withSubPath: boolean): Map<string, string> {
+    const files = new Map<string, string>();
     for (const m of rt.ct.volumeMounts ?? []) {
-      const v = rt.volumes.find((x) => x.name === m.name);
-      if (!v || (!v.configMap && !v.secret)) continue;
-      if (onlyRefresh && m.subPath) continue; // subPath 파일은 갱신되지 않는다
-      const kind = v.configMap ? "ConfigMap" : "Secret";
-      const name = v.configMap?.name ?? v.secret?.secretName ?? "";
-      const data = this.readConfig(kind, name, ns);
-      if (!data) {
-        if (onlyRefresh) continue; // 지워져도 이미 붙은 파일은 그대로
-        return { error: `${kind.toLowerCase()} "${name}" not found`, volume: v.name };
-      }
+      const data = rt.volData.get(m.name);
+      if (!data) continue;
       if (m.subPath) {
-        if (!(m.subPath in data)) return { error: `couldn't find key ${m.subPath} in ${kind} ${ns}/${name}`, volume: v.name };
-        files.set(m.mountPath, data[m.subPath]!);
+        const keep = withSubPath ? data[m.subPath] : rt.files.get(m.mountPath);
+        if (keep !== undefined) files.set(m.mountPath, keep);
         continue;
       }
-      for (const key of [...files.keys()]) if (key.startsWith(`${m.mountPath}/`)) files.delete(key);
       for (const [k, val] of Object.entries(data)) files.set(`${m.mountPath}/${k}`, val);
     }
-    return { files };
+    return files;
+  }
+
+  /** 이 Pod 의 ConfigMap·Secret volume 내용을 지금 것으로 (그 사이 다른 것도 바뀌었을 수 있으니 모두. 지워졌으면 옛 내용 그대로) */
+  private refreshVolumes(rt: PodRt): void {
+    for (const { v, kind, name } of this.configVolumes(rt)) {
+      const data = this.readConfig(kind, name, rt.ns);
+      if (data) rt.volData.set(v.name, { ...data });
+    }
   }
 
   /** 샌드박스 다음: ConfigMap·Secret volume 을 붙인다. 없으면 FailedMount 로 ContainerCreating 에 머물며 다시 시도 */
@@ -876,50 +898,60 @@ export class Kubelet {
     const p = this.livePod(rt);
     if (!p) return;
     rt.stage = "mounting";
-    const r = this.buildFiles(rt, rt.ns, false);
-    if ("error" in r) {
+    const fail = (volume: string, error: string) => {
       const delay = rt.mountBackoff || MOUNT_RETRY_BASE_MS;
       rt.mountBackoff = Math.min(delay * 2, MOUNT_RETRY_MAX_MS);
-      this.event(p, "Warning", "FailedMount", `MountVolume.SetUp failed for volume "${r.volume}" : ${r.error}`);
-      this.ctx.trace.add(this.actor, "kubelet.config", `${rt.name} volume ${r.volume} 를 붙일 수 없음 (${r.error}) → 컨테이너를 만들지 않고 ContainerCreating 에 머묾, ${delay / 1000}초 뒤 다시`, refOf(p));
+      this.event(p, "Warning", "FailedMount", `MountVolume.SetUp failed for volume "${volume}" : ${error}`);
+      this.ctx.trace.add(this.actor, "kubelet.config", `${rt.name} volume ${volume} 를 붙일 수 없음 (${error}) → 컨테이너를 만들지 않고 ContainerCreating 에 머묾, ${delay / 1000}초 뒤 다시`, refOf(p));
       rt.timer = this.ctx.clock.after(delay, this.actor, () => this.mount(rt));
-      return;
+    };
+    const vol = new Map<string, Record<string, string>>();
+    for (const { v, kind, name } of this.configVolumes(rt)) {
+      const data = this.readConfig(kind, name, rt.ns);
+      if (!data) return fail(v.name, `${kind.toLowerCase()} "${name}" not found`);
+      vol.set(v.name, { ...data });
     }
-    rt.files = r.files;
+    for (const m of rt.ct.volumeMounts ?? []) {
+      const data = vol.get(m.name);
+      const v = rt.volumes.find((x) => x.name === m.name);
+      if (m.subPath && data && !(m.subPath in data)) return fail(m.name, `couldn't find key ${m.subPath} in ${v?.configMap ? "ConfigMap" : "Secret"} ${rt.ns}/${v?.configMap?.name ?? v?.secret?.secretName}`);
+    }
+    rt.volData = vol;
+    rt.files = this.deriveFiles(rt, true);
+    rt.mounted = true;
     rt.mountBackoff = 0;
     this.pull(rt);
   }
 
-  /** ConfigMap·Secret 이 바뀜: volume 으로 쓰는 Pod 는 잠시 뒤 파일 갱신, env 로만 쓰는 Pod 는 그대로 (시작할 때 읽음) */
+  /**
+   * ConfigMap·Secret 이 바뀜: 그것을 volume 으로 붙인 Pod 는 (컨테이너가 돌든 아니든) 동기화 주기 뒤 volume 내용을 바꾸고,
+   * env 로 읽는 돌고 있는 컨테이너는 그대로 (시작할 때 읽음).
+   */
   private onConfig(kind: "ConfigMap" | "Secret", name: string, type: string): void {
     if (this.stopped || !this.powered) return;
-    const uses = (rt: PodRt) => ({
-      vol: rt.volumes.some((v) => (kind === "ConfigMap" ? v.configMap?.name : v.secret?.secretName) === name && (rt.ct.volumeMounts ?? []).some((m) => m.name === v.name && !m.subPath)),
-      env:
-        (rt.ct.envFrom ?? []).some((f) => (kind === "ConfigMap" ? f.configMapRef?.name : f.secretRef?.name) === name) ||
-        (rt.ct.env ?? []).some((e) => (kind === "ConfigMap" ? e.valueFrom?.configMapKeyRef?.name : e.valueFrom?.secretKeyRef?.name) === name),
-    });
+    const refers = (v: NonNullable<Pod["spec"]["volumes"]>[number]) => (kind === "ConfigMap" ? v.configMap?.name : v.secret?.secretName) === name;
+    const envUses = (rt: PodRt) =>
+      (rt.ct.envFrom ?? []).some((f) => (kind === "ConfigMap" ? f.configMapRef?.name : f.secretRef?.name) === name) ||
+      (rt.ct.env ?? []).some((e) => (kind === "ConfigMap" ? e.valueFrom?.configMapKeyRef?.name : e.valueFrom?.secretKeyRef?.name) === name);
     const envOnly: string[] = [];
     for (const rt of this.pods.values()) {
-      if (!rt.alive) continue;
-      const u = uses(rt);
-      if (u.env && type !== "DELETED") envOnly.push(rt.name);
-      if (!u.vol || type === "DELETED" || rt.volumeSync) continue;
+      if (rt.alive && envUses(rt) && type !== "DELETED") envOnly.push(rt.name);
+      if (!rt.mounted || type === "DELETED" || rt.volumeSync || !this.configVolumes(rt).some(({ v }) => refers(v))) continue;
       const epoch = this.epoch;
       rt.volumeSync = this.ctx.clock.after(VOLUME_SYNC_MS, this.actor, () => {
         rt.volumeSync = undefined;
-        if (epoch !== this.epoch || !this.pods.has(rt.uid) || !rt.alive) return;
+        if (epoch !== this.epoch || !this.pods.has(rt.uid) || rt.stage === "terminating") return;
+        this.refreshVolumes(rt);
         const before = rt.files;
-        const r = this.buildFiles(rt, rt.ns, true);
-        if ("error" in r) return;
-        const changed = [...r.files].filter(([k, v]) => before.get(k) !== v).map(([k]) => k);
-        rt.files = r.files;
-        if (!changed.length) return;
+        rt.files = this.deriveFiles(rt, false);
+        const changed = [...rt.files].filter(([k, v]) => before.get(k) !== v).map(([k]) => k);
+        const gone = [...before.keys()].filter((k) => !rt.files.has(k));
+        if (!changed.length && !gone.length) return;
         const frozen = (rt.ct.volumeMounts ?? []).filter((m) => m.subPath).map((m) => m.mountPath);
         this.ctx.trace.add(
           this.actor,
           "kubelet.config",
-          `${rt.name} 이 마운트한 ${kind} ${name} 이 바뀜 → (kubelet 동기화 주기) 파일 갱신: ${changed.join(", ")} — 앱이 파일을 다시 읽어야 반영${frozen.length ? ` · subPath 파일 ${frozen.join(", ")} 은 바뀌지 않음` : ""}`,
+          `${rt.name} 이 마운트한 ${kind} ${name} 이 바뀜 → (kubelet 동기화 주기) 파일 갱신: ${[...changed, ...gone.map((g) => `${g} (지움)`)].join(", ")}${rt.alive ? " — 앱이 파일을 다시 읽어야 반영" : " — 컨테이너가 뜨면 이 내용을 본다"}${frozen.length ? ` · subPath 파일 ${frozen.join(", ")} 은 바뀌지 않음 (컨테이너를 새로 만들 때만)` : ""}`,
           { kind: "Pod", namespace: rt.ns, name: rt.name },
         );
       });

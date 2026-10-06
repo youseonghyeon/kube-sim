@@ -41,10 +41,10 @@ function render(v: unknown, indent: number): string {
       .map(([k, x]) => {
         if (x !== null && typeof x === "object") {
           const empty = Array.isArray(x) ? !x.length : !Object.keys(x).length;
-          if (empty) return `${pad}${k}: ${Array.isArray(x) ? "[]" : "{}"}`;
-          return `${pad}${k}:\n${render(x, Array.isArray(x) ? indent : indent + 1)}`;
+          if (empty) return `${pad}${scalar(k)}: ${Array.isArray(x) ? "[]" : "{}"}`;
+          return `${pad}${scalar(k)}:\n${render(x, Array.isArray(x) ? indent : indent + 1)}`;
         }
-        return `${pad}${k}: ${scalar(x)}`;
+        return `${pad}${scalar(k)}: ${scalar(x)}`;
       })
       .join("\n");
   }
@@ -52,6 +52,7 @@ function render(v: unknown, indent: number): string {
 }
 
 function scalar(x: unknown): string {
-  if (typeof x === "string") return /^[\w./-][\w./:@=+-]*$/.test(x) && !/^(true|false|null|yes|no|on|off|y|n|~)$/i.test(x) && !/^[-+]?(\d+(\.\d*)?|\.\d+)([eE][-+]?\d+)?$/.test(x) ? x : JSON.stringify(x);
+  // 따옴표 없이 쓸 수 있는 평범한 문자열만 그대로 — ':' 로 끝나거나 '-' 하나뿐이면 YAML 이 다르게 읽으므로 감싼다 (키도 같은 규칙)
+  if (typeof x === "string") return /^[\w./-][\w./:@=+-]*$/.test(x) && !x.endsWith(":") && x !== "-" && !/^(true|false|null|yes|no|on|off|y|n|~)$/i.test(x) && !/^[-+]?(\d+(\.\d*)?|\.\d+)([eE][-+]?\d+)?$/.test(x) ? x : JSON.stringify(x);
   return String(x);
 }

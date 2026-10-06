@@ -112,7 +112,7 @@ describe("YAML", () => {
   test("중첩·배열·문자열 따옴표", async () => {
     const { toYaml } = await import("../src/core/yaml");
     expect(toYaml({ kind: "Pod", metadata: { name: "a", labels: { app: "web" } }, spec: { containers: [{ name: "c", image: "nginx:1.27" }] }, n: 3, e: [] })).toBe(
-      ["kind: Pod", "metadata:", "  name: a", "  labels:", "    app: web", "spec:", "  containers:", "  - name: c", "    image: nginx:1.27", "n: 3", "e: []"].join("\n"),
+      ["kind: Pod", "metadata:", "  name: a", "  labels:", "    app: web", "spec:", "  containers:", "  - name: c", "    image: nginx:1.27", '"n": 3', "e: []"].join("\n"), // 키 n 도 YAML 1.1 불리언이라 따옴표 (go-yaml v2 처럼)
     );
   });
 });

@@ -8,7 +8,8 @@ import type { NetResult } from "./net/request";
 import { deploymentHash, HASH_LABEL, revisionOf } from "./controllers/deployment";
 import { nodeUsage } from "./scheduler";
 import { fmtAge, fmtClock, fmtCpu, fmtMem, parseCpu, parseMem } from "./units";
-import { b64decode } from "./base64";
+import { b64bytes, isBase64 } from "./base64";
+import { CONFIG_KEY_RE } from "./api/server";
 import { toYaml } from "./yaml";
 
 export interface KubectlResult {
@@ -197,9 +198,44 @@ function fail(output: string): KubectlResult {
   return { ok: false, output, mutated: false };
 }
 
+/**
+ * 셸처럼 나눈다: 공백으로 자르되 따옴표 안은 한 덩어리, 따옴표는 어디에 있든 벗긴다 (--from-literal=KEY='hello world').
+ * 작은따옴표 안은 그대로, 큰따옴표 안은 \" 와 \\ 만 풀고, 따옴표 밖의 \ 는 다음 글자를 그대로.
+ */
 function tokenize(s: string): string[] {
-  // --flag="값" 처럼 = 뒤를 따옴표로 감싼 것도 따옴표를 벗긴다
-  return s.match(/--[\w-]+=(?:"[^"]*"|'[^']*')|"[^"]*"|'[^']*'|\S+/g)?.map((t) => t.replace(/^(--[\w-]+=)(["'])(.*)\2$/, "$1$3").replace(/^["']|["']$/g, "")) ?? [];
+  const out: string[] = [];
+  let cur = "";
+  let has = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]!;
+    if (ch === "'") {
+      const end = s.indexOf("'", i + 1);
+      const stop = end < 0 ? s.length : end;
+      cur += s.slice(i + 1, stop);
+      i = stop;
+      has = true;
+    } else if (ch === '"') {
+      i++;
+      while (i < s.length && s[i] !== '"') {
+        if (s[i] === "\\" && (s[i + 1] === '"' || s[i + 1] === "\\")) i++;
+        cur += s[i];
+        i++;
+      }
+      has = true;
+    } else if (ch === "\\" && i + 1 < s.length) {
+      cur += s[++i];
+      has = true;
+    } else if (/\s/.test(ch)) {
+      if (has) out.push(cur);
+      cur = "";
+      has = false;
+    } else {
+      cur += ch;
+      has = true;
+    }
+  }
+  if (has) out.push(cur);
+  return out;
 }
 
 function parseFlags(args: string[]): { pos: string[]; flags: Map<string, string> } {
@@ -485,7 +521,7 @@ function describe(c: Cluster, pos: string[]): string {
       return (
         kv([["Name", o.metadata.name], ["Namespace", "default"], ["Labels", labelsText(o.metadata.labels)], ["Annotations", "<none>"]]) +
         `\n\nType:  ${o.type}\n\nData\n====\n` +
-        Object.entries(o.data).map(([key, v]) => `${key}:  ${new TextEncoder().encode(b64decode(v) ?? "").length} bytes`).join("\n") +
+        Object.entries(o.data).map(([key, v]) => `${key}:  ${b64bytes(v)} bytes`).join("\n") +
         eventsBlock(c, o.metadata.uid)
       );
     case "Pod":
@@ -842,11 +878,20 @@ function createConfig(c: Cluster, kind: "ConfigMap" | "Secret", name: string | u
   if (!name || name.startsWith("-")) throw new KubectlError(`error: 이름이 필요합니다. 예: kubectl create ${cmd} app-config --from-literal=GREETING=hello`);
   const data: Record<string, string> = {};
   for (const a of args) {
+    if (!a.startsWith("--")) continue;
     const lit = /^--from-literal=(.*)$/.exec(a)?.[1];
-    if (lit === undefined) continue;
+    if (lit === undefined) {
+      const flag = a.split("=")[0]!;
+      if (flag === "--from-file" || flag === "--from-env-file") throw new KubectlError(`error: ${flag} 는 이 시뮬레이터에 파일이 없어 쓸 수 없습니다 (축소판) — --from-literal=KEY=값 으로 쓰세요`);
+      throw new KubectlError(`error: unknown flag: ${flag}`);
+    }
     const eq = lit.indexOf("=");
     if (eq <= 0) throw new KubectlError(`error: --from-literal 은 KEY=값 이어야 합니다 (받은 값 "${lit}")`);
-    data[lit.slice(0, eq)] = lit.slice(eq + 1);
+    const key = lit.slice(0, eq);
+    if (!CONFIG_KEY_RE.test(key))
+      throw new KubectlError(`error: "${key}" is not a valid key name for a ${kind}: a valid config key must consist of alphanumeric characters, '-', '_' or '.' (e.g. 'key.name',  or 'KEY_NAME',  or 'key-name', regex used for validation is '[-._a-zA-Z0-9]+')`);
+    if (key in data) throw new KubectlError(`error: cannot add key "${key}", another key by that name already exists in Data for ${kind} "${name}"`);
+    data[key] = lit.slice(eq + 1);
   }
   if (c.api.get(kind, name, "default")) throw new ApiError("AlreadyExists", `${KIND_PLURAL[kind]} "${name}" already exists`);
   userTrace(c, line);
@@ -974,7 +1019,7 @@ function patchConfig(c: Cluster, kind: "ConfigMap" | "Secret", name: string | un
   if (!cur) throw new ApiError("NotFound", `${KIND_PLURAL[kind]} "${name}" not found`);
   if (kind === "Secret")
     for (const [k, v] of Object.entries(body.data ?? {}))
-      if (v !== null && b64decode(v) === undefined) throw new ApiError("Invalid", `Secret "${name}" is invalid: data[${k}]: Invalid value: "${v}": illegal base64 data (평문은 stringData 로 주세요)`);
+      if (v !== null && !isBase64(v)) throw new ApiError("Invalid", `Secret "${name}" is invalid: data[${k}]: Invalid value: "${v}": illegal base64 data (평문은 stringData 로 주세요)`);
   userTrace(c, line);
   const rv = cur.metadata.resourceVersion;
   const out = c.api.patch(kind, name, "default", "kubectl", (o) => {
@@ -1172,7 +1217,8 @@ function execConfig(c: Cluster, p: Pod, tool: string, args: string[]): KubectlRe
     const all: [string, string][] = [["PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"], ["HOSTNAME", p.metadata.name], ...view.env, ["KUBERNETES_SERVICE_HOST", "10.96.0.1"], ["KUBERNETES_SERVICE_PORT", "443"], ["HOME", "/root"]];
     if (tool === "printenv" && args[0]) {
       const hit = all.filter(([k]) => k === args[0]);
-      return hit.length ? ok(hit.map(([, v]) => v).join("\n")) : { ok: false, output: "", mutated: false };
+      // 없는 변수면 printenv 가 exit 1 — kubectl 은 그 종료 코드를 알린다
+      return hit.length ? ok(hit.map(([, v]) => v).join("\n")) : fail("command terminated with exit code 1");
     }
     return ok(all.map(([k, v]) => `${k}=${v}`).join("\n"));
   }

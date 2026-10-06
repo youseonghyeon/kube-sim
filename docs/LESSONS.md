@@ -60,3 +60,4 @@
 - (2026-10-06) 입력칸이 "바깥 값이 바뀌면 고쳐 쓰던 글자를 덮는" effect(`useEffect(..., [value])`)는 처음 그린 뒤에도 한 번 늦게 돈다 — 그사이 입력이 지워지고, 오류 문구도 안 보였다(만든 직후 바로 치는 경우·자동 검사에서만 드러남). 이전 값을 ref 로 기억해 실제로 바뀔 때만 덮는다. 같은 입력칸에서 원래 값으로 되돌려 확정하면 오류도 지운다.
 - (2026-10-06) 파이썬 한 줄 `open(p,'w').write(open(p).read())` 로 소스 파일 하나(cluster.ts)를 통째로 비웠다 — 쓰기로 여는 순간 비워지고, 그다음에 읽는다. 커밋돼 있어 git 으로 되살렸다. 파일 편집은 "읽고 → 바꾸고 → 쓰기" 를 한 함수(edit)로만 하고, 큰 편집 전에는 커밋 상태를 확인한다.
 - (2026-10-06) 기본값·변환을 하는 API(Secret 의 stringData → data)를 만들면 비교하는 쪽(Argo CD)이 같은 변환을 해야 한다 — 5a 의 requests 기본값과 같은 교훈. 이번에는 테스트(selfHeal 이 10분 동안 sync 0번)로 먼저 고정했다.
+- (2026-10-06) volume 은 컨테이너가 아니라 Pod 의 것이다 — 파일 갱신을 "도는 컨테이너" 기준으로 짰더니 컨테이너가 뜨기 전(pull·CreateContainerConfigError)에 바뀐 ConfigMap 이 영영 반영되지 않았다. 상태를 어디에 매다는지(Pod 단위 volume 내용 → 컨테이너가 보는 파일)를 실제 구조와 맞춘다. 같은 리뷰에서: kubectl 인자는 셸처럼 따옴표를 벗겨야 공식 문서 예(--from-literal=password='…')가 그대로 돈다, ConfigMap·Secret apply 도 Deployment 처럼 3-way merge.

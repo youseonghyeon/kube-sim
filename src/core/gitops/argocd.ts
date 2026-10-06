@@ -10,7 +10,7 @@ import { refOf } from "../api/server";
 import { b64encode } from "../base64";
 import type { Application, HealthStatus, KObject, SyncStatus } from "../api/types";
 import type { TimerHandle } from "../clock";
-import type { Manifest } from "../cluster";
+import { configKeys, LAST_APPLIED, type Manifest } from "../cluster";
 import { Controller, nsKey, splitKey, type ComponentContext } from "../controllers/base";
 import { rolloutComplete } from "../controllers/deployment";
 import type { GitRepo } from "./git";
@@ -317,7 +317,14 @@ export function diffFields(m: Manifest, live: KObject): string[] {
     const want: Record<string, string> = { ...(m.data ?? {}) };
     if (m.kind === "Secret") for (const [k, v] of Object.entries(m.stringData ?? {})) want[k] = b64encode(v);
     const have = (live as { data?: Record<string, string> }).data ?? {};
-    for (const k of new Set([...Object.keys(want), ...Object.keys(have)])) if (want[k] !== have[k]) out.push(`data.${k}: Git ${short(m.kind === "Secret" ? (want[k] === undefined ? undefined : "(값)") : want[k])} · 라이브 ${short(m.kind === "Secret" ? (have[k] === undefined ? undefined : "(값)") : have[k])}`);
+    // 3-way: Git 에 없는 라이브 키는, 지난번 sync(apply)가 넣은 것일 때만 다름 (손으로 더한 키는 apply 가 지우지 않으므로 보지 않는다)
+    let applied: Set<string> = new Set();
+    try {
+      applied = configKeys(JSON.parse(live.metadata.annotations?.[LAST_APPLIED] ?? "null") ?? undefined);
+    } catch {
+      /* 주석이 깨졌으면 지난번 것을 모른다고 본다 */
+    }
+    for (const k of new Set([...Object.keys(want), ...Object.keys(have).filter((x) => applied.has(x))])) if (want[k] !== have[k]) out.push(`data.${k}: Git ${short(m.kind === "Secret" ? (want[k] === undefined ? undefined : "(값)") : want[k])} · 라이브 ${short(m.kind === "Secret" ? (have[k] === undefined ? undefined : "(값)") : have[k])}`);
   } else walk(m.spec, (live as { spec?: unknown }).spec, "spec");
   walk(m.metadata.labels ?? {}, live.metadata.labels, "metadata.labels");
   const ann = (m.metadata as { annotations?: Record<string, string> }).annotations;

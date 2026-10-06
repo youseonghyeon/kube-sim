@@ -74,7 +74,8 @@
 ### 5-2. 설정 — ConfigMap·Secret (5b, 2026-10-06)
 - 오브젝트: ConfigMap(data 평문), Secret(data base64 — 쓸 때 stringData 를 주면 API 서버가 data 로 바꾸고 stringData 는 저장하지 않음). spec 이 없어 `apply` 와 Argo CD 비교는 data 를 따로 다룬다 (Argo CD 는 Git 의 stringData 를 base64 로 바꿔 라이브 data 와 키 집합까지 비교).
 - kubelet 순서: 샌드박스 → **volume 마운트**(ConfigMap·Secret 이 없으면 FailedMount 로 ContainerCreating 에 머물며 2초부터 두 배·최대 2분 재시도 — 이미지 pull 도 안 함) → pull → 컨테이너 만들기 직전 **env 해석**(envFrom → env 순, 없으면 CreateContainerConfigError 로 10초마다 재시도).
-- env 는 컨테이너마다 시작할 때 한 번 (크래시 재시작이면 같은 Pod 라도 다시 해석). 파일은 Pod 단위: ConfigMap·Secret 이 바뀌면 watch 로 알고 `VOLUME_SYNC_MS`(1분) 뒤 non-subPath 파일만 다시 쓴다. 지워져도 이미 붙은 파일은 남긴다.
+- env 는 컨테이너마다 시작할 때 한 번 (크래시 재시작이면 같은 Pod 라도 다시 해석; envFrom 에서 env 이름이 될 수 없는 키는 건너뛰고 InvalidEnvironmentVariableNames). volume 내용은 **Pod 단위**(`volData`): 마운트한 뒤로는 컨테이너가 돌든 아니든 ConfigMap·Secret 이 바뀌면 `VOLUME_SYNC_MS`(1분) 뒤 다시 맞추고, 컨테이너가 보는 파일은 거기서 만든다. subPath 는 컨테이너를 새로 만들 때(크래시 재시작 포함 — 그때 volume 도 다시 맞춤)만 다시 bind. 지워져도 이미 붙은 내용은 남긴다.
+- apply 는 data 도 3-way merge(지난번 apply 가 넣은 키만 지움), Argo CD 비교도 같은 기준(손으로 더한 키는 무시). API 서버는 키 이름(`[-._a-zA-Z0-9]+`)과 Ingress 의 "규칙이나 기본 backend" 를 검사하고, 화면의 매니페스트 적용이 거절되면 로그에 apply 실패만 남긴다.
 - `kubectl exec -- env|printenv|cat|ls` 와 설정 앱(`example/config-app`, 요청마다 env 와 파일을 그대로 돌려줌)이 컨테이너가 본 값을 보여 준다.
 - 축소판: kubelet 동기화 주기·캐시 TTL 대신 1분 고정, 원자적 심볼릭 링크 교체(..data) 없음, optional 참조·items(키 골라 마운트)·defaultMode·immutable·binaryData·Secret 종류(tls·dockerconfigjson) 없음, 네임스페이스는 default 하나.
 

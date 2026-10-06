@@ -72,6 +72,8 @@
 | `CreateContainerConfigError` · `configmap "x" not found` / `couldn't find key K in ConfigMap default/x` | env 가 가리키는 ConfigMap·Secret·키가 없다 | 만들면 kubelet 이 10초 안에 다시 시도한다 (이름·키 오타 확인) |
 | `ContainerCreating` 에서 멈춤 · `FailedMount … secret "x" not found` | volume 이 가리키는 Secret·ConfigMap 이 없다 (이미지 pull 도 안 한다) | 만들면 다음 재시도(최대 2분 간격) 때 뜬다 |
 | `illegal base64 data` | Secret 의 data 에 평문을 넣었다 | 평문은 `stringData` 로, data 는 base64 로 |
+| `either \`defaultBackend\` or \`rules\` must be specified` | 규칙도 기본 backend 도 없는 Ingress | 규칙 하나나 기본 backend 를 둔다 |
+| `cannot add key "A", another key by that name already exists` / `is not a valid key name` | `--from-literal` 키가 겹치거나 `/` 같은 글자가 있다 | 키는 영문·숫자·`-`·`_`·`.` 만, 한 번씩 |
 
 ## GitOps (6단계)
 

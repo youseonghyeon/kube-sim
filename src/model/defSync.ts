@@ -1,6 +1,7 @@
 // 편집 중인 정의(노드 + 매니페스트)를 살아 있는 클러스터에 반영한다 (net-sim netSync 처럼 diff).
 // 처리 순서가 곧 의미다: 노드를 먼저 더하고(새 Pod 가 갈 곳), 매니페스트를 적용하고, 지운 노드는 마지막에 뺀다.
 // 매니페스트가 바뀌면 kubectl apply 와 같다 — 라이브에서 kubectl 로 바꾼 값은 매니페스트에 있는 필드만 덮인다.
+import { ApiError } from "../core/api/server";
 import { Cluster, type DeploymentManifest, type Manifest } from "../core/cluster";
 import { stableJson } from "../core/rng";
 import type { ClusterDef } from "./examples";
@@ -45,8 +46,14 @@ export class DefSync {
       const key = manifestKey(m);
       const json = stableJson(m);
       if (this.manifests.get(key) === json) continue;
-      const r = c.apply(m, "kubectl");
-      c.trace.add("user", "user", `매니페스트 적용 (kubectl apply): ${resourceName(m.kind)}/${m.metadata.name} ${r}`, { kind: m.kind, namespace: "default", name: m.metadata.name });
+      try {
+        const r = c.apply(m, "kubectl");
+        c.trace.add("user", "user", `매니페스트 적용 (kubectl apply): ${resourceName(m.kind)}/${m.metadata.name} ${r}`, { kind: m.kind, namespace: "default", name: m.metadata.name });
+      } catch (e) {
+        // API 서버가 거절한 매니페스트 (예: 규칙도 기본 backend 도 없는 Ingress) — 실제 kubectl apply 처럼 오류만 남기고 라이브는 그대로
+        if (!(e instanceof ApiError)) throw e;
+        c.trace.add("user", "user", `매니페스트 적용 실패 (kubectl apply): ${resourceName(m.kind)}/${m.metadata.name} — Error from server (${e.reason}): ${e.message}`, { kind: m.kind, namespace: "default", name: m.metadata.name });
+      }
       this.manifests.set(key, json);
       changed = true;
     }

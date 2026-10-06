@@ -1335,7 +1335,8 @@ function IngressSettings({ name }: { name: string }) {
             </div>
             <button
               class="icon-btn sm r-del"
-              title="이 규칙 지우기"
+              disabled={rows.length === 1 && !m.spec.defaultBackend}
+              title={rows.length === 1 && !m.spec.defaultBackend ? "규칙이나 기본 backend 중 하나는 있어야 합니다 (API 서버가 거절)" : "이 규칙 지우기"}
               aria-label="규칙 지우기"
               onClick={() =>
                 updateIngressManifest(name, (x) => {
@@ -1378,7 +1379,9 @@ function IngressSettings({ name }: { name: string }) {
             })
           }
         >
-          <option value="">없음</option>
+          <option value="" disabled={!rows.length} title={!rows.length ? "규칙이 없으면 기본 backend 가 있어야 합니다" : undefined}>
+            없음
+          </option>
           {svcOptions(m.spec.defaultBackend?.service.name ?? "")}
         </select>
       </Field>

@@ -289,8 +289,12 @@ export class Cluster {
     const rv = cur.metadata.resourceVersion;
     const next = this.api.patch(m.kind, m.metadata.name, ns, actor, (o) => {
       if ((o.kind === "ConfigMap" && m.kind === "ConfigMap") || (o.kind === "Secret" && m.kind === "Secret")) {
-        // 매니페스트에 적은 키가 전부 (지운 키는 사라진다). Secret 은 stringData 를 API 서버가 data 로 바꾼다
-        o.data = structuredClone(m.data ?? {});
+        // 3-way merge (kubectl apply 처럼): 지난번 apply 에 있었고 이번 매니페스트에 없는 키만 지우고, 다른 도구가 더한 키(kubectl patch)는 남긴다.
+        // Secret 은 stringData 를 API 서버가 data 로 바꾼다
+        const next = { ...o.data };
+        const want = configKeys(m);
+        for (const k of configKeys(parseApplied(o.metadata.annotations?.[LAST_APPLIED]) as ConfigMapManifest | SecretManifest | undefined)) if (!want.has(k)) delete next[k];
+        o.data = { ...next, ...structuredClone(m.data ?? {}) };
         if (o.kind === "Secret" && m.kind === "Secret" && m.stringData) o.stringData = { ...m.stringData };
         o.metadata.labels = { ...(m.metadata.labels ?? {}) };
         o.metadata.annotations = { ...(o.metadata.annotations ?? {}), [LAST_APPLIED]: stableJson(m) };
@@ -342,6 +346,12 @@ export class Cluster {
 
 /** kubectl apply 가 남기는 "지난번에 적용한 매니페스트" — 다음 apply 의 3-way merge 에 쓴다 */
 export const LAST_APPLIED = "kubectl.kubernetes.io/last-applied-configuration";
+
+/** ConfigMap·Secret 매니페스트가 적은 키 (Secret 은 data 와 stringData 둘 다) */
+export function configKeys(m: ConfigMapManifest | SecretManifest | undefined): Set<string> {
+  if (!m) return new Set();
+  return new Set([...Object.keys(m.data ?? {}), ...Object.keys((m.kind === "Secret" && m.stringData) || {})]);
+}
 
 /** 주석 값은 사용자가 고칠 수 있는 입력이라 깨져 있을 수 있다 — 그러면 "지난번 apply 없음" 으로 본다 (kubectl 도 경고 뒤 2-way 로 진행) */
 function parseApplied(s: string | undefined): Manifest | undefined {

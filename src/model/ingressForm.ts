@@ -39,6 +39,7 @@ export function setRules(m: IngressManifest, rows: RuleRow[]): void {
 /** Host 는 비우거나(모든 Host) 소문자 도메인 (실제 API 검사: RFC 1123 서브도메인, IP 는 안 됨) */
 export function hostError(v: string): string | undefined {
   if (!v) return undefined;
+  if (v.length > 253 || v.split(".").some((l) => l.length > 63)) return "도메인은 253자, 점 사이 한 칸은 63자 이하여야 합니다";
   if (/^\d+(\.\d+){3}$/.test(v)) return "Host 에 IP 는 쓸 수 없습니다 (도메인을 쓰거나 비워 두세요)";
   return /^(\*\.)?[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$/.test(v) ? undefined : "소문자 도메인으로 쓰세요 (예: shop.example.com)";
 }

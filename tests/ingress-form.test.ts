@@ -80,3 +80,14 @@ test("LoadBalancer Service 를 막 만든 직후(kube-proxy 규칙 전)의 실�
   expect(r.ok).toBe(false);
   expect(r.steps.at(-1)!.text).toContain("kube-proxy 가 이 노드에 규칙을 쓰기 전");
 });
+
+test("화면에서 규칙도 기본 backend 도 없는 Ingress 를 적용하면 앱이 멈추지 않고 apply 실패만 남는다 (라이브는 그대로)", () => {
+  const s = new DefSync();
+  const m = newIngress("web", [{ name: "web", port: 80 }], new Set(), true)!;
+  s.reset({ nodes, manifests: [...web, m] }, "x");
+  const empty = structuredClone(m);
+  setRules(empty, []);
+  expect(() => s.sync({ nodes, manifests: [...web, empty] })).not.toThrow();
+  expect(s.cluster.trace.events.at(-1)!.msg).toContain("either `defaultBackend` or `rules` must be specified");
+  expect(s.cluster.api.get("Ingress", "web")!.spec.rules).toHaveLength(1);
+});
