@@ -27,7 +27,7 @@
 
 ## 3. 컨트롤러 (`controllers/`)
 - 공통 틀(`base.ts`): watch → 워크큐(같은 키 합침, 0ms 뒤 한꺼번에) → `reconcile(key)` → 실패면 지수 백오프(일반 타이머, 5ms~60초, 15번 넘게 실패하면 포기). 컨트롤러를 만들 때 "무엇이 바뀌면 나를 다시 깨워야 하나" 를 목록으로 적고 watch 를 맞춘다(LESSONS).
-- ReplicaSet: 원하는 수 vs 셀렉터에 맞는 살아 있는 Pod 수 → 생성(이름 = generateName 58자 + 5자)/삭제(순서: 노드 없음 → Pending → 준비 안 됨 → 재시작 많음 → 최근 생성). slow start 없음(축소판).
+- ReplicaSet: 원하는 수 vs 셀렉터에 맞는 살아 있는 Pod 수 → 생성(이름 = generateName 58자 + 5자)/삭제(순서: 노드 없음 → Pending → 준비 안 됨 → 같은 노드에 몰린 것(같은 Deployment 의 Pod 가 많은 노드) → 재시작 많음 → 최근 생성). Pod 는 템플릿의 labels·annotations 를 그대로 받는다. slow start 없음(축소판).
 - EndpointSlice: Service 셀렉터 + Pod Ready·Terminating → 엔드포인트(Service 하나에 슬라이스 하나 — 축소판). 레이블이 바뀌어 벗어난 Pod 도 다시 계산.
 - disruption: PDB 마다 Ready 수·최소 수(기대 수는 주인 Deployment 의 replicas)·허용 수.
 - 트레이스 actor 이름은 실제 컴포넌트 이름: `kube-scheduler`, `deployment-controller`, `replicaset-controller`, `endpointslice-controller`, `node-lifecycle-controller`, `taint-eviction-controller`, `kubelet@node`, `kube-proxy@node`, `coredns`, `metallb-speaker@node`, `argocd-application-controller`.
@@ -126,7 +126,7 @@
 
 ### 3-5. HPA (5e, 2026-10-06, `controllers/hpa.ts`)
 - 부하: `Cluster.setLoad(service, rps)` — 바깥 도구(hey·k6) 흉내. ready 엔드포인트가 똑같이 나눠 받고, kubelet 의 CPU 원함 = 이미지 cpuM + Pod rps × workMs(요청 하나의 CPU ms). 나눔은 `loadVersion`(부하·엔드포인트 변화)으로 캐시.
-- 컨트롤러: 15초 배경 타이머. 대상 Pod 중 requests.cpu 가 없는 컨테이너가 하나라도 있으면 FailedGetResourceMetric(`<unknown>`). Ready 이고 사용량이 있는 Pod 로 util = floor(합 × 100 / requests 합). 목표와 10% 안쪽이면 그대로. Ready 아닌 Pod 는 늘릴 때 0%·줄일 때 100% 로 다시 계산. 늘리기는 max(두 배, +4) 까지, 줄이기는 지난 300초 추천의 최댓값, 마지막에 min~max 로 자르고 ScalingLimited. 같은 판단은 트레이스에 한 번만.
+- 컨트롤러: 15초 배경 타이머. 대상 Pod 중 requests.cpu 가 없는 컨테이너가 하나라도 있으면 FailedGetResourceMetric(`<unknown>`). Ready 이고 사용량이 있는 Pod 로 util = floor(합 × 100 / requests 합). 목표와 10% 안쪽이면 그대로. Ready 아닌 Pod(Pending 포함)는 빼고 계산하고 늘릴 때만 0% 로 넣어 다시 보며, 사용량 없는 Ready Pod 는 줄일 때 max(100%, 목표)·늘릴 때 0%(replica_calculator.go). 지금 replicas 가 min~max 밖이면 사용률을 보기 전에 끝으로(Current number of replicas above Spec.MaxReplicas). 늘리기는 max(두 배, +4) 까지(막히면 ScalingLimited ScaleUpLimit), 줄이기는 지난 300초 추천의 최댓값, 마지막에 min~max 로 자르고 ScalingLimited. 같은 판단은 트레이스에 한 번만.
 - apply 3-way: 매니페스트에 replicas 가 없으면 라이브 값을 지키고, 지난번에 있었다가 지우면 기본값 1(실제 kubectl 과 같음). Argo CD 는 Git 에 적은 필드만 비교하므로 replicas 를 빼면 HPA 와 싸우지 않는다.
 - 화면: Service 개요의 CPU 부하 단추(0·10·40·100·200/s), 캔버스 Service 상자의 '초당 N 요청', HPA 개요(사용률 막대·Pod 별 사용·조건·최근 판단), HPA 가 맡은 Deployment 는 replicas 드리프트 경고 대신 HPA 안내.
 

@@ -36,7 +36,17 @@ export class ReplicaSetController extends Controller {
         refOf(rs),
       );
     } else if (diff < 0) {
-      const victims = [...active].sort(deletionOrder).slice(0, -diff);
+      // 같은 노드에 몰린 정도: 같은 주인(Deployment)의 ReplicaSet 들이 가진 살아 있는 Pod 를 노드마다 센다 (getPodsRankedByRelatedPodsOnSameNode)
+      const owner = controllerOf(rs.metadata)?.uid;
+      const siblings = new Set(owner ? this.api.peekList("ReplicaSet", ns).filter((r) => controllerOf(r.metadata)?.uid === owner).map((r) => r.metadata.uid) : [rs.metadata.uid]);
+      siblings.add(rs.metadata.uid);
+      const onNode = new Map<string, number>();
+      for (const p of this.api.peekList("Pod", ns)) {
+        const o = controllerOf(p.metadata)?.uid;
+        if (!o || !siblings.has(o) || p.metadata.deletionTimestamp !== undefined || isPodTerminal(p) || !p.spec.nodeName) continue;
+        onNode.set(p.spec.nodeName, (onNode.get(p.spec.nodeName) ?? 0) + 1);
+      }
+      const victims = [...active].sort(deletionOrder((p) => (p.spec.nodeName ? (onNode.get(p.spec.nodeName) ?? 0) : 0))).slice(0, -diff);
       for (const p of victims) {
         this.api.delete("Pod", p.metadata.name, ns, this.name);
         this.api.recordEvent(rs, "Normal", "SuccessfulDelete", `Deleted pod: ${p.metadata.name}`, this.name);
@@ -44,7 +54,7 @@ export class ReplicaSetController extends Controller {
       this.ctx.trace.add(
         this.name,
         "controller.reconcile",
-        `${rs.metadata.name} 원하는 ${want} · 있는 ${active.length} → Pod ${-diff}개 삭제 (${victims.map((p) => p.metadata.name).join(", ")} — 아직 안 뜬 것·최근 것부터)`,
+        `${rs.metadata.name} 원하는 ${want} · 있는 ${active.length} → Pod ${-diff}개 삭제 (${victims.map((p) => p.metadata.name).join(", ")} — 아직 안 뜬 것 → 같은 노드에 몰린 것 → 최근 것부터)`,
         refOf(rs),
       );
     }
@@ -67,6 +77,7 @@ export class ReplicaSetController extends Controller {
             name,
             namespace: ns,
             labels: { ...rs.spec.template.metadata.labels },
+            ...(rs.spec.template.metadata.annotations ? { annotations: { ...rs.spec.template.metadata.annotations } } : {}),
             ownerReferences: [{ apiVersion: "apps/v1", kind: "ReplicaSet", name: rs.metadata.name, uid: rs.metadata.uid, controller: true }],
           },
           spec,
@@ -89,17 +100,23 @@ export class ReplicaSetController extends Controller {
   }
 }
 
-/** 지울 Pod 고르는 순서 (실제 ActivePods 정렬의 축소판): 노드 없음 → Pending → 준비 안 됨 → 재시작 많음 → 최근 생성 */
-function deletionOrder(a: Pod, b: Pod): number {
+/**
+ * 지울 Pod 고르는 순서 (실제 ActivePodsWithRanks 정렬의 축소판): 노드 없음 → Pending → 준비 안 됨 → 같은 노드에 몰린 것(형제 Pod 가 많은 노드)
+ * → 재시작 많음 → 최근 생성. 축소판: pod-deletion-cost·Ready 가 된 지 짧은 것은 보지 않는다.
+ */
+function deletionOrder(sameNode: (p: Pod) => number): (a: Pod, b: Pod) => number {
   const rank = (p: Pod) => [
     p.spec.nodeName ? 1 : 0,
     p.status.phase === "Pending" ? 0 : 1,
     isPodReady(p) ? 1 : 0,
+    -sameNode(p),
     -Math.max(0, ...p.status.containerStatuses.map((c) => c.restartCount)),
     -p.metadata.creationTimestamp,
   ];
-  const ra = rank(a);
-  const rb = rank(b);
-  for (let i = 0; i < ra.length; i++) if (ra[i] !== rb[i]) return ra[i]! - rb[i]!;
-  return a.metadata.name < b.metadata.name ? 1 : -1;
+  return (a, b) => {
+    const ra = rank(a);
+    const rb = rank(b);
+    for (let i = 0; i < ra.length; i++) if (ra[i] !== rb[i]) return ra[i]! - rb[i]!;
+    return a.metadata.name < b.metadata.name ? 1 : -1;
+  };
 }

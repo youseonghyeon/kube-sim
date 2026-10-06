@@ -1,5 +1,6 @@
 // HPA 컨트롤러 (horizontal-pod-autoscaler): 15초마다 대상(Deployment·StatefulSet)의 Pod CPU 사용률(requests 대비 %)을 보고 replicas 를 고친다.
-// 계산: 원하는 수 = ceil(Pod 수 × 사용률/목표), 비율 차이가 10% 안쪽이면 그대로. 막 뜬 Pod·Ready 아닌 Pod 는 늘릴 때 0%, 줄일 때 100% 로 쳐서 보수적으로.
+// 계산: 원하는 수 = ceil(Ready Pod 수 × 사용률/목표), 비율 차이가 10% 안쪽이면 그대로. Ready 아닌 Pod(Pending 포함)는 빼고 계산하되 늘릴 때만 0% 로 넣어 다시 보고,
+// 사용량 없는 Ready Pod 는 줄일 때 max(100%, 목표)·늘릴 때 0% 로 넣는다 (replica_calculator.go). replicas 가 min~max 밖이면 사용률을 보기 전에 끝으로.
 // 늘릴 때는 15초에 두 배 또는 +4 중 큰 것까지, 줄일 때는 지난 5분 추천 중 가장 큰 것(stabilization window 300초). minReplicas~maxReplicas 안으로.
 // 15초 주기는 끝없는 주기 동작이라 배경 타이머. 사용량은 metrics-server 흉내(Cluster.podMetrics)를 바로 읽는다.
 // 축소판: CPU Resource Utilization 메트릭만(메모리·custom·external 없음), behavior 사용자 설정 없음(기본값만), cpu initialization period 를 Ready 여부로만.
@@ -70,6 +71,17 @@ export class HpaController extends Controller {
       this.status(hpa, current, current, undefined, [["ScalingActive", "False", "ScalingDisabled", "scaling is disabled since the replica count of the target is zero"]]);
       return;
     }
+    // 실제처럼 사용률을 보기 전에: 지금 replicas 가 min~max 밖이면 그 끝으로 (horizontal.go reconcileAutoscaler)
+    if (current > max || current < min) {
+      const to = current > max ? max : min;
+      const reason = current > max ? "Current number of replicas above Spec.MaxReplicas" : "Current number of replicas below Spec.MinReplicas";
+      this.api.patch(ref.kind, ref.name, ns, HPA, (o) => ((o.spec as { replicas: number }).replicas = to));
+      this.api.recordEvent(hpa, "Normal", "SuccessfulRescale", `New size: ${to}; reason: ${reason}`, HPA);
+      this.ctx.trace.add(this.name, "controller.reconcile", `${name}: ${ref.kind}/${ref.name} replicas ${current} 가 ${current > max ? `maxReplicas ${max} 보다 큼` : `minReplicas ${min} 보다 작음`} → 사용률을 보기 전에 범위 끝으로 → replicas ${current} → ${to}`, refOf(hpa));
+      this.last.set(key, "");
+      this.status(hpa, current, to, hpa.status.currentMetrics?.[0], [["AbleToScale", "True", "SucceededRescale", `the HPA controller was able to update the target scale to ${to}`]], now);
+      return;
+    }
     const pods = this.api
       .peekList("Pod", ns)
       .filter((p) => matchesSelector(p.metadata.labels, target.spec.selector) && p.metadata.deletionTimestamp === undefined && !isPodTerminal(p) && controllerOf(p.metadata));
@@ -82,12 +94,18 @@ export class HpaController extends Controller {
           this.fail(hpa, key, "ScalingActive", "FailedGetResourceMetric", `the HPA was unable to compute the replica count: ${why}`, `${p.metadata.name} 의 컨테이너 ${c.name} 에 requests.cpu 가 없음 → 사용률(requests 대비 %)을 낼 수 없어 TARGETS 가 <unknown> — 늘리지도 줄이지도 않음`);
           return;
         }
+    // replica_calculator.go groupPods: Ready 이고 사용량이 있는 것 / Ready 아님(Pending 포함) / Ready 인데 사용량 없음
     const ready: { pod: Pod; cpu: number; req: number }[] = [];
+    const unready: { pod: Pod; req: number }[] = [];
     const missing: { pod: Pod; req: number }[] = [];
     for (const p of pods) {
       const req = p.spec.containers.reduce((n, c) => n + c.resources.requests.cpu, 0);
+      if (!isPodReady(p)) {
+        unready.push({ pod: p, req });
+        continue;
+      }
       const m = this.metrics(p);
-      if (m && isPodReady(p)) ready.push({ pod: p, cpu: m.cpu, req });
+      if (m) ready.push({ pod: p, cpu: m.cpu, req });
       else missing.push({ pod: p, req });
     }
     if (!ready.length) {
@@ -98,32 +116,55 @@ export class HpaController extends Controller {
     const reqSum = ready.reduce((n, r) => n + r.req, 0);
     // 실제처럼 정수 나눗셈 (int32(합 × 100 / requests 합))
     const util = Math.floor((used * 100) / reqSum);
-    let ratio = util / goal;
-    let count = ready.length;
+    const ratio = util / goal;
+    const scaleUpWithUnready = unready.length > 0 && ratio > 1;
+    let rec: number;
+    let formula: string;
     let note = "";
-    // 막 뜬·Ready 아닌 Pod: 늘릴 때는 0%, 줄일 때는 100% 로 쳐서 다시 (과하게 움직이지 않게)
-    if (missing.length && Math.abs(ratio - 1) > TOLERANCE) {
-      const up = ratio > 1;
-      const used2 = used + (up ? 0 : missing.reduce((n, m) => n + m.req, 0));
-      const req2 = reqSum + missing.reduce((n, m) => n + m.req, 0);
-      const ratio2 = (used2 * 100) / req2 / goal;
-      note = ` · Ready 아닌 Pod ${missing.length}개를 ${up ? "0%" : "100%"} 로 침`;
-      if (Math.abs(ratio2 - 1) <= TOLERANCE || ratio2 > 1 !== up) ratio = 1;
-      else ratio = ratio2;
-      count = pods.length;
-    }
-    let rec = Math.abs(ratio - 1) <= TOLERANCE ? current : Math.ceil(ratio * count);
-    const formula = Math.abs(ratio - 1) <= TOLERANCE ? `목표와 ${Math.round(Math.abs(ratio - 1) * 100)}% 차이 (10% 안쪽) → 그대로` : `원하는 ceil(${count} × ${util}%/${goal}%) = ${rec}`;
-    // 늘리기 정책: 15초에 두 배 또는 +4 중 큰 것까지
-    let limitedBy = "";
-    if (rec > current) {
-      const cap = Math.max(current * 2, current + 4);
-      if (rec > cap) {
-        rec = cap;
-        limitedBy = ` · 한 번에 늘릴 수 있는 만큼(두 배 또는 +4)만 ${cap}`;
+    if (!scaleUpWithUnready && !missing.length) {
+      // Ready 아닌 Pod 는 계산에서 뺀다 (줄일 때도 — 100% 로 치지 않는다)
+      if (unready.length) note = ` · Ready 아닌 Pod ${unready.length}개는 빼고 계산`;
+      if (Math.abs(ratio - 1) <= TOLERANCE) {
+        rec = current;
+        formula = `목표와 ${Math.round(Math.abs(ratio - 1) * 100)}% 차이 (10% 안쪽) → 그대로`;
+      } else {
+        rec = Math.ceil(ratio * ready.length);
+        formula = `원하는 ceil(${ready.length} × ${util}%/${goal}%) = ${rec}`;
+      }
+    } else {
+      // 보수적으로 다시: 사용량 없는 Pod 는 줄일 때 max(100%, 목표)·늘릴 때 0%, Ready 아닌 Pod 는 늘릴 때만 0% 로 넣는다
+      let used2 = used;
+      let req2 = reqSum;
+      let n2 = ready.length;
+      const parts: string[] = [];
+      if (missing.length) {
+        for (const m of missing) {
+          if (ratio < 1) used2 += (Math.max(100, goal) * m.req) / 100;
+          req2 += m.req;
+          n2++;
+        }
+        parts.push(`사용량 없는 Pod ${missing.length}개를 ${ratio < 1 ? `${Math.max(100, goal)}%` : "0%"} 로`);
+      }
+      if (scaleUpWithUnready) {
+        for (const u of unready) {
+          req2 += u.req;
+          n2++;
+        }
+        parts.push(`Ready 아닌 Pod ${unready.length}개를 0% 로`);
+      }
+      const util2 = Math.floor((used2 * 100) / req2);
+      const ratio2 = util2 / goal;
+      note = ` · ${parts.join(", ")} 쳐서 다시 ${util2}%`;
+      if (Math.abs(ratio2 - 1) <= TOLERANCE || (ratio < 1 && ratio2 > 1) || (ratio > 1 && ratio2 < 1)) {
+        rec = current;
+        formula = "목표와 가깝거나 방향이 바뀜 → 그대로";
+      } else {
+        rec = Math.ceil(ratio2 * n2);
+        if ((ratio2 > 1 && rec < current) || (ratio2 < 1 && rec > current)) rec = current;
+        formula = `원하는 ceil(${n2} × ${util2}%/${goal}%) = ${rec}`;
       }
     }
-    // 줄이기 안정화: 지난 5분 추천 중 가장 큰 것
+    // 줄이기 안정화: 지난 5분 추천(정책으로 자르기 전 값) 중 가장 큰 것
     const hist = (this.recs.get(key) ?? []).filter((r) => now - r.t < SCALE_DOWN_WINDOW_MS);
     hist.push({ t: now, n: rec });
     this.recs.set(key, hist);
@@ -137,12 +178,30 @@ export class HpaController extends Controller {
         held = ` · 줄이기 안정화: 지난 5분 추천 중 가장 큰 ${top} 를 따름 (${Math.ceil((since + SCALE_DOWN_WINDOW_MS - now) / 1000)}초 뒤 풀림)`;
       }
     }
-    const clamped = Math.min(max, Math.max(min, desired));
-    const limit: [string, "True" | "False", string, string] =
-      clamped < desired ? ["ScalingLimited", "True", "TooManyReplicas", "the desired replica count is more than the maximum replica count"] : clamped > desired ? ["ScalingLimited", "True", "TooFewReplicas", "the desired replica count is less than the minimum replica count"] : ["ScalingLimited", "False", "DesiredWithinRange", "the desired count is within the acceptable range"];
-    const bound = clamped !== desired ? ` · ${clamped < desired ? `maxReplicas ${max}` : `minReplicas ${min}`} 로 자름` : "";
+    // 늘리기 정책(15초에 두 배 또는 +4)과 min~max (normalizeDesiredReplicasWithBehaviors)
+    let clamped = desired;
+    let limit: [string, "True" | "False", string, string] = ["ScalingLimited", "False", "DesiredWithinRange", "the desired count is within the acceptable range"];
+    let bound = "";
+    if (desired > current) {
+      const cap = Math.max(current * 2, current + 4);
+      const allowed = Math.min(max, cap);
+      if (desired > allowed) {
+        clamped = allowed;
+        if (max > cap) {
+          limit = ["ScalingLimited", "True", "ScaleUpLimit", "the desired replica count is increasing faster than the maximum scale rate"];
+          bound = ` · 한 번에 늘릴 수 있는 만큼(두 배 또는 +4)만 ${cap}`;
+        } else {
+          limit = ["ScalingLimited", "True", "TooManyReplicas", "the desired replica count is more than the maximum replica count"];
+          bound = ` · maxReplicas ${max} 로 자름`;
+        }
+      }
+    } else if (desired < min) {
+      clamped = min;
+      limit = ["ScalingLimited", "True", "TooFewReplicas", "the desired replica count is less than the minimum replica count"];
+      bound = ` · minReplicas ${min} 로 자름`;
+    }
     const metric = { type: "Resource" as const, resource: { name: "cpu" as const, current: { averageUtilization: util, averageValue: Math.round(used / ready.length) } } };
-    const msg = `${name}: ${ref.kind}/${ref.name} cpu 사용 ${fmtCpu(used)} / requests ${fmtCpu(reqSum)} = ${util}% (목표 ${goal}%)${note} → ${formula}${limitedBy}${held}${bound}`;
+    const msg = `${name}: ${ref.kind}/${ref.name} cpu 사용 ${fmtCpu(used)} / requests ${fmtCpu(reqSum)} = ${util}% (목표 ${goal}%)${note} → ${formula}${held}${bound}`;
     if (clamped !== current) {
       this.api.patch(ref.kind, ref.name, ns, HPA, (o) => ((o.spec as { replicas: number }).replicas = clamped));
       const reason = clamped > current ? "cpu resource utilization (percentage of request) above target" : "All metrics below target";
