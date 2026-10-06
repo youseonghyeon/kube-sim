@@ -1,13 +1,16 @@
 // kubelet: 노드마다 하나. 자기 노드에 바인딩된 Pod 를 watch 해서 샌드박스(IP) → 이미지 pull → 컨테이너 시작 → 크래시면 백오프 재시작 → 삭제면 SIGTERM·정리.
 // 상태는 API 의 Pod status 로만 알린다 (다른 컴포넌트와 직접 이야기하지 않음).
 // 축소판: 컨테이너는 Pod 마다 첫 번째 하나만 돌린다. probe 는 2단계, heartbeat·NotReady 는 1단계 후반.
+// 자원(5a): 컨테이너 메모리 사용은 이미지 모양(workloads.ts memoryAt)대로 시간에 따라 늘고, limits.memory 를 넘으면 cgroup OOM, 노드 메모리를 넘으면
+// 노드 OOM killer 가 oom_score 로 희생자를 고른다. CPU 는 원하는 만큼(limit 까지) 받고, 노드가 모자라면 requests 비율로 나눈다 — 덜 받은 만큼 응답이 느려진다.
+// 축소판: kubelet 의 node-pressure eviction(memory.available)·시스템 예약·페이지 캐시는 없다. 노드 메모리는 컨테이너 사용 합만 센다.
 import { refOf, type WatchEvent } from "./api/server";
-import { NODE_LEASE_NS, type ContainerState, type Node, type Pod } from "./api/types";
+import { NODE_LEASE_NS, qosClass, type Container, type ContainerState, type Node, type Pod, type QosClass } from "./api/types";
 import type { TimerHandle } from "./clock";
 import type { ComponentContext } from "./controllers/base";
 import { setCondition } from "./scheduler";
 import { fmtCpu, fmtMem } from "./units";
-import { imageSpec } from "./workloads";
+import { DEFAULT_CPU_M, DEFAULT_WORK_MS, imageSpec, memoryAt, type ImageSpec } from "./workloads";
 
 /** 샌드박스(pause 컨테이너)·CNI 로 IP 받는 시간 */
 export const SANDBOX_MS = 500;
@@ -25,6 +28,19 @@ export const HEARTBEAT_MS = 10_000;
 export const LEASE_DURATION_S = 40;
 /** 이만큼 잘 돌다 죽으면 백오프를 처음부터 */
 export const BACKOFF_RESET_MS = 600_000;
+/** OOM 시각을 찾을 때 내다보는 범위 — 이보다 먼 OOM 은 그때 가서 다시 찾는다 */
+const OOM_HORIZON_MS = 6 * 3600_000;
+
+/** 컨테이너 하나의 CPU 형편 */
+export interface CpuState {
+  /** 앱이 원하는 CPU (millicore) */
+  want: number;
+  /** 실제로 받는 CPU */
+  got: number;
+  limit?: number;
+  /** 덜 받는 이유: limit = cpu limit 에 막힘(throttling), node = 노드 CPU 가 모자라 requests 비율로 나눔 */
+  reason?: "limit" | "node";
+}
 
 export interface NodeDef {
   name: string;
@@ -63,6 +79,12 @@ interface PodRt {
   probeReady: boolean;
   /** 사용자가 "앱 고장" 으로 만든 상태 — /ready 와 요청에 503 */
   sick: boolean;
+  /** 컨테이너 프로세스가 있는지 (메모리를 쓰고 CPU 를 원함). 시작 ~ 종료·크래시 */
+  alive: boolean;
+  /** 이 Pod 의 컨테이너 (Pod spec 은 바뀌지 않으므로 받을 때 한 번 읽어 둔다) */
+  ct: Container;
+  image?: ImageSpec;
+  qos: QosClass;
 }
 
 export class Kubelet {
@@ -80,6 +102,8 @@ export class Kubelet {
   /** 꺼졌다 켜질 때마다 +1 — 꺼지기 전에 걸어 둔 타이머가 켜진 뒤에 발화하지 않게 */
   private epoch = 0;
   private heartbeat?: TimerHandle;
+  /** 다음 OOM(cgroup 또는 노드) 시각의 감시 — 배경 타이머 */
+  private oomWatch?: TimerHandle;
 
   readonly def: NodeDef;
 
@@ -168,6 +192,7 @@ export class Kubelet {
     this.powered = false;
     this.epoch++;
     this.heartbeat?.cancel();
+    this.oomWatch?.cancel();
     for (const rt of this.pods.values()) {
       rt.timer?.cancel();
       this.stopProbes(rt);
@@ -226,6 +251,7 @@ export class Kubelet {
       return;
     }
     this.reportCapacity();
+    this.rearmOom();
   }
 
   private reportCapacity(): void {
@@ -241,6 +267,7 @@ export class Kubelet {
   stop(): void {
     this.stopped = true;
     this.heartbeat?.cancel();
+    this.oomWatch?.cancel();
     this.unwatch();
     for (const rt of this.pods.values()) {
       rt.timer?.cancel();
@@ -278,6 +305,7 @@ export class Kubelet {
   // ---------- 수명주기 ----------
 
   private admit(p: Pod, restarts = 0): void {
+    const ct = p.spec.containers[0]!;
     const rt: PodRt = {
       uid: p.metadata.uid,
       name: p.metadata.name,
@@ -292,6 +320,10 @@ export class Kubelet {
       sick: false,
       liveFailures: 0,
       sigterm: false,
+      alive: false,
+      ct,
+      image: imageSpec(ct.image),
+      qos: qosClass(p.spec),
     };
     this.pods.set(rt.uid, rt);
     const now = this.ctx.clock.now;
@@ -400,6 +432,7 @@ export class Kubelet {
     const now = this.ctx.clock.now;
     rt.stage = "running";
     rt.startedAt = now;
+    rt.alive = true;
     this.event(p, "Normal", "Created", `Created container: ${c.name}`);
     this.event(p, "Normal", "Started", `Started container ${c.name}`);
     const probe = c.readinessProbe;
@@ -432,6 +465,7 @@ export class Kubelet {
     rt.liveFailures = 0;
     if (live) this.scheduleLiveness(rt, (live.initialDelaySeconds ?? 0) * 1000 || (live.periodSeconds ?? 10) * 1000);
     if (spec?.crashAfterMs !== undefined) rt.timer = this.ctx.clock.after(spec.crashAfterMs, this.actor, () => this.crash(rt, spec.exitCode ?? 1));
+    this.rearmOom();
   }
 
   // ---------- readiness probe ----------
@@ -458,6 +492,7 @@ export class Kubelet {
     let fail: string | undefined;
     if (spec?.port !== probe.httpGet.port) fail = `Get "${url}": dial tcp ${rt.ip}:${probe.httpGet.port}: connect: connection refused`;
     else if (rt.sick || now - (rt.startedAt ?? now) < (spec.warmupMs ?? 0)) fail = "HTTP probe failed with statuscode: 503";
+    else if (this.latencyMs(rt) > (probe.timeoutSeconds ?? 1) * 1000) fail = probeTimeout(url);
     const threshold = probe.failureThreshold ?? 3;
     if (fail) {
       rt.probeFailures++;
@@ -501,6 +536,7 @@ export class Kubelet {
     let fail: string | undefined;
     if (spec?.port !== probe.httpGet.port) fail = `Get "${url}": dial tcp ${rt.ip}:${probe.httpGet.port}: connect: connection refused`;
     else if (rt.sick) fail = "HTTP probe failed with statuscode: 503";
+    else if (this.latencyMs(rt) > (probe.timeoutSeconds ?? 1) * 1000) fail = probeTimeout(url);
     const threshold = probe.failureThreshold ?? 3;
     if (!fail) {
       rt.liveFailures = 0;
@@ -514,7 +550,16 @@ export class Kubelet {
       return;
     }
     this.event(p, "Normal", "Killing", `Container ${c.name} failed liveness probe, will be restarted`);
-    this.ctx.trace.add(this.actor, "kubelet.probe", `${rt.name} liveness probe ${threshold}번 연속 실패 (${fail}) → 컨테이너를 죽이고 다시 띄움 (재시작하면 풀리는 고장이면 이것으로 낫는다)`, refOf(p));
+    const slow = fail.includes("context deadline exceeded");
+    const cpu = slow ? this.cpuState(rt.uid) : undefined;
+    this.ctx.trace.add(
+      this.actor,
+      "kubelet.probe",
+      slow
+        ? `${rt.name} liveness probe ${threshold}번 연속 시간 초과 (응답 ${Math.round(this.latencyMs(rt))}ms > timeoutSeconds ${probe.timeoutSeconds ?? 1}초 — CPU 를 ${cpu?.got ?? 0}m 만 받음${cpu?.reason === "limit" ? ", cpu limit 에 막힘" : ""}) → 컨테이너를 죽이고 다시 띄움 (CPU 가 모자란 것이라 재시작해도 낫지 않음)`
+        : `${rt.name} liveness probe ${threshold}번 연속 실패 (${fail}) → 컨테이너를 죽이고 다시 띄움 (재시작하면 풀리는 고장이면 이것으로 낫는다)`,
+      refOf(p),
+    );
     this.crash(rt, 137);
   }
 
@@ -542,7 +587,7 @@ export class Kubelet {
   }
 
   /** 요청 흉내가 묻는 것: 이 Pod 의 컨테이너가 지금 돌고 있는지, 고장인지 */
-  appState(podUid: string): { running: boolean; sick: boolean; warm: boolean } | undefined {
+  appState(podUid: string): { running: boolean; sick: boolean; warm: boolean; latencyMs: number; cpu: CpuState } | undefined {
     if (!this.powered) return undefined;
     const rt = this.pods.get(podUid);
     if (!rt) return undefined;
@@ -550,13 +595,14 @@ export class Kubelet {
     const running = rt.stage === "running" || (rt.stage === "terminating" && !rt.sigterm);
     const p = this.ctx.api.peekList("Pod").find((x) => x.metadata.uid === podUid);
     const warmup = p ? (imageSpec(p.spec.containers[0]!.image)?.warmupMs ?? 0) : 0;
-    return { running, sick: rt.sick, warm: this.ctx.clock.now - (rt.startedAt ?? 0) >= warmup };
+    return { running, sick: rt.sick, warm: this.ctx.clock.now - (rt.startedAt ?? 0) >= warmup, latencyMs: this.latencyMs(rt), cpu: this.cpuState(podUid) };
   }
 
-  private crash(rt: PodRt, exitCode: number): void {
+  private crash(rt: PodRt, exitCode: number, reason = "Error"): void {
     const p = this.livePod(rt);
     if (!p) return;
     this.stopProbes(rt);
+    rt.alive = false;
     const c = p.spec.containers[0]!;
     const now = this.ctx.clock.now;
     const ran = now - (rt.startedAt ?? now);
@@ -564,11 +610,11 @@ export class Kubelet {
     const delay = rt.crashBackoff;
     rt.crashBackoff = delay === 0 ? BACKOFF_BASE_MS : Math.min(delay * 2, BACKOFF_MAX_MS);
     rt.stage = "crash-backoff";
-    const terminated: ContainerState = { terminated: { reason: "Error", exitCode, startedAt: rt.startedAt, finishedAt: now } };
+    const terminated: ContainerState = { terminated: { reason, exitCode, startedAt: rt.startedAt, finishedAt: now } };
     this.ctx.trace.add(
       this.actor,
       "kubelet.exit",
-      `${rt.name} 컨테이너 ${c.name} 종료 (exit ${exitCode}, ${(ran / 1000).toFixed(1)}초 실행) → restartPolicy Always → ${delay === 0 ? "바로 재시작 (첫 재시작은 백오프 없음)" : `${delay / 1000}초 백오프 뒤 재시작`}`,
+      `${rt.name} 컨테이너 ${c.name} 종료 (${reason === "Error" ? "" : `${reason} · `}exit ${exitCode}, ${(ran / 1000).toFixed(1)}초 실행) → restartPolicy Always → ${delay === 0 ? "바로 재시작 (첫 재시작은 백오프 없음)" : `${delay / 1000}초 백오프 뒤 재시작`}`,
       refOf(p),
     );
     this.patchPod(rt, (o) => {
@@ -583,8 +629,10 @@ export class Kubelet {
     });
     if (delay === 0) {
       rt.timer = this.ctx.clock.after(CREATE_MS, this.actor, () => this.restart(rt));
+      this.rearmOom();
       return;
     }
+    this.rearmOom();
     rt.timer = this.ctx.clock.after(500, this.actor, () => {
       const live = this.livePod(rt);
       if (!live) return;
@@ -661,12 +709,13 @@ export class Kubelet {
     }
   }
 
-  private finish(rt: PodRt, exitCode: number): void {
+  private finish(rt: PodRt, exitCode: number, reason = exitCode === 0 ? "Completed" : "Error"): void {
     const now = this.ctx.clock.now;
+    rt.alive = false;
     this.patchPod(rt, (o) => {
       const cs = o.status.containerStatuses[0];
       if (cs) {
-        cs.state = { terminated: { reason: exitCode === 0 ? "Completed" : "Error", exitCode, startedAt: rt.startedAt, finishedAt: now } };
+        cs.state = { terminated: { reason, exitCode, startedAt: rt.startedAt, finishedAt: now } };
         cs.ready = false;
         cs.started = false;
       }
@@ -676,6 +725,148 @@ export class Kubelet {
     this.ctx.trace.add(this.actor, "kubelet.removed", `${rt.name} 컨테이너 정리 끝 → API 에서 Pod 최종 삭제, IP ${rt.ip} 반납`, { kind: "Pod", namespace: rt.ns, name: rt.name });
     this.pods.delete(rt.uid);
     this.ctx.api.finalizePod(rt.name, rt.ns, rt.uid, this.actor);
+    this.rearmOom();
+  }
+
+  // ---------- 자원: 메모리·CPU ----------
+
+  /** 지금 이 컨테이너가 쓰는 메모리 (MiB). 프로세스가 없으면 0 */
+  private memOf(rt: PodRt, at = this.ctx.clock.now): number {
+    return rt.alive ? memoryAt(rt.image, at - (rt.startedAt ?? at)) : 0;
+  }
+
+  private alive(): PodRt[] {
+    return [...this.pods.values()].filter((r) => r.alive);
+  }
+
+  /**
+   * 노드 CPU 나누기: 컨테이너마다 원하는 만큼(cpu limit 까지) 준다. 합이 노드 CPU 를 넘으면
+   * requests 비율(cpu.shares, 최소 2m)로 나눈다 — 덜 원하는 쪽은 원하는 만큼만 받고 남는 몫은 다시 나눈다.
+   */
+  private cpuAlloc(): Map<string, number> {
+    const rts = this.alive();
+    const out = new Map<string, number>();
+    const capOf = (r: PodRt) => Math.min(r.image?.cpuM ?? DEFAULT_CPU_M, r.ct.resources.limits?.cpu ?? Number.POSITIVE_INFINITY);
+    const total = rts.reduce((n, r) => n + capOf(r), 0);
+    if (total <= this.def.cpu) {
+      for (const r of rts) out.set(r.uid, capOf(r));
+      return out;
+    }
+    let left = this.def.cpu;
+    let open = rts;
+    while (open.length) {
+      const weight = open.reduce((n, r) => n + Math.max(2, r.ct.resources.requests.cpu), 0);
+      const satisfied = open.filter((r) => capOf(r) <= (left * Math.max(2, r.ct.resources.requests.cpu)) / weight);
+      if (!satisfied.length) {
+        for (const r of open) out.set(r.uid, (left * Math.max(2, r.ct.resources.requests.cpu)) / weight);
+        break;
+      }
+      for (const r of satisfied) {
+        out.set(r.uid, capOf(r));
+        left -= capOf(r);
+      }
+      open = open.filter((r) => !satisfied.includes(r));
+    }
+    return out;
+  }
+
+  /** 이 Pod 컨테이너가 원하는 CPU 와 받는 CPU. 컨테이너가 없으면 0/0 */
+  cpuState(podUid: string): CpuState {
+    const rt = this.pods.get(podUid);
+    if (!rt?.alive) return { want: 0, got: 0, limit: rt?.ct.resources.limits?.cpu };
+    const want = rt.image?.cpuM ?? DEFAULT_CPU_M;
+    const limit = rt.ct.resources.limits?.cpu;
+    const got = Math.round(this.cpuAlloc().get(podUid) ?? want);
+    const reason = got >= want ? undefined : limit !== undefined && got >= limit ? "limit" : "node";
+    return { want, got, limit, reason };
+  }
+
+  /** 요청 하나의 응답 시간 (ms): 원하는 CPU 를 다 받으면 workMs, 덜 받으면 그 비율만큼 늘어난다 (CFS 쿼터를 기다림) */
+  private latencyMs(rt: PodRt): number {
+    const work = rt.image?.workMs ?? DEFAULT_WORK_MS;
+    const { want, got } = this.cpuState(rt.uid);
+    if (!want) return work;
+    return got > 0 ? (work * Math.max(want, got)) / got : Number.POSITIVE_INFINITY;
+  }
+
+  /** metrics-server 가 읽어 가는 실사용 (kubectl top). 컨테이너가 없으면 undefined */
+  usage(podUid: string): { cpu: number; memory: number } | undefined {
+    if (!this.powered) return undefined;
+    const rt = this.pods.get(podUid);
+    if (!rt?.alive) return undefined;
+    return { cpu: this.cpuState(podUid).got, memory: Math.round(this.memOf(rt)) };
+  }
+
+  /** 다음 OOM 시각을 찾아 감시를 다시 건다: 컨테이너가 limits.memory 를 넘는 때, 또는 노드 메모리 합이 노드 메모리를 넘는 때 중 이른 것 */
+  private rearmOom(): void {
+    this.oomWatch?.cancel();
+    this.oomWatch = undefined;
+    if (this.stopped || !this.powered) return;
+    const rts = this.alive();
+    if (!rts.length) return;
+    const now = this.ctx.clock.now;
+    let when = Number.POSITIVE_INFINITY;
+    for (const r of rts) {
+      const lim = r.ct.resources.limits?.memory;
+      if (lim !== undefined) when = Math.min(when, firstAbove((t) => this.memOf(r, t), lim, now, now + OOM_HORIZON_MS));
+    }
+    when = Math.min(when, firstAbove((t) => rts.reduce((n, r) => n + this.memOf(r, t), 0), this.def.memory, now, now + OOM_HORIZON_MS));
+    if (when === Number.POSITIVE_INFINITY) {
+      // 먼 미래: 범위 끝에서 다시 찾는다
+      this.oomWatch = this.ctx.clock.background(OOM_HORIZON_MS, this.actor, () => this.rearmOom());
+      return;
+    }
+    this.oomWatch = this.ctx.clock.background(when - now, this.actor, () => this.checkOom());
+  }
+
+  private checkOom(): void {
+    if (this.stopped || !this.powered) return;
+    for (const r of this.alive()) {
+      const lim = r.ct.resources.limits?.memory;
+      if (lim !== undefined && this.memOf(r) > lim) this.oomKill(r, `메모리 사용이 limits.memory ${fmtMem(lim)} 에 닿음 (더 할당할 수 없음) → 커널의 cgroup OOM killer 가 컨테이너 프로세스를 죽임 (SIGKILL)`);
+    }
+    const rts = this.alive();
+    const total = rts.reduce((n, r) => n + this.memOf(r), 0);
+    if (rts.length && total > this.def.memory) this.nodeOom(rts);
+    this.rearmOom();
+  }
+
+  /**
+   * 노드 메모리가 넘침 → 커널 OOM killer 가 oom_score 가 가장 큰 프로세스를 죽인다.
+   * oom_score ≈ 사용량/노드 메모리 × 1000 + oom_score_adj (kubelet 이 QoS 로 정함: Guaranteed -997, BestEffort 1000, Burstable 1000 - 1000×requests/노드 메모리 를 2~999 로)
+   */
+  private nodeOom(rts: PodRt[]): void {
+    const cap = this.def.memory;
+    const scored = rts
+      .map((r) => {
+        const adj = r.qos === "Guaranteed" ? -997 : r.qos === "BestEffort" ? 1000 : Math.min(999, Math.max(2, 1000 - Math.floor((1000 * r.ct.resources.requests.memory) / cap)));
+        return { r, score: Math.floor((this.memOf(r) * 1000) / cap) + adj };
+      })
+      .sort((a, b) => b.score - a.score || this.memOf(b.r) - this.memOf(a.r) || (a.r.name < b.r.name ? -1 : 1));
+    const victim = scored[0]!.r;
+    const node = this.ctx.api.get("Node", this.def.name);
+    if (node) this.ctx.api.recordEvent(node, "Warning", "SystemOOM", `System OOM encountered, victim process: ${victim.ct.name}, pid: ${pidOf(victim.uid)}`, this.actor);
+    this.oomKill(
+      victim,
+      `노드 ${this.def.name} 의 컨테이너 메모리 사용 합이 노드 메모리 ${fmtMem(cap)} 에 닿음 (overcommit — limits 가 없거나 limits 합이 노드보다 큼) → 노드의 커널 OOM killer 가 oom_score 가 가장 큰 프로세스를 고름 [${scored
+        .map((x) => `${x.r.name} ${x.score} (${x.r.qos}, ${Math.round(this.memOf(x.r))}Mi)`)
+        .join(" · ")}]`,
+    );
+  }
+
+  private oomKill(rt: PodRt, why: string): void {
+    if (!rt.alive) return;
+    const ref = { kind: "Pod", namespace: rt.ns, name: rt.name };
+    this.ctx.trace.add(this.actor, "kubelet.oom", `${rt.name} ${why} → OOMKilled · exit 137`, ref);
+    if (rt.stage === "terminating") {
+      rt.timer?.cancel();
+      this.finish(rt, 137, "OOMKilled");
+      return;
+    }
+    rt.timer?.cancel();
+    this.crash(rt, 137, "OOMKilled");
+    // API 의 Pod 가 이미 사라지는 중이라 crash 가 아무것도 못 했어도 프로세스는 죽었다 (감시가 같은 시각에 되풀이되지 않게)
+    rt.alive = false;
   }
 
   // ---------- 도우미 ----------
@@ -715,6 +906,31 @@ export class Kubelet {
     }
     throw new Error(`${this.def.name}: PodCIDR ${this.podCIDR} 에 남은 IP 가 없습니다`);
   }
+}
+
+/** f 가 시간에 대해 줄지 않을 때, f(t) > limit 이 되는 첫 시각 (ms 단위). 범위 안에 없으면 +∞ */
+function firstAbove(f: (t: number) => number, limit: number, from: number, to: number): number {
+  if (f(from) > limit) return from;
+  if (f(to) <= limit) return Number.POSITIVE_INFINITY;
+  let lo = from;
+  let hi = to;
+  while (hi - lo > 1) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (f(mid) > limit) hi = mid;
+    else lo = mid;
+  }
+  return hi;
+}
+
+function probeTimeout(url: string): string {
+  return `Get "${url}": context deadline exceeded (Client.Timeout exceeded while awaiting headers)`;
+}
+
+/** 이벤트 문구용 프로세스 번호 (uid 로 정해지는 가짜) */
+function pidOf(uid: string): number {
+  let h = 0;
+  for (let i = 0; i < uid.length; i++) h = (h * 31 + uid.charCodeAt(i)) >>> 0;
+  return 1000 + (h % 30000);
 }
 
 function names(p: Pod): string {

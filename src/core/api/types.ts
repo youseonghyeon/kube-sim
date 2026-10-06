@@ -35,12 +35,15 @@ export interface Probe {
   periodSeconds?: number;
   /** 기본 3 — 이만큼 연속 실패하면 Ready=False */
   failureThreshold?: number;
+  /** 기본 1 — 응답이 이보다 늦으면 실패 */
+  timeoutSeconds?: number;
 }
 
 export interface Container {
   name: string;
   image: string;
-  resources: { requests: Resources };
+  /** requests: 스케줄러가 보는 예약 (0 = 적지 않음). limits: cgroup 이 거는 상한 (없으면 상한 없음) */
+  resources: { requests: Resources; limits?: Partial<Resources> };
   ports?: { containerPort: number; protocol?: "TCP" }[];
   readinessProbe?: Probe;
   /** 실패하면 kubelet 이 컨테이너를 죽이고 다시 띄운다 */
@@ -352,6 +355,24 @@ export function podRequests(spec: PodSpec): Resources {
     memory += c.resources.requests.memory;
   }
   return { cpu, memory };
+}
+
+export type QosClass = "Guaranteed" | "Burstable" | "BestEffort";
+
+/**
+ * QoS 클래스: 모든 컨테이너가 cpu·memory limits 를 갖고 requests == limits 면 Guaranteed,
+ * requests·limits 가 하나도 없으면 BestEffort, 나머지는 Burstable. (requests 0 = 적지 않음)
+ */
+export function qosClass(spec: PodSpec): QosClass {
+  let any = false;
+  let guaranteed = true;
+  for (const c of spec.containers) {
+    const r = c.resources.requests;
+    const l = c.resources.limits ?? {};
+    if (r.cpu || r.memory || l.cpu !== undefined || l.memory !== undefined) any = true;
+    if (l.cpu === undefined || l.memory === undefined || r.cpu !== l.cpu || r.memory !== l.memory) guaranteed = false;
+  }
+  return !any ? "BestEffort" : guaranteed ? "Guaranteed" : "Burstable";
 }
 
 /** 끝난 Pod (재시작 정책 Always 라 축소판에서는 거의 없음) */

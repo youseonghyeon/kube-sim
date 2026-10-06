@@ -27,6 +27,8 @@ export type TraceKind =
   | "kubelet.backoff"
   | "kubelet.kill"
   | "kubelet.removed"
+  /** 커널 OOM killer 가 컨테이너를 죽임 (cgroup limits.memory 초과 또는 노드 메모리 초과) */
+  | "kubelet.oom"
   /** readiness probe 결과로 Ready 가 바뀜 */
   | "kubelet.probe"
   | "node.register"

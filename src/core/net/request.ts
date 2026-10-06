@@ -38,6 +38,8 @@ export interface NetResult {
   forwardedFor?: string;
   /** HTTP 응답 코드 (응답을 받았을 때) */
   httpStatus?: number;
+  /** 앱이 요청을 처리한 시간 (ms) — CPU 를 덜 받으면 길어진다. 네트워크 시간은 0 으로 본다 */
+  latencyMs?: number;
   /** 실패의 종류 — 도구마다 다른 문구(wget 등)를 만들 때 쓴다 */
   failure?: { kind: "dns" | "refused" | "timeout" | "http" | "nohttp"; host: string; ip?: string };
 }
@@ -285,7 +287,13 @@ function deliverToIp(c: Cluster, src: Source, req: Req, ip: string, port: number
     steps.push({ kind: "fail", actor: pod.metadata.name, text: `${pod.metadata.name} 의 앱이 받았지만 HTTP 가 아닌 프로토콜로 답함 → curl 이 HTTP 응답으로 읽지 못함`, at: { pod: pod.metadata.name } });
     return { ok: false, steps, failure: { kind: "nohttp", host: req.host, ip }, output: "curl: (1) Received HTTP/0.9 when not allowed", servedBy: pod.metadata.name };
   }
-  const seen = `(응답한 Pod: ${pod.metadata.name} · 앱이 본 출발지 ${src.ip}${src.xff ? ` · X-Forwarded-For: ${src.xff}` : ""} — 실제 curl 은 이 줄을 찍지 않습니다)`;
+  const ms = Math.round(app.latencyMs);
+  const cpu = app.cpu;
+  const slowWhy =
+    cpu.reason === undefined
+      ? ""
+      : ` — 앱이 CPU ${cpu.want}m 를 원하지만 ${cpu.got}m 만 받음 (${cpu.reason === "limit" ? `cpu limit ${cpu.limit}m 에 막혀 throttling` : "노드 CPU 가 모자라 requests 비율로 나눔"}) → 평소 ${Math.round((app.latencyMs * cpu.got) / cpu.want)}ms 걸릴 일이 ${ms}ms`;
+  const seen = `(응답한 Pod: ${pod.metadata.name} · 응답 ${ms}ms · 앱이 본 출발지 ${src.ip}${src.xff ? ` · X-Forwarded-For: ${src.xff}` : ""} — 실제 curl 은 이 줄을 찍지 않습니다)`;
   if (app.sick || !app.warm) {
     steps.push({ kind: "response", actor: pod.metadata.name, text: `${pod.metadata.name} 이(가) 받았지만 앱이 준비되지 않음 → HTTP 503`, at: { pod: pod.metadata.name } });
     return {
@@ -302,11 +310,11 @@ function deliverToIp(c: Cluster, src: Source, req: Req, ip: string, port: number
   steps.push({
     kind: "response",
     actor: pod.metadata.name,
-    text: `${pod.metadata.name} (${ip}:${port}) 의 앱이 HTTP 200 으로 응답 — 앱이 본 출발지 IP 는 ${src.ip}${src.xff ? `, X-Forwarded-For: ${src.xff}` : ""}`,
+    text: `${pod.metadata.name} (${ip}:${port}) 의 앱이 HTTP 200 으로 응답 (${ms}ms${slowWhy}) — 앱이 본 출발지 IP 는 ${src.ip}${src.xff ? `, X-Forwarded-For: ${src.xff}` : ""}`,
     at: { pod: pod.metadata.name },
   });
   const body = spec.role === "echo" ? `Hostname: ${pod.metadata.name}\nIP: ${ip}\nRemoteAddr: ${src.ip}:${40000 + c.netRng.int(20000)}\nGET ${req.path} HTTP/1.1\nHost: ${req.httpHost}${src.xff ? `\nX-Forwarded-For: ${src.xff}` : ""}` : spec.body;
-  return { ok: true, steps, httpStatus: 200, output: `${body}\n${seen}`, servedBy: pod.metadata.name, seenSource: src.ip, forwardedFor: src.xff };
+  return { ok: true, steps, httpStatus: 200, latencyMs: app.latencyMs, output: `${body}\n${seen}`, servedBy: pod.metadata.name, seenSource: src.ip, forwardedFor: src.xff };
 }
 
 /** ingress-nginx 컨트롤러 Pod: Host·경로로 Ingress 규칙을 찾아 그 Service 의 엔드포인트(Pod IP)로 직접 새 연결 */

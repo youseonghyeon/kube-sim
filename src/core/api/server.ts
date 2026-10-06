@@ -2,8 +2,9 @@
 // 모든 컴포넌트(컨트롤러·스케줄러·kubelet)는 서로 직접 부르지 않고 여기에 쓰고, watch 로 깨어난다.
 import type { Clock } from "../clock";
 import { stableJson } from "../rng";
+import { fmtCpu, fmtMem } from "../units";
 import type { Trace } from "../trace";
-import { CLUSTER_SCOPED, type Deployment, type KEvent, type KObject, type Kind, type ObjectMeta, type ObjectOf, type Pod, type PodDisruptionBudget, type Service } from "./types";
+import { CLUSTER_SCOPED, type Container, type Deployment, type KEvent, type KObject, type Kind, type ObjectMeta, type ObjectOf, type Pod, type PodDisruptionBudget, type Service } from "./types";
 
 export type WatchType = "ADDED" | "MODIFIED" | "DELETED";
 
@@ -125,6 +126,7 @@ export class ApiServer {
       ownerReferences: clone(draft.metadata.ownerReferences ?? []),
     };
     if (obj.kind === "Deployment") defaultDeployment(obj as Deployment);
+    resourceDefaults(obj);
     if (!obj.status) obj.status = emptyStatus(kind) as ObjectOf<K>["status"];
     if (obj.kind === "Pod") addDefaultTolerations(obj as Pod);
     if (obj.kind === "Service") this.allocateServiceAddresses(obj as Service);
@@ -157,6 +159,7 @@ export class ApiServer {
     next.metadata.generation = cur.metadata.generation;
     if (next.kind === "Service") this.allocateServiceAddresses(next as Service, cur as Service);
     if (next.kind === "Deployment") defaultDeployment(next as Deployment);
+    resourceDefaults(next);
     if (stableJson(next) === stableJson(cur)) return clone(cur);
     const specChanged = stableJson(next.spec) !== stableJson(cur.spec);
     if (specChanged && obj.kind !== "Lease") next.metadata.generation = cur.metadata.generation + 1;
@@ -406,6 +409,32 @@ export class ApiServer {
 }
 
 /** API 서버의 기본값 채우기 (Deployment): 전략 RollingUpdate 25%/25%, progressDeadlineSeconds 600, revisionHistoryLimit 10 */
+/**
+ * 컨테이너 resources 의 기본값과 검사 (Pod·ReplicaSet·Deployment 템플릿):
+ * limits 만 적고 requests 를 비우면 requests = limits, requests 가 limits 보다 크면 Invalid (실제 API 서버와 같은 문구).
+ */
+function resourceDefaults(o: KObject): void {
+  let containers: Container[] | undefined;
+  let path = "spec.containers";
+  if (o.kind === "Pod") containers = o.spec.containers;
+  else if (o.kind === "Deployment" || o.kind === "ReplicaSet") {
+    containers = o.spec.template.spec.containers;
+    path = "spec.template.spec.containers";
+  }
+  if (!containers) return;
+  containers.forEach((c, i) => {
+    const r = c.resources.requests;
+    const l = c.resources.limits;
+    if (!l) return;
+    if (l.cpu !== undefined && !r.cpu) r.cpu = l.cpu;
+    if (l.memory !== undefined && !r.memory) r.memory = l.memory;
+    if (l.cpu !== undefined && r.cpu > l.cpu)
+      throw new ApiError("Invalid", `${o.kind} "${o.metadata.name}" is invalid: ${path}[${i}].resources.requests: Invalid value: "${fmtCpu(r.cpu)}": must be less than or equal to cpu limit of ${fmtCpu(l.cpu)}`);
+    if (l.memory !== undefined && r.memory > l.memory)
+      throw new ApiError("Invalid", `${o.kind} "${o.metadata.name}" is invalid: ${path}[${i}].resources.requests: Invalid value: "${fmtMem(r.memory)}": must be less than or equal to memory limit of ${fmtMem(l.memory)}`);
+  });
+}
+
 function defaultDeployment(d: Deployment): void {
   d.spec.strategy ??= { type: "RollingUpdate" };
   if (d.spec.strategy.type === "RollingUpdate") d.spec.strategy.rollingUpdate ??= { maxSurge: "25%", maxUnavailable: "25%" };

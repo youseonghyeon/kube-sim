@@ -63,7 +63,19 @@
 - 메모: 사용자의 실제 구성(Tailscale funnel → Ingress → Service)을 예제로 만들 수 있다
 
 ## 5. 운영 (후보 — 시작할 때 고른다)
-- requests/limits 와 OOMKilled·CPU throttling, HPA(메트릭 흉내로 replicas 조정), NetworkPolicy(기본 허용 → 정책이 하나라도 걸리면 기본 차단), ConfigMap/Secret 변경과 재시작, StatefulSet + PVC(순서·고정 이름·고정 볼륨)
+- 후보: requests/limits 와 OOMKilled·CPU throttling(5a 로 시작), HPA(메트릭 흉내로 replicas 조정), NetworkPolicy(기본 허용 → 정책이 하나라도 걸리면 기본 차단), ConfigMap/Secret 변경과 재시작, StatefulSet + PVC(순서·고정 이름·고정 볼륨)
+
+### 5a. requests/limits · OOMKilled · CPU throttling (2026-10-06 시작, 사용자 선택)
+- 왜: 사용자의 차트(`deploy/values.yaml`)에 `limits.memory: 64Mi` 가 실제로 있다. "왜 재시작됐지(OOMKilled · exit 137)", "왜 느리지(throttling)", "노드가 꽉 찼는데 왜 스케줄은 되지(requests ≠ 실사용)" 를 추측하지 않고 보게 한다.
+- 배우는 것
+  - requests 는 스케줄러가 보는 **예약**, limits 는 커널(cgroup)이 거는 **상한**. 실사용(`kubectl top`)은 둘과 따로 움직인다
+  - memory limit 을 넘으면 cgroup OOM killer 가 컨테이너를 죽인다 → `OOMKilled` · exit 137 → 재시작 → 되풀이되면 CrashLoopBackOff (describe 의 Last State)
+  - cpu limit 은 죽이지 않는다 — CFS 쿼터로 **느려질 뿐**(throttling). 너무 낮으면 probe 가 시간 초과로 실패해 liveness 가 재시작시킨다
+  - limits 가 없으면 노드 메모리가 넘칠 수 있다(overcommit) → 노드 OOM killer 가 oom_score(QoS·requests 대비 사용량)로 **다른 Pod** 를 고를 수 있다. 노드 CPU 가 모자라면 requests 비율로 나눠 받는다
+  - QoS 클래스(Guaranteed · Burstable · BestEffort)가 어떻게 정해지고 무엇을 바꾸나. limits < requests 는 API 가 거절
+- 만들 것: `resources.limits`(검증 포함), 이미지별 메모리·CPU 사용 모양(시작 램프·누수·CPU 수요), kubelet 의 cgroup OOM·노드 OOM(oom_score)·CPU 분배와 throttling, 응답 시간·probe timeout, `kubectl top pods|nodes`, `kubectl set resources --limits`, describe 의 Limits·QoS·OOMKilled, 인스펙터(limits 편집, Pod 실사용 막대), 노드 칸의 실사용 표시, 예제 묶음 "자원"
+- 예제: "메모리 limit 을 넘으면 (OOMKilled)", "limits 없는 메모리 누수와 이웃 Pod (노드 OOM)", "CPU limit 은 느리게 할 뿐 (throttling)"
+- 완료 기준: 예제마다 "해 볼 것" 이 위 학습 포인트를 화면·kubectl 출력으로 보여 주고, 코어 동작이 트레이스 테스트로 고정된다. 네 가지 검증 통과
 
 ## 6. GitOps (ArgoCD 식) ✅ 2026-10-02
 - 된 것: Git 저장소(커밋 이력, 경로별 매니페스트), Argo CD application-controller(3분 폴링·Refresh, Git 에 적은 필드 기준 비교 → Synced/OutOfSync, 리소스 Health, 자동 sync 는 새 리비전마다 한 번, selfHeal 5초, prune, 이력), `argocd app list/get/diff/sync/history/set`·`git log` 흉내, `kubectl get applications -n argocd`, 캔버스 GitOps 칸(Git → Application, '아직 모름' 표시·폴링 카운트다운), Application 인스펙터(정책 토글·리소스·차이), Git 인스펙터(작업 사본 편집 → 커밋), 예제 '내 배포 파이프라인'(CI 태그 커밋 → 폴링 → 자동 sync → 롤아웃)

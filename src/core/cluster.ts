@@ -1,7 +1,7 @@
 // 클러스터 한 벌: 시계 + 트레이스 + API 서버 + 컨트롤 플레인(스케줄러·컨트롤러) + 노드마다 kubelet.
 // 바깥(모델·kubectl·UI)은 여기 메서드로만 클러스터를 바꾼다.
 import { ApiServer, WATCH_DELAY_MS, type Draft } from "./api/server";
-import type { Application, Deployment, Ingress, PodDisruptionBudget, PodSpec, Probe, Service, ServiceType } from "./api/types";
+import type { Application, Deployment, Ingress, Pod, PodDisruptionBudget, PodSpec, Probe, Service, ServiceType } from "./api/types";
 import { Clock } from "./clock";
 import type { ComponentContext } from "./controllers/base";
 import { DeploymentController } from "./controllers/deployment";
@@ -10,7 +10,7 @@ import { DrainJob } from "./drain";
 import { EndpointSliceController } from "./controllers/endpointslice";
 import { NodeLifecycleController, TaintEvictionController } from "./controllers/nodelifecycle";
 import { ReplicaSetController } from "./controllers/replicaset";
-import { Kubelet, type NodeDef } from "./kubelet";
+import { Kubelet, type CpuState, type NodeDef } from "./kubelet";
 import { ARGO, ArgoCD } from "./gitops/argocd";
 import { GitRepo, type Commit } from "./gitops/git";
 import { IngressNginxStatus, MetalLB, TailscaleOperator } from "./net/ingress";
@@ -201,6 +201,16 @@ export class Cluster {
     return ok;
   }
 
+  /**
+   * metrics-server 흉내: Pod 의 실사용 (kubectl top). 컨테이너가 돌지 않으면 undefined.
+   * 축소판: 실제 metrics-server 는 15초마다 긁어 와 늦게 보이지만 여기서는 바로 보인다.
+   */
+  podMetrics(p: Pod): { cpu: number; memory: number; cpuState: CpuState } | undefined {
+    const k = p.spec.nodeName ? this.kubelets.get(p.spec.nodeName) : undefined;
+    const u = k?.usage(p.metadata.uid);
+    return u && k ? { ...u, cpuState: k.cpuState(p.metadata.uid) } : undefined;
+  }
+
   podSick(podName: string): boolean {
     const p = this.api.peekList("Pod").find((x) => x.metadata.name === podName);
     if (!p?.spec.nodeName) return false;
@@ -382,6 +392,8 @@ export function deployment(
     liveness?: Probe;
     /** preStop sleep 초 */
     preStop?: number;
+    /** resources.limits (없으면 상한 없음) */
+    limits?: { cpu?: number; memory?: number };
   },
 ): DeploymentManifest {
   const labels = opts.labels ?? { app: name };
@@ -390,7 +402,7 @@ export function deployment(
       {
         name,
         image: opts.image,
-        resources: { requests: { cpu: opts.cpu, memory: opts.memory } },
+        resources: { requests: { cpu: opts.cpu, memory: opts.memory }, ...(opts.limits ? { limits: { ...opts.limits } } : {}) },
         ...(opts.port ? { ports: [{ containerPort: opts.port }] } : {}),
         ...(opts.readiness ? { readinessProbe: opts.readiness } : {}),
         ...(opts.liveness ? { livenessProbe: opts.liveness } : {}),

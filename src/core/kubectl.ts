@@ -1,7 +1,7 @@
 // kubectl 흉내: 문자열 명령 → API 호출 + 실제와 같은 모양의 출력. 코어 API 위의 얇은 층이다.
 // 축소판: default 네임스페이스만, 자주 쓰는 하위 명령·플래그만.
 import { ApiError } from "./api/server";
-import { controllerOf, isNodeReady, NODE_LEASE_NS, podRequests, SERVICE_NAME_LABEL, type Deployment, type IngressPath, type KEvent, type Kind, type Node, type Pod, type ServiceType } from "./api/types";
+import { controllerOf, isNodeReady, NODE_LEASE_NS, podRequests, qosClass, SERVICE_NAME_LABEL, type Deployment, type IngressPath, type KEvent, type Kind, type Node, type Pod, type ServiceType } from "./api/types";
 import { deployment, ingress, pdb, service, type Cluster } from "./cluster";
 import type { DrainJob } from "./drain";
 import type { NetResult } from "./net/request";
@@ -96,7 +96,8 @@ export const KUBECTL_HELP = [
   "  kubectl scale deployment/<이름> --replicas=N",
   "  kubectl set image deployment/<이름> <컨테이너>=<이미지>",
   "  kubectl rollout status|history|undo|restart deployment/<이름>   (undo 는 --to-revision=N)",
-  "  kubectl set resources deployment/<이름> --requests=cpu=500m,memory=256Mi",
+  "  kubectl set resources deployment/<이름> --requests=cpu=500m,memory=256Mi [--limits=cpu=1,memory=512Mi]",
+  "  kubectl top pods | nodes   (metrics-server — 실사용)",
   "  kubectl delete pod|deploy|rs|svc <이름>   (pod 는 --force --grace-period=0 로 강제)",
   "  kubectl cordon|uncordon <노드>",
   "  kubectl drain <노드> [--ignore-daemonsets]   (PodDisruptionBudget 을 지키며 내보냄)",
@@ -133,6 +134,8 @@ export function runKubectl(cluster: Cluster, line: string): KubectlResult {
         return ok(get(cluster, pos, flags));
       case "describe":
         return ok(describe(cluster, pos));
+      case "top":
+        return ok(top(cluster, pos));
       case "create":
         return create(cluster, pos, flags, line, args);
       case "scale":
@@ -193,7 +196,7 @@ function parseFlags(args: string[]): { pos: string[]; flags: Map<string, string>
     } else if (a.startsWith("--")) {
       const eq = a.indexOf("=");
       if (eq > 0) flags.set(a.slice(2, eq), a.slice(eq + 1));
-      else if (["replicas", "image", "requests", "grace-period", "port", "target-port", "type", "name", "to-revision", "selector", "min-available", "max-unavailable"].includes(a.slice(2)) && args[i + 1] && !args[i + 1]!.startsWith("-")) flags.set(a.slice(2), args[++i]!);
+      else if (["replicas", "image", "requests", "limits", "grace-period", "port", "target-port", "type", "name", "to-revision", "selector", "min-available", "max-unavailable"].includes(a.slice(2)) && args[i + 1] && !args[i + 1]!.startsWith("-")) flags.set(a.slice(2), args[++i]!);
       else flags.set(a.slice(2), "true");
     } else if (a.startsWith("-o")) flags.set("o", a.slice(2));
     else pos.push(a);
@@ -562,7 +565,11 @@ function describePod(c: Cluster, p: Pod): string {
       if (cs.lastState) sub.push(...stateLines("Last State", cs.lastState));
       sub.push(["Ready", cs.ready ? "True" : "False"], ["Restart Count", String(cs.restartCount)]);
     } else sub.push(["State", "Waiting"], ["Ready", "False"], ["Restart Count", "0"]);
-    sub.push(["Requests", ""], ["  cpu", fmtCpu(ct.resources.requests.cpu)], ["  memory", fmtMem(ct.resources.requests.memory)]);
+    const lim = ct.resources.limits;
+    if (lim && (lim.cpu !== undefined || lim.memory !== undefined))
+      sub.push(["Limits", ""], ...(lim.cpu !== undefined ? [["  cpu", fmtCpu(lim.cpu)] as [string, string]] : []), ...(lim.memory !== undefined ? [["  memory", fmtMem(lim.memory)] as [string, string]] : []));
+    const rq = ct.resources.requests;
+    if (rq.cpu || rq.memory) sub.push(["Requests", ""], ...(rq.cpu ? [["  cpu", fmtCpu(rq.cpu)] as [string, string]] : []), ...(rq.memory ? [["  memory", fmtMem(rq.memory)] as [string, string]] : []));
     out += `\n  ${ct.name}:\n` + kv(sub, 4);
   }
   out += "\nConditions:\n" + table(["  Type", "Status"], ["PodScheduled", "Initialized", "ContainersReady", "Ready"].flatMap((t) => {
@@ -570,11 +577,65 @@ function describePod(c: Cluster, p: Pod): string {
     return cond ? [[`  ${t}`, cond.status]] : [];
   }));
   const tols = (p.spec.tolerations ?? []).map((t) => `${t.key}${t.effect ? `:${t.effect}` : ""} op=${t.operator ?? "Equal"}${t.value ? ` value=${t.value}` : ""}${t.tolerationSeconds !== undefined ? ` for ${t.tolerationSeconds}s` : ""}`);
-  const reqs = podRequests(p.spec);
-  out += `\nQoS Class:        Burstable (requests 만 있음 — cpu ${fmtCpu(reqs.cpu)}, memory ${fmtMem(reqs.memory)})`;
+  out += `\nQoS Class:        ${qosClass(p.spec)}`;
   out += `\nNode-Selectors:   ${p.spec.nodeSelector ? labelsText(p.spec.nodeSelector) : "<none>"}`;
   out += `\nTolerations:      ${tols.join("\n                  ") || "<none>"}`;
   return out + eventsBlock(c, p.metadata.uid);
+}
+
+/** describe node 의 Limits 칸: limits 가 없는 컨테이너는 0 으로 센다 (실제 출력과 같음) */
+function podLimits(p: Pod): { cpu: number; memory: number } {
+  let cpu = 0;
+  let memory = 0;
+  for (const ct of p.spec.containers) {
+    cpu += ct.resources.limits?.cpu ?? 0;
+    memory += ct.resources.limits?.memory ?? 0;
+  }
+  return { cpu, memory };
+}
+
+// ---------- top (metrics-server) ----------
+
+function top(c: Cluster, pos: string[]): string {
+  const what = (pos[0] ?? "").toLowerCase();
+  const names = pos.slice(1);
+  if (/^(po|pod|pods)$/.test(what)) {
+    const pods = c.api.list("Pod", "default").filter((p) => names.length === 0 || names.includes(p.metadata.name));
+    for (const n of names) if (!pods.some((p) => p.metadata.name === n)) throw new ApiError("NotFound", `pods "${n}" not found`);
+    const rows = pods.flatMap((p) => {
+      const m = c.podMetrics(p);
+      return m ? [[p.metadata.name, `${m.cpu}m`, `${m.memory}Mi`]] : [];
+    });
+    if (!rows.length) {
+      if (names.length) throw new KubectlError(`error: Metrics not available for pod default/${names[0]}, age: ${fmtAge(c.now - pods[0]!.metadata.creationTimestamp)} (컨테이너가 돌고 있지 않음)`);
+      return "No resources found in default namespace.";
+    }
+    return table(["NAME", "CPU(cores)", "MEMORY(bytes)"], rows);
+  }
+  if (/^(no|node|nodes)$/.test(what)) {
+    const nodes = c.api.list("Node").filter((n) => names.length === 0 || names.includes(n.metadata.name));
+    for (const n of names) if (!nodes.some((x) => x.metadata.name === n)) throw new ApiError("NotFound", `nodes "${n}" not found`);
+    const pods = c.api.list("Pod");
+    return table(
+      ["NAME", "CPU(cores)", "CPU(%)", "MEMORY(bytes)", "MEMORY(%)"],
+      nodes.map((n) => {
+        if (!c.nodePowered(n.metadata.name)) return [n.metadata.name, "<unknown>", "<unknown>", "<unknown>", "<unknown>"];
+        let cpu = 0;
+        let mem = 0;
+        for (const p of pods) {
+          if (p.spec.nodeName !== n.metadata.name) continue;
+          const m = c.podMetrics(p);
+          if (m) {
+            cpu += m.cpu;
+            mem += m.memory;
+          }
+        }
+        const a = n.status.allocatable;
+        return [n.metadata.name, `${cpu}m`, `${Math.round((cpu / a.cpu) * 100)}%`, `${mem}Mi`, `${Math.round((mem / a.memory) * 100)}%`];
+      }),
+    );
+  }
+  throw new KubectlError(`error: kubectl top pods 또는 kubectl top nodes 로 쓰세요 (metrics-server 가 모은 실사용 — requests 와 다릅니다)`);
 }
 
 function describeNode(c: Cluster, n: Node): string {
@@ -598,16 +659,29 @@ function describeNode(c: Cluster, n: Node): string {
   out += `\nNon-terminated Pods:          (${pods.length} in total)\n`;
   out += pods.length
     ? table(
-        ["  Namespace", "Name", "CPU Requests", "Memory Requests", "Age"],
+        ["  Namespace", "Name", "CPU Requests", "CPU Limits", "Memory Requests", "Memory Limits", "Age"],
         pods.map((p) => {
           const r = podRequests(p.spec);
-          return [`  ${p.metadata.namespace ?? "default"}`, p.metadata.name, `${fmtCpu(r.cpu)} (${pct(r.cpu, a.cpu)})`, `${fmtMem(r.memory)} (${pct(r.memory, a.memory)})`, fmtAge(c.now - p.metadata.creationTimestamp)];
+          const l = podLimits(p);
+          return [
+            `  ${p.metadata.namespace ?? "default"}`,
+            p.metadata.name,
+            `${fmtCpu(r.cpu)} (${pct(r.cpu, a.cpu)})`,
+            `${fmtCpu(l.cpu)} (${pct(l.cpu, a.cpu)})`,
+            `${fmtMem(r.memory)} (${pct(r.memory, a.memory)})`,
+            `${fmtMem(l.memory)} (${pct(l.memory, a.memory)})`,
+            fmtAge(c.now - p.metadata.creationTimestamp),
+          ];
         }),
       )
     : "  (없음)";
-  out += "\nAllocated resources:\n" + table(["  Resource", "Requests"], [
-    ["  cpu", `${fmtCpu(usage.requested.cpu)} (${pct(usage.requested.cpu, a.cpu)})`],
-    ["  memory", `${fmtMem(usage.requested.memory)} (${pct(usage.requested.memory, a.memory)})`],
+  const lims = pods.reduce((n, p) => {
+    const l = podLimits(p);
+    return { cpu: n.cpu + l.cpu, memory: n.memory + l.memory };
+  }, { cpu: 0, memory: 0 });
+  out += "\nAllocated resources:\n  (Total limits may be over 100 percent, i.e., overcommitted.)\n" + table(["  Resource", "Requests", "Limits"], [
+    ["  cpu", `${fmtCpu(usage.requested.cpu)} (${pct(usage.requested.cpu, a.cpu)})`, `${fmtCpu(lims.cpu)} (${pct(lims.cpu, a.cpu)})`],
+    ["  memory", `${fmtMem(usage.requested.memory)} (${pct(usage.requested.memory, a.memory)})`, `${fmtMem(lims.memory)} (${pct(lims.memory, a.memory)})`],
   ]);
   return out + eventsBlock(c, n.metadata.uid);
 }
@@ -636,6 +710,9 @@ function templateLines(ct: Pod["spec"]["containers"][number] | undefined): [stri
     [`  ${ct.name}`, ""],
     ["    Image", ct.image],
     ["    Requests", `cpu ${fmtCpu(ct.resources.requests.cpu)}, memory ${fmtMem(ct.resources.requests.memory)}`],
+    ...(ct.resources.limits && (ct.resources.limits.cpu !== undefined || ct.resources.limits.memory !== undefined)
+      ? [["    Limits", [ct.resources.limits.cpu !== undefined ? `cpu ${fmtCpu(ct.resources.limits.cpu)}` : "", ct.resources.limits.memory !== undefined ? `memory ${fmtMem(ct.resources.limits.memory)}` : ""].filter(Boolean).join(", ")] as [string, string]]
+      : []),
   ];
 }
 
@@ -733,21 +810,28 @@ function setCmd(c: Cluster, pos: string[], flags: Map<string, string>, line: str
     return ok(`deployment.apps/${name} image updated`, true);
   }
   const req = flags.get("requests");
-  if (!req) throw new KubectlError("error: --requests=cpu=500m,memory=256Mi 처럼 쓰세요");
-  let cpu: number | undefined;
-  let mem: number | undefined;
-  for (const part of req.split(",")) {
-    const [key, val] = part.split("=");
-    if (key === "cpu") cpu = parseCpu(val ?? "");
-    else if (key === "memory") mem = parseMem(val ?? "");
-    else throw new KubectlError(`error: 알 수 없는 자원 "${key}" (cpu, memory)`);
-    if ((key === "cpu" && cpu === undefined) || (key === "memory" && mem === undefined)) throw new KubectlError(`error: "${part}" 를 읽지 못했습니다 (cpu=500m · memory=256Mi 처럼)`);
-  }
+  const lim = flags.get("limits");
+  if (!req && !lim) throw new KubectlError("error: --requests=cpu=500m,memory=256Mi 또는 --limits=cpu=1,memory=512Mi 처럼 쓰세요");
+  const parseRes = (flag: string, v: string | undefined) => {
+    const out: { cpu?: number; memory?: number } = {};
+    if (!v) return out;
+    for (const part of v.split(",")) {
+      const [key, val] = part.split("=");
+      if (key === "cpu") out.cpu = parseCpu(val ?? "");
+      else if (key === "memory") out.memory = parseMem(val ?? "");
+      else throw new KubectlError(`error: --${flag}: 알 수 없는 자원 "${key}" (cpu, memory)`);
+      if ((key === "cpu" && out.cpu === undefined) || (key === "memory" && out.memory === undefined)) throw new KubectlError(`error: --${flag}: "${part}" 를 읽지 못했습니다 (cpu=500m · memory=256Mi 처럼)`);
+    }
+    return out;
+  };
+  const r = parseRes("requests", req);
+  const l = parseRes("limits", lim);
   userTrace(c, line);
   c.api.patch("Deployment", name, "default", "kubectl", (o) => {
     for (const ct of o.spec.template.spec.containers) {
-      if (cpu !== undefined) ct.resources.requests.cpu = cpu;
-      if (mem !== undefined) ct.resources.requests.memory = mem;
+      if (r.cpu !== undefined) ct.resources.requests.cpu = r.cpu;
+      if (r.memory !== undefined) ct.resources.requests.memory = r.memory;
+      if (l.cpu !== undefined || l.memory !== undefined) ct.resources.limits = { ...ct.resources.limits, ...l };
     }
   });
   return ok(`deployment.apps/${name} resource requirements updated`, true);
