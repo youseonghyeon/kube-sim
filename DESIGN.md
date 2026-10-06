@@ -14,6 +14,7 @@
 | line | #DFE3E8 | #30353E | 1px 구분선 |
 | ink | #17191E | #E8EAEE | 본문 |
 | ink-2 | #646B78 | #9AA1AD | 보조 텍스트 |
+| ink-3 | #707784 | #8B93A1 | 캡션·빈 안내·목록의 수 (11~12px 라 바탕 대비 4.5:1 이상 — 2026-10-06 리뷰에서 올림) |
 | accent | #3457D5 | #7A93FF | 선택, 주요 버튼 |
 
 상태: 정상 #1E9E5A · 기다림(Pending·ContainerCreating) #C98A10 · 오류(CrashLoopBackOff·ImagePullBackOff·NotReady) #D64541

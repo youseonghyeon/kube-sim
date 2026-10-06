@@ -7,7 +7,7 @@
   --line-strong: #c9ced6;
   --ink: #17191e;
   --ink-2: #646b78;
-  --ink-3: #9aa1ad;
+  --ink-3: #707784; /* 흰 바탕 대비 4.5:1 (11~12px 보조 글자) */
   --accent: #3457d5;
   --accent-soft: rgba(52, 87, 213, 0.12);
   --ok: #1e9e5a;
@@ -43,7 +43,7 @@
   --line-strong: #3d434e;
   --ink: #e8eaee;
   --ink-2: #9aa1ad;
-  --ink-3: #6b7280;
+  --ink-3: #8b93a1; /* surface-2 대비 4.6:1 */
   --accent: #7a93ff;
   --accent-soft: rgba(122, 147, 255, 0.16);
   --ok: #3ccf7a;

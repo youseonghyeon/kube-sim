@@ -369,7 +369,7 @@ export const EXAMPLES: Example[] = [
       {
         title: "Pod 하나 지우기",
         command: "kubectl delete pod {pod:web}",
-        expect: "SIGTERM 을 받은 nginx 는 바로 새 연결을 받지 않는데, kube-proxy 가 규칙을 바꾸기까지 1초쯤 걸려 그사이 그 Pod 로 간 요청이 연결 거부됩니다 (부하 막대의 빨간 칸).",
+        expect: "SIGTERM 을 받은 nginx 는 곧 멈추는데, kube-proxy 가 규칙을 바꾸기까지 1초쯤 걸려 그사이 그 Pod 로 간 요청이 실패합니다 — 컨테이너가 멈추는 동안은 연결 거부, Pod 가 사라진 뒤에는 옛 IP 로 가서 응답 없음 (부하 막대의 빨간 칸).",
       },
       {
         title: "preStop sleep 5초 넣기",

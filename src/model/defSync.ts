@@ -40,6 +40,13 @@ export class DefSync {
       this.nodes.set(n.name, json);
       changed = true;
     }
+    // 저장된 정의가 깨져 있으면(옛 버전·손으로 고친 localStorage) 그 매니페스트만 건너뛴다 — 화면이 아예 안 뜨지 않게
+    const valid = def.manifests.filter((m) => {
+      const ok = !!m && typeof m.kind === "string" && typeof m.metadata?.name === "string";
+      if (!ok) c.trace.add("user", "user", `매니페스트 건너뜀: kind·metadata.name 이 없는 항목 (${JSON.stringify(m).slice(0, 60)}) — 저장된 구성이 깨졌습니다. '처음부터' 로 예제를 다시 불러오세요`);
+      return ok;
+    });
+    def = { ...def, manifests: valid };
     const wantManifests = new Map(def.manifests.map((m) => [manifestKey(m), m]));
     // Deployment 를 먼저 (Service 가 가리킬 Pod 가 먼저 생기게 — 순서가 바뀌어도 결과는 같지만 로그가 읽기 쉽다)
     for (const m of [...def.manifests].sort((a, b) => (a.kind === b.kind ? 0 : a.kind === "Deployment" ? -1 : 1))) {

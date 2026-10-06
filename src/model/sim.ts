@@ -27,7 +27,10 @@ export const simNotice = signal<string | null>(null);
 export interface KubectlEntry {
   id: number;
   t: number;
+  /** 친 그대로 (↑ 로 불러와 다시 실행할 수 있게) */
   command: string;
+  /** curl 을 클러스터 밖에서 보낸 것 — 화면에 "(클러스터 밖에서)" 를 붙인다 */
+  outside?: boolean;
   result: KubectlResult;
 }
 export const kubectlHistory = signal<KubectlEntry[]>([]);
@@ -128,7 +131,7 @@ class SimController {
     } catch (e) {
       result = { ok: false, output: `내부 오류: ${e instanceof Error ? e.message : String(e)}`, mutated: false };
     }
-    const entry: KubectlEntry = { id: ++this.entrySeq, t: this.cluster.now, command: ext !== undefined ? `(클러스터 밖에서) ${command.trim()}` : command.trim(), result };
+    const entry: KubectlEntry = { id: ++this.entrySeq, t: this.cluster.now, command: command.trim(), outside: ext !== undefined, result };
     kubectlHistory.value = [...kubectlHistory.peek(), entry].slice(-200);
     if (result.net) lastRequest.value = ext !== undefined ? { id: entry.id, fromOutside: "internet", net: result.net } : { id: entry.id, fromPod: /exec\s+(\S+)/.exec(command)?.[1], net: result.net };
     if (result.mutated) this.bump();
@@ -142,7 +145,9 @@ class SimController {
     const c = this.cluster;
     if (a.type === "power") this.setNodePower(a.node, a.on);
     else if (a.type === "sick") {
-      c.setPodHealth(this.actionPod(a.deployment)!, a.healthy);
+      // 고치기는 고장 난 Pod 모두(인스펙터로 고장 낸 것 포함), 고장 내기는 돌고 있는 첫 Pod
+      if (a.healthy) for (const p of this.sickPods(a.deployment)) c.setPodHealth(p, true);
+      else c.setPodHealth(this.actionPod(a.deployment)!, false);
       this.bump();
     } else if (a.type === "traffic") {
       if (a.on) this.startTraffic(a.service);
@@ -177,9 +182,9 @@ class SimController {
       return c.nodePowered(a.node) === a.on ? (a.on ? "이미 켜져 있습니다" : "이미 꺼져 있습니다") : undefined;
     }
     if (a.type === "sick") {
-      const pod = this.actionPod(a.deployment);
-      if (!pod) return `${a.deployment} 의 Pod 가 아직 돌고 있지 않습니다`;
-      return c.podSick(pod) === !a.healthy ? (a.healthy ? "고장 난 Pod 가 없습니다" : "이미 고장 냈습니다") : undefined;
+      if (!this.actionPod(a.deployment)) return `${a.deployment} 의 Pod 가 아직 돌고 있지 않습니다`;
+      const sick = this.sickPods(a.deployment).length > 0;
+      return a.healthy ? (sick ? undefined : "고장 난 Pod 가 없습니다") : sick ? "이미 고장 냈습니다" : undefined;
     }
     if (a.type === "traffic") {
       if (!a.on) return c.traffic ? undefined : "돌고 있는 부하가 없습니다";
@@ -214,6 +219,14 @@ class SimController {
     const svc = c.api.get("Service", a.service, "default");
     if (!svc?.spec.ports[0]?.nodePort) return `NodePort Service ${a.service} 가 아직 없습니다 (앞 단계를 먼저)`;
     return c.kubelets.has(a.node) ? undefined : `노드 ${a.node} 이(가) 없습니다`;
+  }
+
+  /** 그 Deployment 의 Pod 중 앱을 고장 낸 것 */
+  private sickPods(deployment: string): string[] {
+    return this.cluster.api
+      .list("Pod", "default")
+      .filter((p) => p.metadata.labels.app === deployment && p.metadata.deletionTimestamp === undefined && this.cluster.podSick(p.metadata.name))
+      .map((p) => p.metadata.name);
   }
 
   /** sick 동작의 대상: 그 Deployment 의 Pod 중 컨테이너가 도는 첫 번째 (이름순) */
@@ -303,7 +316,7 @@ class SimController {
     const c = this.cluster;
     const ip = c.api.get("Node", node)?.status.addresses[0]?.address ?? node;
     const r = c.requestNodePort(node, port);
-    const entry: KubectlEntry = { id: ++this.entrySeq, t: c.now, command: `(클러스터 밖에서) curl http://${ip}:${port}`, result: { ok: r.ok, output: r.output, mutated: true, net: r } };
+    const entry: KubectlEntry = { id: ++this.entrySeq, t: c.now, command: `curl http://${ip}:${port}`, outside: true, result: { ok: r.ok, output: r.output, mutated: true, net: r } };
     kubectlHistory.value = [...kubectlHistory.peek(), entry].slice(-200);
     lastRequest.value = { id: entry.id, fromOutside: "internet", net: r };
     this.bump();

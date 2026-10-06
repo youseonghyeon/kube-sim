@@ -4,6 +4,7 @@ import { useEffect, useLayoutEffect, useRef } from "preact/hooks";
 import type { NetStep } from "../core/net/request";
 import type { TraceEvent } from "../core/trace";
 import { fmtClock } from "../core/units";
+import { commandKind } from "../model/commands";
 import { kubectlHistory, sim, simVersion } from "../model/sim";
 import { DRAWER_MIN, drawerHeight, drawerOpen, drawerTab, logOnlySelected, selection, setDrawerHeight, showApi, toggleDrawerMax } from "../model/store";
 import { Icon } from "./Icons";
@@ -187,7 +188,8 @@ function KubectlView() {
   const run = (cmd: string) => {
     const line = cmd.trim();
     if (!line) return;
-    sim.kubectl(/^(kubectl|k|curl|argocd|git)(\s|$)/.test(line) ? line : `kubectl ${line}`);
+    // kubectl 명령만 접두사를 붙인다 (curl·argocd·git·echo … | base64 -d 는 그대로)
+    sim.kubectl(commandKind(line) !== "kubectl" || /^(kubectl|k)(\s|$)/.test(line) ? line : `kubectl ${line}`);
     input.value = "";
     histIdx.current = -1;
   };
@@ -197,7 +199,7 @@ function KubectlView() {
         {history.map((h) => (
           <div key={h.id} class="term-entry">
             <div class="term-cmd mono">
-              <span class="term-time">{fmtClock(h.t)}</span>$ {h.command}
+              <span class="term-time">{fmtClock(h.t)}</span>$ {h.outside ? "(클러스터 밖에서) " : ""}{h.command}
             </div>
             <pre class={`term-res${h.result.ok ? "" : " err"}`}>{h.result.drain ? h.result.drain.lines.join("\n") + (h.result.drain.done ? "" : "\n…") : h.result.output}</pre>
             {h.result.net && h.result.net.steps.length > 0 && (

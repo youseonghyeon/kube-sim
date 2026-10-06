@@ -88,6 +88,12 @@ export function Inspector() {
         title="끌어서 폭 조절 · 두 번 눌러 보통/넓게 · 오른쪽 끝까지 끌면 접힘"
       />
       <InspectorPanel />
+      {/* 이미지 입력칸(Deployment·StatefulSet 설정)이 함께 쓰는 자동완성 목록 */}
+      <datalist id="kube-sim-images">
+        {IMAGE_NAMES.map((i) => (
+          <option key={i} value={i} />
+        ))}
+      </datalist>
       <div class="inspector-tools">
         <button class="icon-btn sm" onClick={toggleInspectorWide} title={wide ? "보통 폭" : "넓게 (describe·YAML 이 한눈에)"} aria-label={wide ? "보통 폭" : "넓게"}>
           <Icon name="widen" size={15} />
@@ -702,11 +708,6 @@ function DeploymentSettings({ d }: { d: Deployment }) {
           onCommit={(v) => updateManifest(name, (x) => (x.spec.template.spec.containers[0]!.image = v))}
           validate={(v) => (v.trim() ? undefined : "이미지 이름을 쓰세요")}
         />
-        <datalist id="kube-sim-images">
-          {IMAGE_NAMES.map((i) => (
-            <option key={i} value={i} />
-          ))}
-        </datalist>
       </Field>
       <Field label="requests.cpu" hint="스케줄러가 자리를 찾을 때 보는 값 (예: 250m, 1)">
         <TextInput

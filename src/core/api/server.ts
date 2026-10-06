@@ -440,12 +440,17 @@ function resourceDefaults(o: KObject): void {
   let containers: Container[] | undefined;
   let path = "spec.containers";
   if (o.kind === "Pod") containers = o.spec.containers;
-  else if (o.kind === "Deployment" || o.kind === "ReplicaSet") {
+  else if (o.kind === "Deployment" || o.kind === "ReplicaSet" || o.kind === "StatefulSet") {
     containers = o.spec.template.spec.containers;
     path = "spec.template.spec.containers";
   }
   if (!containers) return;
   containers.forEach((c, i) => {
+    // resources 는 적지 않아도 된다 (실제와 같음) — 없으면 requests 0 으로 채워 둔다
+    c.resources ??= { requests: { cpu: 0, memory: 0 } };
+    c.resources.requests ??= { cpu: 0, memory: 0 };
+    c.resources.requests.cpu ??= 0;
+    c.resources.requests.memory ??= 0;
     // 기본값은 Pod 에만 (실제 SetDefaults_Pod) — 템플릿은 적은 그대로 두어, limits 를 바꾸면 새 Pod 가 새 limits 로 채워진다
     if (o.kind === "Pod") defaultContainerResources(c);
     const r = c.resources.requests;
