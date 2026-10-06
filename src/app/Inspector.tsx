@@ -1,7 +1,7 @@
 // 오른쪽 인스펙터: 고른 오브젝트의 개요·설정·describe·YAML. 아무것도 안 골랐으면 예제의 "해 볼 것".
 import { useSignal } from "@preact/signals";
 import { useEffect, useMemo } from "preact/hooks";
-import { controllerOf, isNodeReady, NODE_LEASE_NS, type Application, type Deployment, type Ingress, type KObject, type Node, type Pod, type ReplicaSet, type Service } from "../core/api/types";
+import { controllerOf, isNodeReady, NODE_LEASE_NS, qosClass, type Application, type Deployment, type Ingress, type KObject, type Node, type Pod, type ReplicaSet, type Service } from "../core/api/types";
 import type { DeploymentManifest, Manifest } from "../core/cluster";
 import { eventSource, nodeStatusText, podRestartsText, podStatusText, rolloutStatusLine, runKubectl } from "../core/kubectl";
 import { fmtAge, fmtCpu, fmtMem, parseCpu, parseMem } from "../core/units";
@@ -10,7 +10,7 @@ import { NODE_MONITOR_GRACE_MS } from "../core/controllers/nodelifecycle";
 import { exampleById, resolveCommand, type TryAction } from "../model/examples";
 import { appGet } from "../core/gitops/cli";
 import { deploymentHash, HASH_LABEL, revisionOf } from "../core/controllers/deployment";
-import { sim, simVersion } from "../model/sim";
+import { sim, simTime, simVersion } from "../model/sim";
 import { clusterDef, drawerOpen, drawerTab, exampleId, findManifest, removeManifest, selection, updateManifest, updateNodeDef, updateServiceManifest } from "../model/store";
 import { toneOf } from "../model/view";
 import { toYaml } from "../model/yaml";
@@ -240,6 +240,7 @@ function PodOverview({ p }: { p: Pod }) {
           <div class="small">컨테이너가 시작 후 계속 종료됩니다. kubelet 은 10초부터 두 배씩(최대 5분) 기다렸다가 다시 띄웁니다. 아래 이벤트의 BackOff 횟수를 보세요.</div>
         </div>
       )}
+      {cs?.lastState && "terminated" in cs.lastState && cs.lastState.terminated.reason === "OOMKilled" && <OomNote p={p} />}
       {cs && "waiting" in cs.state && (cs.state.waiting.reason === "ImagePullBackOff" || cs.state.waiting.reason === "ErrImagePull") && (
         <div class="callout bad">
           <div class="callout-title">{cs.state.waiting.reason}</div>
@@ -254,7 +255,6 @@ function PodOverview({ p }: { p: Pod }) {
           ["Pod IP", <span class="mono">{p.status.podIP ?? "—"}</span>],
           ["재시작", podRestartsText(p, c.now)],
           ["이미지", <span class="mono">{ct?.image}</span>],
-          ["requests", <span class="mono">{ct ? `cpu ${fmtCpu(ct.resources.requests.cpu)} · memory ${fmtMem(ct.resources.requests.memory)}` : "—"}</span>],
           ["주인", <OwnerChain meta={p.metadata} />],
           ["나이", fmtAge(c.now - p.metadata.creationTimestamp)],
         ]}
@@ -281,9 +281,94 @@ function PodOverview({ p }: { p: Pod }) {
         )}
       </div>
       {cs && "running" in cs.state && !deleting && <CurlFrom pod={p.metadata.name} />}
+      <PodResources p={p} />
       <h3>이벤트</h3>
       <Events uid={p.metadata.uid} />
     </>
+  );
+}
+
+/** 지난번 OOMKilled 가 컨테이너 자신의 limit 때문인지, 노드 메모리가 넘쳐서인지 (마지막 kubelet.oom 트레이스로 가린다) */
+function OomNote({ p }: { p: Pod }) {
+  const evs = sim.cluster.trace.events;
+  let last: (typeof evs)[number] | undefined;
+  for (let i = evs.length - 1; i >= 0 && !last; i--) if (evs[i]!.kind === "kubelet.oom" && evs[i]!.ref?.name === p.metadata.name) last = evs[i];
+  const node = last?.msg.includes("노드의 커널 OOM killer");
+  return (
+    <div class="callout bad">
+      <div class="callout-title">OOMKilled (exit 137)</div>
+      <div class="small">
+        {node
+          ? "노드 메모리가 넘쳐 노드의 커널 OOM killer 가 이 컨테이너를 골랐습니다 (oom_score 가 가장 큼). 이 Pod 잘못이 아닐 수도 있습니다 — limits 없이 많이 쓰는 이웃이 있는지 kubectl top pods 로 보세요."
+          : "메모리 사용이 limits.memory 에 닿아 커널(cgroup)이 컨테이너를 죽였습니다. limit 을 올리거나 앱의 메모리 사용(힙 크기·누수)을 줄이세요."}
+      </div>
+    </div>
+  );
+}
+
+/** Pod 의 자원: requests(예약) · limits(상한) · 실사용(kubectl top) 을 한 막대에. 메모리 누수처럼 이벤트 없이 변하는 값이라 화면 시계마다 다시 그린다 */
+function PodResources({ p }: { p: Pod }) {
+  simTime.value;
+  const ct = p.spec.containers[0];
+  if (!ct) return null;
+  const m = sim.cluster.podMetrics(p);
+  const req = ct.resources.requests;
+  const lim = ct.resources.limits ?? {};
+  const cpu = m?.cpuState;
+  return (
+    <>
+      <h3>자원 · QoS {qosClass(p.spec)}</h3>
+      <div class="usage">
+        <UsageBar label="memory" use={m?.memory} request={req.memory} limit={lim.memory} fmt={fmtMem} />
+        <UsageBar label="cpu" use={cpu?.got} want={cpu?.want} request={req.cpu} limit={lim.cpu} fmt={fmtCpu} />
+      </div>
+      <div class="usage-legend">
+        <span>
+          <i class="lg use" />
+          실사용
+        </span>
+        <span>
+          <i class="lg req" />
+          requests (예약)
+        </span>
+        <span>
+          <i class="lg lim" />
+          limits (상한)
+        </span>
+      </div>
+      {cpu?.reason && (
+        <p class="note">
+          {cpu.reason === "limit"
+            ? `CPU throttling: 앱은 ${fmtCpu(cpu.want)} 를 원하지만 limits.cpu ${fmtCpu(cpu.limit ?? 0)} 에 막혀 그만큼만 받습니다. 죽지는 않지만 응답이 ${(cpu.want / cpu.got).toFixed(1)}배 느려집니다.`
+            : `노드 CPU 가 모자라 requests 비율로 나눠 받습니다 (원하는 ${fmtCpu(cpu.want)} 중 ${fmtCpu(cpu.got)}). requests 가 클수록 더 받습니다.`}
+        </p>
+      )}
+      {!m && <p class="muted small">컨테이너가 돌고 있지 않아 실사용이 없습니다 (kubectl top 에도 안 보임).</p>}
+    </>
+  );
+}
+
+/** 막대 하나: 채움 = 실사용, 눈금 = requests(예약)·limits(상한). 원하는 CPU 가 받는 것보다 크면 옅은 채움으로 */
+function UsageBar({ label, use, want, request, limit, fmt }: { label: string; use?: number; want?: number; request: number; limit?: number; fmt: (n: number) => string }) {
+  const scale = Math.max(limit ?? 0, request, use ?? 0, want ?? 0, 1) * 1.15;
+  const pct = (n: number) => `${Math.min(100, (n / scale) * 100)}%`;
+  const near = use !== undefined && limit !== undefined && use / limit >= 0.8;
+  return (
+    <div class="usage-row">
+      <div class="usage-head">
+        <span class="usage-label">{label}</span>
+        <span class="mono small">
+          {use !== undefined ? `사용 ${fmt(use)}` : "사용 —"}
+          {want !== undefined && use !== undefined && want > use ? ` (원함 ${fmt(want)})` : ""} · requests {request ? fmt(request) : "없음"} · limits {limit !== undefined ? fmt(limit) : "없음"}
+        </span>
+      </div>
+      <div class="usage-bar">
+        {want !== undefined && use !== undefined && want > use && <span class="usage-want" style={{ width: pct(want) }} />}
+        {use !== undefined && <span class={`usage-fill${near ? " hot" : ""}`} style={{ width: pct(use) }} />}
+        {request > 0 && <span class="usage-tick req" style={{ left: pct(request) }} title={`requests ${fmt(request)} — 스케줄러가 잡아 두는 몫`} />}
+        {limit !== undefined && <span class="usage-tick lim" style={{ left: pct(limit) }} title={`limits ${fmt(limit)} — 커널이 거는 상한`} />}
+      </div>
+    </div>
   );
 }
 
@@ -404,6 +489,10 @@ function ReplicaSetOverview({ rs }: { rs: ReplicaSet }) {
   );
 }
 
+function sumOf(pods: Pod[], f: (p: Pod) => number): number {
+  return pods.reduce((n, p) => n + f(p), 0);
+}
+
 function NodeOverview({ n }: { n: Node }) {
   const c = sim.cluster;
   const pods = c.api.list("Pod").filter((p) => p.spec.nodeName === n.metadata.name);
@@ -438,6 +527,15 @@ function NodeOverview({ n }: { n: Node }) {
           ["InternalIP", <span class="mono">{n.status.addresses.find((a) => a.type === "InternalIP")?.address}</span>],
           ["PodCIDR", <span class="mono">{n.spec.podCIDR}</span>],
           ["allocatable", <span class="mono">{`cpu ${fmtCpu(n.status.allocatable.cpu)} · memory ${fmtMem(n.status.allocatable.memory)} · pods ${n.status.allocatable.pods}`}</span>],
+          ["requests 합", <span class="mono">{`cpu ${fmtCpu(sumOf(pods, (p) => p.spec.containers[0]?.resources.requests.cpu ?? 0))} · memory ${fmtMem(sumOf(pods, (p) => p.spec.containers[0]?.resources.requests.memory ?? 0))}`}</span>],
+          [
+            "실사용 (top)",
+            powered ? (
+              <span class="mono">{`cpu ${fmtCpu(sumOf(pods, (p) => c.podMetrics(p)?.cpu ?? 0))} · memory ${fmtMem(sumOf(pods, (p) => c.podMetrics(p)?.memory ?? 0))}`}</span>
+            ) : (
+              <span class="muted">알 수 없음 (꺼짐)</span>
+            ),
+          ],
           ["받아 둔 이미지", <span class="mono small">{n.status.images.join(", ") || "없음"}</span>],
         ]}
       />
@@ -505,16 +603,34 @@ function DeploymentSettings({ d }: { d: Deployment }) {
         <TextInput
           value={fmtCpu(ct.resources.requests.cpu)}
           onCommit={(v) => updateManifest(name, (x) => (x.spec.template.spec.containers[0]!.resources.requests.cpu = parseCpu(v)!))}
-          validate={(v) => (parseCpu(v) === undefined ? "250m · 1 · 1.5 처럼 쓰세요" : undefined)}
+          validate={(v) => (parseCpu(v) === undefined ? "250m · 1 · 1.5 처럼 쓰세요" : overLimit(parseCpu(v)!, ct.resources.limits?.cpu, fmtCpu, "cpu"))}
         />
       </Field>
       <Field label="requests.memory" hint="예: 128Mi, 1Gi">
         <TextInput
           value={fmtMem(ct.resources.requests.memory)}
           onCommit={(v) => updateManifest(name, (x) => (x.spec.template.spec.containers[0]!.resources.requests.memory = parseMem(v)!))}
-          validate={(v) => (parseMem(v) === undefined ? "128Mi · 1Gi 처럼 쓰세요" : undefined)}
+          validate={(v) => (parseMem(v) === undefined ? "128Mi · 1Gi 처럼 쓰세요" : overLimit(parseMem(v)!, ct.resources.limits?.memory, fmtMem, "memory"))}
         />
       </Field>
+      <div class="field-row">
+        <Field label="limits.cpu" hint="넘으면 죽지 않고 느려짐 (throttling). 비우면 상한 없음">
+          <TextInput
+            value={ct.resources.limits?.cpu !== undefined ? fmtCpu(ct.resources.limits.cpu) : ""}
+            placeholder="없음"
+            onCommit={(v) => updateManifest(name, (x) => setLimit(x, "cpu", v ? parseCpu(v) : undefined))}
+            validate={(v) => (!v ? undefined : parseCpu(v) === undefined ? "200m · 1 처럼 쓰세요" : overLimit(ct.resources.requests.cpu, parseCpu(v), fmtCpu, "cpu"))}
+          />
+        </Field>
+        <Field label="limits.memory" hint="넘으면 OOMKilled (exit 137). 비우면 상한 없음">
+          <TextInput
+            value={ct.resources.limits?.memory !== undefined ? fmtMem(ct.resources.limits.memory) : ""}
+            placeholder="없음"
+            onCommit={(v) => updateManifest(name, (x) => setLimit(x, "memory", v ? parseMem(v) : undefined))}
+            validate={(v) => (!v ? undefined : parseMem(v) === undefined ? "256Mi · 1Gi 처럼 쓰세요" : overLimit(ct.resources.requests.memory, parseMem(v), fmtMem, "memory"))}
+          />
+        </Field>
+      </div>
       <Field label="strategy" hint="RollingUpdate: 조금씩 바꿈 · Recreate: 옛 Pod 를 다 지운 뒤 새로 (그동안 서비스 중단)">
         <select
           class="input"
@@ -602,6 +718,20 @@ function NodeSettings({ n }: { n: Node }) {
   );
 }
 
+/** requests 가 limits 보다 크면 API 서버가 거절한다 — 고치기 전에 알려 준다 */
+function overLimit(request: number, limit: number | undefined, fmt: (n: number) => string, what: string): string | undefined {
+  return limit !== undefined && request > limit ? `requests ${fmt(request)} 가 limits ${fmt(limit)} 보다 큽니다 — API 서버가 거절합니다 (${what} 둘 다 맞추세요)` : undefined;
+}
+
+function setLimit(m: DeploymentManifest, key: "cpu" | "memory", v: number | undefined): void {
+  const r = m.spec.template.spec.containers[0]!.resources;
+  const next = { ...r.limits };
+  if (v === undefined) delete next[key];
+  else next[key] = v;
+  if (next.cpu === undefined && next.memory === undefined) delete r.limits;
+  else r.limits = next;
+}
+
 function Field({ label, hint, children }: { label: string; hint?: string; children: preact.ComponentChildren }) {
   return (
     <label class="field">
@@ -613,7 +743,7 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
 }
 
 /** Enter·포커스 아웃에 확정. 잘못된 값이면 이유를 보이고 확정하지 않는다 */
-function TextInput({ value, onCommit, validate, list }: { value: string; onCommit: (v: string) => void; validate?: (v: string) => string | undefined; list?: string }) {
+function TextInput({ value, onCommit, validate, list, placeholder }: { value: string; onCommit: (v: string) => void; validate?: (v: string) => string | undefined; list?: string; placeholder?: string }) {
   const draft = useSignal(value);
   const err = useSignal<string | undefined>(undefined);
   useEffect(() => {
@@ -633,6 +763,7 @@ function TextInput({ value, onCommit, validate, list }: { value: string; onCommi
         class={`input mono${err.value ? " invalid" : ""}`}
         value={draft.value}
         list={list}
+        placeholder={placeholder}
         onInput={(e) => (draft.value = e.currentTarget.value)}
         onBlur={commit}
         onKeyDown={(e) => {

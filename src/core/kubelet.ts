@@ -104,6 +104,8 @@ export class Kubelet {
   private heartbeat?: TimerHandle;
   /** 다음 OOM(cgroup 또는 노드) 시각의 감시 — 배경 타이머 */
   private oomWatch?: TimerHandle;
+  /** cpuAlloc 결과 — 도는 컨테이너가 바뀌거나 노드 CPU 가 바뀔 때만 다시 계산 (화면이 Pod 마다 물어도 한 번) */
+  private cpuCache?: Map<string, number>;
 
   readonly def: NodeDef;
 
@@ -199,6 +201,7 @@ export class Kubelet {
     }
     const n = this.pods.size;
     this.pods.clear();
+    this.cpuCache = undefined;
     this.pulls.clear();
     this.ctx.trace.add(
       this.actor,
@@ -246,6 +249,7 @@ export class Kubelet {
     if (cpu === this.def.cpu && memory === this.def.memory) return;
     this.def.cpu = cpu;
     this.def.memory = memory;
+    this.cpuCache = undefined;
     if (!this.powered) {
       this.ctx.trace.add(this.actor, "node.register", `노드 ${this.def.name} 자원 변경 — kubelet 이 꺼져 있어 API 에 보고하지 못함 (켜면 보고)`, { kind: "Node", name: this.def.name });
       return;
@@ -274,6 +278,7 @@ export class Kubelet {
       this.stopProbes(rt);
     }
     this.pods.clear();
+    this.cpuCache = undefined;
   }
 
   // ---------- watch ----------
@@ -287,6 +292,7 @@ export class Kubelet {
         rt.timer?.cancel();
         this.stopProbes(rt);
         this.pods.delete(p.metadata.uid);
+        this.cpuCache = undefined;
       }
       return;
     }
@@ -433,6 +439,7 @@ export class Kubelet {
     rt.stage = "running";
     rt.startedAt = now;
     rt.alive = true;
+    this.cpuCache = undefined;
     this.event(p, "Normal", "Created", `Created container: ${c.name}`);
     this.event(p, "Normal", "Started", `Started container ${c.name}`);
     const probe = c.readinessProbe;
@@ -603,6 +610,7 @@ export class Kubelet {
     if (!p) return;
     this.stopProbes(rt);
     rt.alive = false;
+    this.cpuCache = undefined;
     const c = p.spec.containers[0]!;
     const now = this.ctx.clock.now;
     const ran = now - (rt.startedAt ?? now);
@@ -712,6 +720,7 @@ export class Kubelet {
   private finish(rt: PodRt, exitCode: number, reason = exitCode === 0 ? "Completed" : "Error"): void {
     const now = this.ctx.clock.now;
     rt.alive = false;
+    this.cpuCache = undefined;
     this.patchPod(rt, (o) => {
       const cs = o.status.containerStatuses[0];
       if (cs) {
@@ -744,6 +753,13 @@ export class Kubelet {
    * requests 비율(cpu.shares, 최소 2m)로 나눈다 — 덜 원하는 쪽은 원하는 만큼만 받고 남는 몫은 다시 나눈다.
    */
   private cpuAlloc(): Map<string, number> {
+    if (this.cpuCache) return this.cpuCache;
+    const out = this.computeCpuAlloc();
+    this.cpuCache = out;
+    return out;
+  }
+
+  private computeCpuAlloc(): Map<string, number> {
     const rts = this.alive();
     const out = new Map<string, number>();
     const capOf = (r: PodRt) => Math.min(r.image?.cpuM ?? DEFAULT_CPU_M, r.ct.resources.limits?.cpu ?? Number.POSITIVE_INFINITY);
@@ -867,6 +883,7 @@ export class Kubelet {
     this.crash(rt, 137, "OOMKilled");
     // API 의 Pod 가 이미 사라지는 중이라 crash 가 아무것도 못 했어도 프로세스는 죽었다 (감시가 같은 시각에 되풀이되지 않게)
     rt.alive = false;
+    this.cpuCache = undefined;
   }
 
   // ---------- 도우미 ----------

@@ -133,7 +133,7 @@ function actorGroup(actor: string): string {
 
 const STEP_LABEL: Record<NetStep["kind"], string> = { dns: "DNS", dnat: "DNAT", route: "경로", response: "응답", fail: "실패" };
 
-const QUICK = ["get pods -o wide", "get svc", "get endpoints", "get deploy", "get nodes", "get events", "help"];
+const QUICK = ["get pods -o wide", "get svc", "get endpoints", "get deploy", "get nodes", "get events", "top pods", "help"];
 
 function KubectlView() {
   simVersion.value; // drain 처럼 시간이 지나며 늘어나는 출력을 다시 그린다

@@ -34,7 +34,7 @@
 - 바깥 줄(Ingress·LoadBalancer 가 있을 때): 바깥 클라이언트·인터넷 → Ingress(호스트·경로 → Service) 상자.
 - Service 줄: 노드 밖에 떠 있는 가상 상자(점선 테두리) — "어디에도 없는 주소". 이름·타입·ClusterIP(·NodePort·LB IP)·엔드포인트 ready 수. 고르면 엔드포인트 Pod 로 옅은 선(Overlay).
 - 스케줄 대기 줄: 노드가 없는 Pod.
-- 노드 = 큰 상자(이름·IP·상태·cpu/memory requests 막대·꺼짐/NotReady 카운트다운). Pod = 노드 안 칩(상태 색, 이름 Mono, IP, 재시작 수, 롤아웃 중 리비전 `r1`·`r2`).
+- 노드 = 큰 상자(이름·IP·상태·cpu/memory 막대·꺼짐/NotReady 카운트다운). 막대의 채움 = requests 합(스케줄러가 보는 것), 아래 accent 선 = 실사용(kubectl top), 숫자는 `요청 X · 사용 Y / 전체`. Pod = 노드 안 칩(상태 색, 이름 Mono, IP, 재시작 수, 롤아웃 중 리비전 `r1`·`r2`, 자원 배지 `mem 92%`(limit 의 80% 이상)·`throttled`).
 - 부하 막대(부하 발생기가 있을 때): 요청 수·실패 수·마지막 실패.
 - 요청(curl)은 움직이는 점으로 경로(DNS → DNAT → 노드 간 → Pod)를 따라간다. 단계 문구는 kubectl 창에.
 - 자리 배치는 자동(끌어 놓지 않음).

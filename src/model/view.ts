@@ -19,6 +19,12 @@ export interface PodView {
   restarts: number;
   /** 사용자가 앱을 고장 낸 Pod */
   sick: boolean;
+  /** 실사용 (kubectl top) — 컨테이너가 돌 때만 */
+  usage?: { cpu: number; memory: number };
+  /** 메모리 사용 / limits.memory (limit 이 있을 때, 0~1) */
+  memOfLimit?: number;
+  /** CPU 를 원하는 만큼 못 받음: limit = throttling, node = 노드 CPU 부족 */
+  cpuShort?: "limit" | "node";
   /** 주인 Deployment (없으면 ReplicaSet, 그것도 없으면 undefined) */
   owner?: string;
   rs?: string;
@@ -42,8 +48,9 @@ export interface NodeView {
   renewTime?: number;
   /** unreachable:NoExecute taint 가 붙은 시각 (NotReady 가 된 시각) */
   unreachableSince?: number;
-  cpu: { used: number; total: number };
-  memory: { used: number; total: number };
+  /** used = requests 합 (스케줄러가 보는 것), actual = 실사용 합 (kubectl top) */
+  cpu: { used: number; total: number; actual: number };
+  memory: { used: number; total: number; actual: number };
   pods: PodView[];
 }
 
@@ -151,7 +158,12 @@ export function buildView(c: Cluster): ClusterView {
     const status = podStatusText(p);
     const ref = controllerOf(p.metadata);
     const owner = ref ? (rsOwner.get(ref.uid) ?? ref.name) : undefined;
+    const m = c.podMetrics(p);
+    const memLimit = p.spec.containers[0]?.resources.limits?.memory;
     return {
+      usage: m ? { cpu: m.cpu, memory: m.memory } : undefined,
+      memOfLimit: m && memLimit ? m.memory / memLimit : undefined,
+      cpuShort: m?.cpuState.reason,
       pod: p,
       name: p.metadata.name,
       status,
@@ -166,6 +178,8 @@ export function buildView(c: Cluster): ClusterView {
   });
   const nodes: NodeView[] = c.api.list("Node").map((n) => {
     const u = nodeUsage(allPods, n.metadata.name);
+    const mine = pods.filter((p) => p.pod.spec.nodeName === n.metadata.name);
+    const actual = mine.reduce((a, p) => ({ cpu: a.cpu + (p.usage?.cpu ?? 0), memory: a.memory + (p.usage?.memory ?? 0) }), { cpu: 0, memory: 0 });
     const lease = c.api.get("Lease", n.metadata.name, NODE_LEASE_NS);
     const noExec = (n.spec.taints ?? []).find((t) => t.key === "node.kubernetes.io/unreachable" && t.effect === "NoExecute");
     return {
@@ -178,9 +192,9 @@ export function buildView(c: Cluster): ClusterView {
       status: nodeStatusText(n),
       ready: isNodeReady(n),
       cordoned: !!n.spec.unschedulable,
-      cpu: { used: u.requested.cpu, total: n.status.allocatable.cpu },
-      memory: { used: u.requested.memory, total: n.status.allocatable.memory },
-      pods: pods.filter((p) => p.pod.spec.nodeName === n.metadata.name).sort(byCreation),
+      cpu: { used: u.requested.cpu, total: n.status.allocatable.cpu, actual: actual.cpu },
+      memory: { used: u.requested.memory, total: n.status.allocatable.memory, actual: actual.memory },
+      pods: mine.sort(byCreation),
     };
   });
   const slices = c.api.list("EndpointSlice", "default");
@@ -266,6 +280,8 @@ export function flashLabel(e: TraceEvent): string | undefined {
       return "시작 · kubelet";
     case "kubelet.exit":
       return "종료 · kubelet";
+    case "kubelet.oom":
+      return "OOMKilled · 커널";
     case "kubelet.backoff":
       return "백오프 · kubelet";
     case "kubelet.kill":

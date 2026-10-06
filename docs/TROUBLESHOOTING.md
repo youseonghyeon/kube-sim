@@ -48,6 +48,18 @@
 | ingress-nginx 의 `503 Service Temporarily Unavailable` | 규칙의 Service 에 ready 엔드포인트가 없음 | `kubectl get endpoints <svc>` |
 | `*.ts.net` 이 공인 인터넷에서 `Could not resolve host` | Ingress 에 `tailscale.com/funnel: "true"` 가 없음 (tailnet 안에서만) | annotation 추가 (tailnet 정책에 funnel 허용도 필요) |
 
+## 자원 (5a)
+
+| 증상 / 출력 | 원인 | 고치는 법 |
+|---|---|---|
+| `Last State: Terminated · Reason: OOMKilled · Exit Code: 137` | 메모리 사용이 limits.memory 에 닿아 커널(cgroup)이 죽임 | limit 올리기(`kubectl set resources ... --limits=memory=512Mi`) 또는 앱 메모리(힙·누수) 줄이기 |
+| limits 를 안 걸었는데 OOMKilled, 노드에 `SystemOOM` 이벤트 | 노드 메모리가 넘쳐 노드 OOM killer 가 oom_score 로 골랐다 (이웃의 누수일 수 있음) | `kubectl top pods` 로 많이 쓰는 Pod 를 찾아 limits 를 건다. 중요한 Pod 는 requests 를 실사용만큼(또는 Guaranteed) |
+| 죽지는 않는데 응답이 느림, `kubectl top` 의 CPU 가 limit 과 같음 | CPU throttling — limits.cpu 가 천장 | limits.cpu 를 올리거나 없앤다 (requests 는 그대로 두어도 됨) |
+| `Liveness probe failed: ... context deadline exceeded (Client.Timeout exceeded while awaiting headers)` 뒤 재시작 반복 | CPU 를 너무 적게 받아 probe 응답이 timeoutSeconds(기본 1초)를 넘음. 재시작해도 낫지 않는다 | CPU limit 을 올리거나 probe 의 timeoutSeconds 를 늘린다 |
+| `Invalid value: "250m": must be less than or equal to cpu limit of 100m` | requests 가 limits 보다 큼 | `--requests` 와 `--limits` 를 함께 바꾼다 |
+| 노드 메모리가 꽉 찼는데 새 Pod 가 계속 스케줄됨 | 스케줄러는 requests 합만 본다 (실사용은 안 봄) | requests 를 실사용에 맞춘다. `kubectl describe node` 의 Allocated resources 와 `kubectl top nodes` 를 비교 |
+| `error: Metrics not available for pod` | 컨테이너가 돌고 있지 않음 (크래시 백오프 중 등) | 컨테이너가 뜬 뒤 다시 |
+
 ## GitOps (6단계)
 
 | 증상 / 출력 | 원인 | 고치는 법 |

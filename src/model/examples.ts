@@ -587,6 +587,120 @@ export const EXAMPLES: Example[] = [
       },
     ],
   },
+  {
+    id: "oom",
+    title: "메모리 limit 을 넘으면 (OOMKilled)",
+    summary: "리포트 API 는 시작하며 힙을 320Mi 까지 잡는데 limits.memory 는 256Mi 입니다. 커널이 컨테이너를 죽이고(OOMKilled · exit 137), kubelet 이 다시 띄우기를 되풀이하다 CrashLoopBackOff 가 됩니다.",
+    build: () => ({
+      nodes: [node("worker-1"), node("worker-2")],
+      manifests: [deployment("report", { replicas: 1, image: "example/report:1.0", cpu: 100, memory: 256, port: 8080, limits: { memory: 256 } })],
+    }),
+    tries: [
+      {
+        title: "describe 로 이유 보기",
+        command: "kubectl describe pod {pod:report}",
+        expect: "Last State 에 Reason: OOMKilled, Exit Code: 137 이 있습니다. 137 = 128 + 9(SIGKILL) — 앱이 스스로 끝난 게 아니라 커널(cgroup OOM killer)이 죽였다는 뜻입니다. 앱 로그에는 아무것도 남지 않는 경우가 많습니다.",
+      },
+      {
+        title: "실사용 보기",
+        command: "kubectl top pods",
+        expect: "metrics-server 가 모은 실사용입니다. 메모리가 256Mi 를 향해 오르다가 컨테이너가 죽으면 목록에서 사라집니다(돌고 있을 때만 보임). Pod 를 고르면 인스펙터에 limit 대비 막대가 보입니다.",
+      },
+      {
+        title: "limit 을 512Mi 로",
+        command: "kubectl set resources deployment/report --limits=memory=512Mi",
+        expect: "템플릿이 바뀌어 롤아웃됩니다. 새 Pod 는 320Mi 에서 멈추고 더는 죽지 않습니다. requests(256Mi)는 그대로라 스케줄러는 여전히 256Mi 만 잡아 둔다는 점도 보세요 (실사용 > requests 인 Burstable).",
+      },
+    ],
+  },
+  {
+    id: "node-oom",
+    title: "limits 없는 메모리 누수 (노드 OOM)",
+    summary: "누수 앱은 1분에 150Mi 씩 더 쓰는데 limits 가 없습니다. requests 는 128Mi 라 스케줄러는 자리가 넉넉하다고 봅니다. 노드 메모리 1Gi 가 차면 노드의 커널 OOM killer 가 oom_score(QoS·requests 대비 사용량)로 희생자를 고릅니다.",
+    build: () => ({
+      nodes: [node("worker-1", 2000, 1024)],
+      manifests: [
+        deployment("web", { replicas: 2, image: "nginx:1.27", cpu: 100, memory: 64, port: 80 }),
+        deployment("leaky", { replicas: 1, image: "example/leaky:1.0", cpu: 100, memory: 128, port: 8080 }),
+      ],
+    }),
+    tries: [
+      {
+        title: "스케줄러가 보는 것",
+        command: "kubectl describe node worker-1",
+        expect: "Allocated resources 의 memory Requests 는 256Mi(25%) 뿐입니다. 스케줄러는 이 숫자만 보고 실사용은 보지 않습니다. Limits 는 0 — 아무도 상한이 없습니다.",
+      },
+      {
+        title: "실사용 보기",
+        command: "kubectl top pods",
+        expect: "leaky 의 MEMORY 가 계속 늘어납니다. 노드 칸의 memory 막대 아래 실사용 선도 차오릅니다. 속도를 10× 로 올려 6분쯤 기다려 보세요.",
+      },
+      {
+        title: "OOM 뒤 이벤트",
+        command: "kubectl get events",
+        expect: "node/worker-1 에 SystemOOM 이 찍힙니다. 로그의 kubelet.oom 줄에 Pod 마다 oom_score 가 있습니다 — 많이 쓰고 requests 대비 넘친 leaky 가 골라졌습니다. requests 가 없는 BestEffort 가 있었다면 그쪽이 먼저 죽을 수도 있습니다.",
+      },
+      {
+        title: "limits 걸기",
+        command: "kubectl set resources deployment/leaky --limits=memory=384Mi",
+        expect: "이제 누수는 자기 cgroup 안에서 OOMKilled 될 뿐 노드와 이웃은 안전합니다 (노드 OOM 대신 컨테이너 OOM). 근본 해결은 누수를 고치는 것입니다.",
+      },
+      {
+        title: "누수 고친 버전",
+        command: "kubectl set image deployment/leaky leaky=example/leaky:1.1",
+        expect: "80Mi 에서 멈춥니다. kubectl top pods 로 확인하세요.",
+      },
+    ],
+  },
+  {
+    id: "throttle",
+    title: "CPU limit 은 느리게 할 뿐 (throttling)",
+    summary: "썸네일 API 는 CPU 를 600m 쯤 원하는데 limits.cpu 는 200m 입니다. 메모리와 달리 CPU 는 넘쳐도 죽이지 않고 CFS 쿼터로 기다리게 합니다 — 응답이 느려질 뿐. 너무 낮추면 liveness probe 가 시간 초과로 실패합니다.",
+    build: () => ({
+      nodes: [node("worker-1"), node("worker-2")],
+      manifests: [
+        deployment("thumbs", {
+          replicas: 1,
+          image: "example/thumbs:1.0",
+          cpu: 100,
+          memory: 128,
+          port: 8080,
+          limits: { cpu: 200 },
+          liveness: { httpGet: { path: "/healthz", port: 8080 }, periodSeconds: 5 },
+        }),
+        deployment("client", { replicas: 1, image: "curlimages/curl:8.10.1", cpu: 50, memory: 32 }),
+        service("thumbs", { selector: { app: "thumbs" }, port: 80, targetPort: 8080 }),
+      ],
+    }),
+    tries: [
+      {
+        title: "요청 보내기",
+        command: "kubectl exec {pod:client} -- curl http://thumbs",
+        expect: "응답 450ms. 로그의 응답 단계에 '원하는 600m 중 200m 만 받음 — throttling' 이 보입니다. 평소 150ms 걸릴 일이 3배가 됐지만 죽거나 재시작하지는 않습니다.",
+      },
+      {
+        title: "실사용 보기",
+        command: "kubectl top pods",
+        expect: "thumbs 의 CPU 가 200m 에 붙어 있습니다 — limit 이 천장입니다. 실사용이 limit 과 같으면 throttling 을 의심하세요.",
+      },
+      {
+        title: "limit 을 50m 로 (requests 는 그대로)",
+        command: "kubectl set resources deployment/thumbs --limits=cpu=50m",
+        expectFail: true,
+        expect: "API 서버가 거절합니다: requests(100m) 는 limits 보다 클 수 없습니다. 둘을 같이 바꿔야 합니다.",
+      },
+      {
+        title: "requests·limits 둘 다 50m",
+        command: "kubectl set resources deployment/thumbs --requests=cpu=50m --limits=cpu=50m",
+        expect: "새 Pod 의 응답이 1.8초가 됩니다. liveness probe 는 timeoutSeconds 1초라 시간 초과로 실패하고, 3번 연속이면 kubelet 이 재시작합니다 — CPU 가 모자란 것이라 재시작해도 낫지 않습니다. 로그와 kubectl describe pod 의 이벤트를 보세요.",
+      },
+      {
+        title: "limit 을 1 CPU 로",
+        command: "kubectl set resources deployment/thumbs --requests=cpu=100m --limits=cpu=1",
+        expect: "원하는 600m 를 다 받아 응답 150ms 로 돌아옵니다. 다시 curl 해 보세요.",
+      },
+    ],
+  },
 ];
 
 
@@ -601,6 +715,7 @@ export const EXAMPLE_GROUPS: { label: string; ids: string[] }[] = [
   { label: "Service", ids: ["service", "readiness"] },
   { label: "배포·헬스", ids: ["rolling", "rollout-stuck", "graceful", "liveness"] },
   { label: "바깥 트래픽", ids: ["ingress", "source-ip", "tailscale"] },
+  { label: "자원", ids: ["oom", "node-oom", "throttle"] },
   { label: "GitOps", ids: ["gitops"] },
 ];
 

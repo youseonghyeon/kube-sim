@@ -104,7 +104,7 @@ await page.screenshot({ path: `${OUT}/05-scaled-drift.png` });
 // 3b) 예제 메뉴: 묶음별 열 + 검색
 console.log("3b) 예제 메뉴 묶음·검색");
 await page.click(".menu-btn");
-check((await page.locator(".menu-group").count()) === 7, "예제 메뉴가 묶음 7개로 나뉜다", "examples.ts EXAMPLE_GROUPS / App.tsx ExampleMenu");
+check((await page.locator(".menu-group").count()) === 8, "예제 메뉴가 묶음 8개로 나뉜다", "examples.ts EXAMPLE_GROUPS / App.tsx ExampleMenu");
 await page.screenshot({ path: `${OUT}/05b-example-menu.png` });
 await page.keyboard.type("readiness");
 const found = await page.locator(".example-item").evaluateAll((els) => els.map((e) => e.getAttribute("data-example")));
@@ -292,6 +292,53 @@ await page.locator('[data-app="net-sim"]').click();
 await page.waitForTimeout(300);
 await page.screenshot({ path: `${OUT}/20-gitops-app.png` });
 check(true, "Refresh 하면 새 리비전을 보고 자동 sync");
+
+// 15) 자원: OOMKilled · 노드 실사용 선 · throttling
+console.log("15) 자원 (requests/limits)");
+await page.click(".menu-btn");
+await page.click('.menu-item[data-example="oom"]');
+await page.selectOption(".transport .speed", "5");
+const reportChip = page.locator('.node .pod[data-pod^="report-"]').first();
+await waitFor(async () => (await reportChip.count()) === 1 && ((await reportChip.locator(".pod-restarts").count()) > 0), "report 재시작", 30000);
+await reportChip.click();
+await waitFor(async () => (await page.locator(".callout", { hasText: "OOMKilled (exit 137)" }).count()) === 1, "OOMKilled 안내", 10000);
+check(true, "OOMKilled 뒤 Pod 인스펙터에 이유(limits.memory 에 닿음)가 보인다");
+check((await page.locator(".insp-body h3", { hasText: "자원 · QoS Burstable" }).count()) === 1, "Pod 인스펙터에 자원 막대와 QoS", "Inspector PodResources");
+check((await page.locator(".usage-tick.lim").count()) >= 1, "메모리 막대에 limits 눈금", "Inspector UsageBar");
+await page.screenshot({ path: `${OUT}/21-oom.png` });
+await page.locator(".tabs button", { hasText: "describe" }).click();
+check((await page.locator(".insp-body .term").textContent())?.includes("OOMKilled"), "describe 에 Last State OOMKilled", "kubectl.ts describePod stateLines");
+
+await page.click(".menu-btn");
+await page.click('.menu-item[data-example="throttle"]');
+await waitFor(async () => (await page.locator('.node .pod[data-pod^="thumbs-"] .pod-badge', { hasText: "throttled" }).count()) === 1, "throttled 배지", 30000);
+check(true, "cpu limit 에 막힌 Pod 칩에 throttled 배지");
+await page.locator('.node .pod[data-pod^="thumbs-"]').click();
+await page.locator(".tabs button", { hasText: "개요" }).click();
+await waitFor(async () => (await page.locator(".insp-body .note", { hasText: "CPU throttling" }).count()) === 1, "throttling 설명", 5000);
+check(true, "인스펙터에 throttling 설명");
+await page.locator(".insp-close").click();
+await waitFor(async () => (await page.locator(".canvas").textContent())?.includes("엔드포인트 ready 1"), "thumbs 엔드포인트 ready", 20000);
+await page.waitForTimeout(600); // kube-proxy 규칙 반영 1초 (5× 속도)
+await page.locator(".try", { hasText: "요청 보내기" }).locator("button").click();
+await page.waitForTimeout(300);
+check((await page.locator(".drawer").textContent())?.includes("응답 450ms"), "curl 결과에 응답 450ms", "request.ts deliverToIp latency");
+await page.screenshot({ path: `${OUT}/22-throttle.png` });
+await page.locator(".tree-row", { hasText: "thumbs" }).first().click();
+await page.locator(".tabs button", { hasText: "설정" }).click();
+check((await page.locator(".field-label", { hasText: "limits.cpu" }).count()) === 1, "Deployment 설정에 limits 칸", "Inspector DeploymentSettings");
+
+await page.click(".menu-btn");
+await page.click('.menu-item[data-example="node-oom"]');
+await waitFor(async () => (await page.locator('.node .pod[data-pod^="leaky-"] .pod-status').textContent().catch(() => "")) === "Running", "leaky Running", 30000);
+await page.locator("button", { hasText: "+1분" }).click();
+await page.locator("button", { hasText: "+1분" }).click();
+await page.waitForTimeout(400);
+const useW = await page.locator(".node .res-use").nth(1).evaluate((e) => parseFloat(e.style.width));
+check(useW > 25, `2분 뒤 노드 memory 실사용 선이 requests 와 따로 차오른다 (${useW.toFixed(0)}%)`, "view.ts NodeView.memory.actual / Canvas ResBar");
+await page.locator(".tree-row", { hasText: "worker-1" }).first().click();
+await page.waitForTimeout(200);
+await page.screenshot({ path: `${OUT}/23-node-usage.png` });
 
 check(errors.length === 0, `브라우저 오류 없음${errors.length ? `: ${errors.join(" | ")}` : ""}`, "콘솔 오류의 스택을 보고 고치세요");
 console.log(failed ? "ui-check 실패" : "ui-check 통과 — 스크린샷: .shots/");

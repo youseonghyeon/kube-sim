@@ -331,8 +331,8 @@ function NodeCard({ n, now, flashes, focus, selected }: { n: NodeView; now: numb
       </button>
       {story && <div class={`node-story t-${story.tone}`}>{story.text}</div>}
       <div class="node-res">
-        <ResBar label="cpu" used={n.cpu.used} total={n.cpu.total} fmt={fmtCpu} />
-        <ResBar label="memory" used={n.memory.used} total={n.memory.total} fmt={fmtMem} />
+        <ResBar label="cpu" used={n.cpu.used} actual={n.powered ? n.cpu.actual : undefined} total={n.cpu.total} fmt={fmtCpu} />
+        <ResBar label="memory" used={n.memory.used} actual={n.powered ? n.memory.actual : undefined} total={n.memory.total} fmt={fmtMem} />
       </div>
       <div class="pods">
         {n.pods.map((p) => (
@@ -348,16 +348,21 @@ function NodeCard({ n, now, flashes, focus, selected }: { n: NodeView; now: numb
   );
 }
 
-function ResBar({ label, used, total, fmt }: { label: string; used: number; total: number; fmt: (n: number) => string }) {
+/** 노드 자원 막대: 채움 = requests 합(스케줄러가 보는 것), 아래 선 = 실사용(kubectl top) */
+function ResBar({ label, used, actual, total, fmt }: { label: string; used: number; actual?: number; total: number; fmt: (n: number) => string }) {
   const pct = total ? Math.min(100, (used / total) * 100) : 0;
+  const use = actual !== undefined && total ? Math.min(100, (actual / total) * 100) : undefined;
   return (
-    <div class="res" title={`requests 합 ${fmt(used)} / allocatable ${fmt(total)}`}>
+    <div class="res" title={`막대 = requests 합 ${fmt(used)} (스케줄러가 보는 것)${actual !== undefined ? ` · 아래 선 = 실사용 ${fmt(actual)} (kubectl top)` : ""} / allocatable ${fmt(total)}`}>
       <span class="res-label">{label}</span>
       <span class="res-bar">
         <span class={`res-fill${pct >= 85 ? " hot" : ""}`} style={{ width: `${pct}%` }} />
+        {use !== undefined && <span class={`res-use${use >= 85 ? " hot" : ""}`} style={{ width: `${use}%` }} />}
       </span>
       <span class="res-num mono">
-        {fmt(used)} / {fmt(total)}
+        {actual !== undefined && <span class="res-req">요청 </span>}
+        {fmt(used)}
+        {actual !== undefined && <span class={`res-actual${use !== undefined && use >= 85 ? " hot" : ""}`}> · 사용 {fmt(actual)}</span>} / {fmt(total)}
       </span>
     </div>
   );
@@ -390,6 +395,16 @@ function PodChip({ p, flash, focus }: { p: PodView; flash?: string; focus: Focus
       <span class="pod-bottom">
         <span class="pod-status">{p.status}</span>
         {p.sick && <span class="pod-sick" title="앱 고장 (사용자가 만든 상태) — /ready 와 요청이 503">고장</span>}
+        {p.memOfLimit !== undefined && p.memOfLimit >= 0.8 && (
+          <span class="pod-badge bad" title={`메모리가 limits.memory 의 ${Math.round(p.memOfLimit * 100)}% — 넘으면 OOMKilled`}>
+            mem {Math.round(p.memOfLimit * 100)}%
+          </span>
+        )}
+        {p.cpuShort === "limit" && (
+          <span class="pod-badge wait" title="CPU 를 원하는 만큼 못 받음 — limits.cpu 에 막혀 throttling (느려질 뿐 죽지 않음)">
+            throttled
+          </span>
+        )}
         {p.restarts > 0 && (
           <span class="pod-restarts" title={`재시작 ${p.restarts}번`}>
             ↻{p.restarts}

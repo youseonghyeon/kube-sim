@@ -423,16 +423,24 @@ function resourceDefaults(o: KObject): void {
   }
   if (!containers) return;
   containers.forEach((c, i) => {
+    defaultContainerResources(c);
     const r = c.resources.requests;
     const l = c.resources.limits;
     if (!l) return;
-    if (l.cpu !== undefined && !r.cpu) r.cpu = l.cpu;
-    if (l.memory !== undefined && !r.memory) r.memory = l.memory;
     if (l.cpu !== undefined && r.cpu > l.cpu)
       throw new ApiError("Invalid", `${o.kind} "${o.metadata.name}" is invalid: ${path}[${i}].resources.requests: Invalid value: "${fmtCpu(r.cpu)}": must be less than or equal to cpu limit of ${fmtCpu(l.cpu)}`);
     if (l.memory !== undefined && r.memory > l.memory)
       throw new ApiError("Invalid", `${o.kind} "${o.metadata.name}" is invalid: ${path}[${i}].resources.requests: Invalid value: "${fmtMem(r.memory)}": must be less than or equal to memory limit of ${fmtMem(l.memory)}`);
   });
+}
+
+/** limits 만 적고 requests 를 비우면(0) requests = limits — API 서버의 기본값. 비교하는 쪽(Argo CD·드리프트)도 같은 기본값을 써야 끝없이 다르다고 보지 않는다 */
+export function defaultContainerResources(c: Container): void {
+  const r = c.resources.requests;
+  const l = c.resources.limits;
+  if (!l) return;
+  if (l.cpu !== undefined && !r.cpu) r.cpu = l.cpu;
+  if (l.memory !== undefined && !r.memory) r.memory = l.memory;
 }
 
 function defaultDeployment(d: Deployment): void {

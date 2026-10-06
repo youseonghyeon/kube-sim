@@ -120,9 +120,9 @@ export const IMAGES: Record<string, ImageSpec> = {
     body: '{"status":"ok"}',
     memMi: 80,
     memRampMs: 3000,
-    leakMiPerMin: 100,
+    leakMiPerMin: 150,
     cpuM: 20,
-    description: "메모리 누수가 있는 API (포트 8080). 80Mi 로 뜬 뒤 1분에 100Mi 씩 늘어납니다 — limits 가 없으면 노드 메모리를 다 먹습니다",
+    description: "메모리 누수가 있는 API (포트 8080). 80Mi 로 뜬 뒤 1분에 150Mi 씩 늘어납니다 — limits 가 없으면 노드 메모리를 다 먹습니다",
   },
   "example/leaky:1.1": { pullMs: 2000, sizeMB: 40, termMs: 300, port: 8080, body: '{"status":"ok","version":"1.1"}', memMi: 80, memRampMs: 3000, cpuM: 20, description: "누수를 고친 버전 (80Mi 에서 멈춤)" },
   "example/thumbs:1.0": {

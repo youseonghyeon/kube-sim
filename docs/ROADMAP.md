@@ -65,7 +65,9 @@
 ## 5. 운영 (후보 — 시작할 때 고른다)
 - 후보: requests/limits 와 OOMKilled·CPU throttling(5a 로 시작), HPA(메트릭 흉내로 replicas 조정), NetworkPolicy(기본 허용 → 정책이 하나라도 걸리면 기본 차단), ConfigMap/Secret 변경과 재시작, StatefulSet + PVC(순서·고정 이름·고정 볼륨)
 
-### 5a. requests/limits · OOMKilled · CPU throttling (2026-10-06 시작, 사용자 선택)
+### 5a. requests/limits · OOMKilled · CPU throttling ✅ 2026-10-06 (사용자 선택)
+- 된 것: `resources.limits`(requests > limits 거절, limits 만 적으면 requests = limits), QoS 클래스, 이미지별 메모리(램프·누수)·CPU(수요·요청당 일) 모양, cgroup OOM·노드 OOM(oom_score·SystemOOM 이벤트), CPU 나눠 받기(requests 비율)·throttling → 응답 시간·probe timeout, `kubectl top pods|nodes`·`set resources --limits`·describe 의 Limits/QoS/OOMKilled·describe node 의 Limits·overcommit, 인스펙터(limits 편집·Pod 자원 막대·OOMKilled 이유), 노드 칸의 요청·사용, Pod 칩 배지(mem %·throttled), 예제 묶음 "자원" 3개
+- 축소판: node-pressure eviction·시스템 예약·페이지 캐시 없음, CPU 는 CFS 주기 없이 비율로만, 요청 수가 CPU 사용을 늘리지 않음, metrics-server 지연 없음 (ARCHITECTURE 5-1)
 - 왜: 사용자의 차트(`deploy/values.yaml`)에 `limits.memory: 64Mi` 가 실제로 있다. "왜 재시작됐지(OOMKilled · exit 137)", "왜 느리지(throttling)", "노드가 꽉 찼는데 왜 스케줄은 되지(requests ≠ 실사용)" 를 추측하지 않고 보게 한다.
 - 배우는 것
   - requests 는 스케줄러가 보는 **예약**, limits 는 커널(cgroup)이 거는 **상한**. 실사용(`kubectl top`)은 둘과 따로 움직인다

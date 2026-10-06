@@ -1030,6 +1030,30 @@ pre {
 .res-fill.hot {
   background: var(--wait);
 }
+/* 실사용 (kubectl top): requests 막대 아래쪽의 선 */
+.res-bar {
+  position: relative;
+}
+.res-use {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 2px;
+  background: var(--accent);
+  transition: width 0.3s;
+}
+.res-use.hot {
+  background: var(--bad);
+}
+.res-req {
+  color: var(--ink-3);
+}
+.res-actual {
+  color: var(--accent);
+}
+.res-actual.hot {
+  color: var(--bad);
+}
 .res-num {
   color: var(--ink-2);
   font-size: 11px;
@@ -1145,6 +1169,20 @@ pre {
 .pod-restarts {
   flex: none;
   color: var(--bad);
+}
+.pod-badge {
+  flex: none;
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 10px;
+}
+.pod-badge.bad {
+  background: var(--bad-soft);
+  color: var(--bad);
+}
+.pod-badge.wait {
+  background: var(--wait-soft);
+  color: var(--wait);
 }
 .pod-ip {
   flex: none;
@@ -1778,4 +1816,95 @@ pre {
   background: var(--ink);
   color: var(--surface);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+}
+
+/* ---- 인스펙터: Pod 자원 막대 (실사용 · requests 눈금 · limits 눈금) ---- */
+.usage {
+  display: grid;
+  gap: 10px;
+  margin: 4px 0 6px;
+}
+.usage-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.usage-label {
+  color: var(--ink-3);
+  font-size: 11px;
+}
+.usage-bar {
+  position: relative;
+  height: 8px;
+  margin-top: 4px;
+  border-radius: 4px;
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.usage-fill,
+.usage-want {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  border-radius: 4px;
+}
+.usage-fill {
+  background: var(--accent);
+}
+.usage-fill.hot {
+  background: var(--bad);
+}
+/* 원하지만 못 받는 CPU */
+.usage-want {
+  background: repeating-linear-gradient(135deg, var(--wait-soft) 0 4px, transparent 4px 8px);
+  box-shadow: inset 0 0 0 1px var(--wait);
+}
+.usage-tick {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 2px;
+  margin-left: -1px;
+  border-radius: 1px;
+}
+.usage-tick.req {
+  background: var(--ink-2);
+}
+.usage-tick.lim {
+  background: var(--bad);
+}
+.usage-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 8px;
+  color: var(--ink-3);
+  font-size: 11px;
+}
+.usage-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.usage-legend .lg {
+  display: inline-block;
+  width: 10px;
+  height: 8px;
+  border-radius: 2px;
+}
+.usage-legend .lg.use {
+  background: var(--accent);
+}
+.usage-legend .lg.req,
+.usage-legend .lg.lim {
+  width: 2px;
+  height: 12px;
+}
+.usage-legend .lg.req {
+  background: var(--ink-2);
+}
+.usage-legend .lg.lim {
+  background: var(--bad);
 }

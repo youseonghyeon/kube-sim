@@ -192,3 +192,74 @@ describe("kubectl top · describe node", () => {
     expect(r.output).toContain("kubectl top pods 또는 kubectl top nodes");
   });
 });
+
+describe("limits 만 적은 매니페스트 — 비교하는 쪽도 기본값을 안다", () => {
+  test("Argo CD 는 requests 를 비운 Git 매니페스트를 라이브(requests = limits)와 같다고 본다", async () => {
+    const { diffFields } = await import("../src/core/gitops/argocd");
+    const c = cluster();
+    const m = deployment("g", { replicas: 1, image: "nginx:1.27", cpu: 0, memory: 0, limits: { cpu: 200, memory: 128 } });
+    c.apply(m);
+    c.runFor(5_000);
+    expect(diffFields(m, c.api.get("Deployment", "g")!)).toEqual([]);
+  });
+
+  test("화면의 드리프트 검사도 같다", async () => {
+    const { DefSync } = await import("../src/model/defSync");
+    const s = new DefSync();
+    const m = deployment("g", { replicas: 1, image: "nginx:1.27", cpu: 0, memory: 0, limits: { cpu: 200, memory: 128 } });
+    s.reset({ nodes: [{ name: "worker-1", cpu: 2000, memory: 4096 }], manifests: [m] }, "x");
+    s.cluster.runFor(5_000);
+    expect(s.drift(m)).toEqual([]);
+    runKubectl(s.cluster, "kubectl set resources deployment/g --limits=memory=256Mi");
+    expect(s.drift(m)).toEqual(["limits 가 다름"]);
+  });
+});
+
+describe("예제 '자원' 묶음이 학습 포인트를 실제로 보여 준다", () => {
+  const load = async (id: string) => {
+    const { DefSync } = await import("../src/model/defSync");
+    const { exampleById } = await import("../src/model/examples");
+    const s = new DefSync();
+    s.reset(exampleById(id)!.build(), id);
+    return s.cluster;
+  };
+
+  test("oom: 30초 안에 OOMKilled, limit 을 올리면 멈춘다", async () => {
+    const c = await load("oom");
+    c.runFor(30_000);
+    expect(traceOf(c, "kubelet.oom").length).toBeGreaterThanOrEqual(1);
+    runKubectl(c, "kubectl set resources deployment/report --limits=memory=512Mi");
+    c.runFor(60_000);
+    const n = traceOf(c, "kubelet.oom").length;
+    c.runFor(5 * 60_000);
+    expect(traceOf(c, "kubelet.oom").length).toBe(n);
+  });
+
+  test("node-oom: 7분 안에 노드 OOM 이 leaky 를 고르고, limits 를 걸면 컨테이너 OOM 으로 바뀐다", async () => {
+    const c = await load("node-oom");
+    c.runFor(7 * 60_000);
+    const first = traceOf(c, "kubelet.oom")[0];
+    expect(first?.msg).toContain("노드의 커널 OOM killer");
+    expect(first?.ref?.name).toMatch(/^leaky-/);
+    runKubectl(c, "kubectl set resources deployment/leaky --limits=memory=384Mi");
+    const from = c.trace.events.length;
+    c.runFor(10 * 60_000);
+    const after = c.trace.events.slice(from).filter((e) => e.kind === "kubelet.oom");
+    expect(after.length).toBeGreaterThanOrEqual(1);
+    expect(after.every((e) => e.msg.includes("cgroup OOM killer") && e.ref?.name?.startsWith("leaky-"))).toBe(true);
+  });
+
+  test("throttle: 450ms → (50m) liveness 시간 초과 재시작 → (1 CPU) 150ms", async () => {
+    const c = await load("throttle");
+    c.runFor(20_000);
+    const client = pods(c).find((p) => p.metadata.labels.app === "client")!.metadata.name;
+    expect(c.requestFromPod(client, "curl", "http://thumbs").latencyMs).toBe(450);
+    expect(runKubectl(c, "kubectl set resources deployment/thumbs --requests=cpu=50m --limits=cpu=50m").ok).toBe(true);
+    const from = c.trace.events.length;
+    c.runFor(90_000);
+    expect(c.trace.events.slice(from).some((e) => e.kind === "kubelet.probe" && e.msg.includes("시간 초과"))).toBe(true);
+    expect(runKubectl(c, "kubectl set resources deployment/thumbs --requests=cpu=100m --limits=cpu=1").ok).toBe(true);
+    c.runFor(60_000);
+    expect(c.requestFromPod(client, "curl", "http://thumbs").latencyMs).toBe(150);
+  });
+});
