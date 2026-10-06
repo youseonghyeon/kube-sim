@@ -21,6 +21,8 @@ export interface ObjectMeta {
   ownerReferences: OwnerReference[];
   deletionTimestamp?: number;
   deletionGracePeriodSeconds?: number;
+  /** 남아 있으면 지울 때 deletionTimestamp 만 찍고(Terminating) 기다린다 — 마지막 것이 빠지면 그때 사라진다 (예: kubernetes.io/pv-protection) */
+  finalizers?: string[];
 }
 
 export interface Resources {

@@ -34,7 +34,7 @@ export const WATCH_DELAY_MS = 100;
 
 /** 만들 때 채우는 메타데이터 외의 부분 */
 export type Draft<K extends Kind> = Omit<ObjectOf<K>, "metadata" | "status"> & {
-  metadata: Pick<ObjectMeta, "name"> & Partial<Pick<ObjectMeta, "namespace" | "labels" | "annotations" | "ownerReferences">>;
+  metadata: Pick<ObjectMeta, "name"> & Partial<Pick<ObjectMeta, "namespace" | "labels" | "annotations" | "ownerReferences" | "finalizers">>;
   status?: ObjectOf<K>["status"];
 };
 
@@ -126,6 +126,7 @@ export class ApiServer {
       labels: { ...(draft.metadata.labels ?? {}) },
       ...(draft.metadata.annotations ? { annotations: { ...draft.metadata.annotations } } : {}),
       ownerReferences: clone(draft.metadata.ownerReferences ?? []),
+      ...(draft.metadata.finalizers?.length ? { finalizers: [...draft.metadata.finalizers] } : {}),
     };
     if (obj.kind === "Deployment") defaultDeployment(obj as Deployment);
     resourceDefaults(obj);
@@ -165,6 +166,11 @@ export class ApiServer {
     resourceDefaults(next);
     secretData(next);
     if (stableJson(next) === stableJson(cur)) return clone(cur);
+    // 지우는 중인 오브젝트에서 마지막 finalizer 가 빠지면 이제 정말 지운다
+    if (cur.kind !== "Pod" && cur.metadata.deletionTimestamp !== undefined && !next.metadata.finalizers?.length) {
+      this.remove(cur, actor);
+      return clone(next);
+    }
     const specChanged = stableJson(next.spec) !== stableJson(cur.spec);
     if (specChanged && obj.kind !== "Lease") next.metadata.generation = cur.metadata.generation + 1;
     next.metadata.resourceVersion = ++this.rv;
@@ -211,6 +217,17 @@ export class ApiServer {
         `${actor} 의 삭제 요청 → Pod ${name} 에 deletionTimestamp 표시 (Terminating, 유예 ${next.metadata.deletionGracePeriodSeconds}초 — kubelet 이 컨테이너를 멈추면 사라짐)`,
         refOf(next),
       );
+      this.notify("MODIFIED", next);
+      return true;
+    }
+    if (cur.kind !== "Pod" && cur.metadata.finalizers?.length) {
+      // finalizer 가 있으면 바로 지우지 않고 Terminating — 그것을 맡은 컨트롤러가 정리하고 finalizer 를 빼면 사라진다
+      if (cur.metadata.deletionTimestamp !== undefined) return false;
+      const next = clone(cur);
+      next.metadata.deletionTimestamp = this.clock.now;
+      next.metadata.resourceVersion = ++this.rv;
+      this.store.set(key, next);
+      this.trace.add("kube-apiserver", "api.update", `${actor} 의 삭제 요청 → ${kind} ${name} 에 deletionTimestamp 표시 (finalizer ${cur.metadata.finalizers.join(", ")} 가 빠질 때까지 Terminating)`, refOf(next));
       this.notify("MODIFIED", next);
       return true;
     }

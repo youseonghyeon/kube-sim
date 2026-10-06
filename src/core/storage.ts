@@ -3,7 +3,8 @@
 //   프로비저너가 그 노드의 디렉터리로 PV 를 만들고(nodeAffinity = 그 노드) PVC 와 묶는다 → 이후 그 PVC 를 쓰는 Pod 는 그 노드에만 갈 수 있다.
 // - PVC 를 지우면 reclaimPolicy Delete 라 PV 와 데이터도 지운다.
 // - 데이터(앱이 적은 것)는 API 오브젝트가 아니라 노드 디스크라 여기 따로 둔다 (PV 이름 → 내용).
-// 축소판: 용량 검사·확장, pvc-protection finalizer(쓰는 Pod 가 있으면 Terminating 으로 남음), 다른 StorageClass·Immediate 바인딩의 정적 PV 짝짓기 없음.
+// - PV 에는 pv-protection finalizer: 묶인 PVC 가 있는 동안 PV 를 지우면 Terminating 으로 남고(데이터 그대로), PVC 가 사라지면 그때 지운다.
+// 축소판: 용량 검사·확장, pvc-protection finalizer(쓰는 Pod 가 있으면 PVC 가 Terminating 으로 남음), 다른 StorageClass·Immediate 바인딩의 정적 PV 짝짓기 없음.
 import { refOf } from "./api/server";
 import type { PersistentVolumeClaim, Pod } from "./api/types";
 import { Controller, nsKey, splitKey, type ComponentContext } from "./controllers/base";
@@ -12,6 +13,8 @@ export const LOCAL_PATH = "local-path";
 export const LOCAL_PATH_PROVISIONER = "rancher.io/local-path";
 export const SELECTED_NODE = "volume.kubernetes.io/selected-node";
 export const DEFAULT_SC_ANNOTATION = "storageclass.kubernetes.io/is-default-class";
+/** 묶인 PVC 가 있는 동안 PV 를 지워도 Terminating 으로 남게 (실제 pv-protection) */
+export const PV_PROTECTION = "kubernetes.io/pv-protection";
 const ACTOR = "local-path-provisioner";
 
 /** 노드 디스크에 남는 앱 데이터 (PV 이름 → 키·값) */
@@ -41,6 +44,24 @@ export class LocalPathProvisioner extends Controller {
       if (ev.type === "DELETED") this.reclaim(ev.object);
       else this.enqueue(key);
     });
+    // pv-protection: 지우는 중인 PV 의 PVC 가 이미 없으면 finalizer 를 빼서 정말 지운다
+    ctx.api.watch("PersistentVolume", (ev) => {
+      const pv = ev.object;
+      if (ev.type === "DELETED" || pv.metadata.deletionTimestamp === undefined) return;
+      const claim = pv.spec.claimRef;
+      if (claim && this.api.get("PersistentVolumeClaim", claim.name, claim.namespace)) return;
+      this.release(pv.metadata.name);
+    });
+  }
+
+  /** finalizer 를 빼고 (지우는 중이 아니면) 지운다 — PV 와 데이터가 사라진다 */
+  private release(pvName: string): void {
+    const pv = this.api.get("PersistentVolume", pvName);
+    if (!pv) return;
+    const deleting = pv.metadata.deletionTimestamp !== undefined;
+    this.api.patch("PersistentVolume", pvName, undefined, this.name, (o) => (o.metadata.finalizers = (o.metadata.finalizers ?? []).filter((f) => f !== PV_PROTECTION)));
+    if (!deleting && this.api.get("PersistentVolume", pvName)) this.api.delete("PersistentVolume", pvName, undefined, this.name);
+    this.data.delete(pvName);
   }
 
   /** 기본 StorageClass 를 둔다 (k3s 가 설치할 때 만드는 것) */
@@ -79,7 +100,7 @@ export class LocalPathProvisioner extends Controller {
       {
         apiVersion: "v1",
         kind: "PersistentVolume",
-        metadata: { name: pvName, annotations: { "pv.kubernetes.io/provisioned-by": LOCAL_PATH_PROVISIONER } },
+        metadata: { name: pvName, annotations: { "pv.kubernetes.io/provisioned-by": LOCAL_PATH_PROVISIONER }, finalizers: [PV_PROTECTION] },
         spec: {
           capacity: { storage: pvc.spec.resources.requests.storage },
           accessModes: [...pvc.spec.accessModes],
@@ -113,8 +134,7 @@ export class LocalPathProvisioner extends Controller {
     if (!pvName) return;
     const pv = this.api.get("PersistentVolume", pvName);
     if (!pv || pv.spec.persistentVolumeReclaimPolicy !== "Delete") return;
-    this.api.delete("PersistentVolume", pvName, undefined, this.name);
-    this.data.delete(pvName);
+    this.release(pvName);
     this.ctx.trace.add(this.name, "storage", `PVC ${pvc.metadata.name} 삭제 → reclaimPolicy Delete → PV ${pvName} 와 ${pv.spec.hostPath.path} 의 데이터 삭제`, { kind: "PersistentVolume", name: pvName });
   }
 }

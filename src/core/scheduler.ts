@@ -36,6 +36,8 @@ export class Scheduler {
   private readonly queue = new Set<string>();
   /** 자리가 없어 기다리는 Pod (클러스터가 바뀌면 다시 큐로) */
   private readonly unschedulable = new Set<string>();
+  /** 볼륨(PVC 없음·디스크 노드) 때문에 기다리는 Pod — PVC·PV 가 바뀔 때는 이것만 다시 시도 (실제: 막은 플러그인이 등록한 이벤트만) */
+  private readonly volumeBlocked = new Set<string>();
   private scheduled = false;
   /** 기다리던 Pod 를 다시 시도하게 만든 클러스터 변화 (트레이스에 이유로 남긴다) */
   private readonly retryWhy = new Map<string, string>();
@@ -49,6 +51,7 @@ export class Scheduler {
       if (ev.type === "DELETED") {
         this.queue.delete(key);
         this.unschedulable.delete(key);
+        this.volumeBlocked.delete(key);
         if (p.spec.nodeName) this.retryUnschedulable(`노드 ${p.spec.nodeName} 의 Pod ${p.metadata.name} 이(가) 사라져 자리가 났을 수 있음`);
         return;
       }
@@ -59,10 +62,10 @@ export class Scheduler {
     });
     // PVC·PV 가 생기거나 묶이면 기다리던 Pod 가 갈 곳이 생겼을 수 있다
     ctx.api.watch("PersistentVolumeClaim", (ev) => {
-      if (ev.type !== "DELETED") this.retryUnschedulable(`PVC ${ev.object.metadata.name} 이(가) ${ev.type === "ADDED" ? "생김" : "바뀜"}`);
+      if (ev.type !== "DELETED") this.retryUnschedulable(`PVC ${ev.object.metadata.name} 이(가) ${ev.type === "ADDED" ? "생김" : "바뀜"}`, true);
     });
     ctx.api.watch("PersistentVolume", (ev) => {
-      if (ev.type !== "DELETED") this.retryUnschedulable(`PV ${ev.object.metadata.name} 이(가) 바뀜`);
+      if (ev.type !== "DELETED") this.retryUnschedulable(`PV ${ev.object.metadata.name} 이(가) 바뀜`, true);
     });
     ctx.api.watch("Node", (ev) => {
       const n = ev.object;
@@ -85,11 +88,12 @@ export class Scheduler {
     this.ctx.clock.after(0, SCHEDULER, () => this.drain());
   }
 
-  private retryUnschedulable(why: string): void {
+  private retryUnschedulable(why: string, volumeOnly = false): void {
     if (!this.unschedulable.size) return;
-    const keys = [...this.unschedulable];
-    this.unschedulable.clear();
+    const keys = [...this.unschedulable].filter((k) => !volumeOnly || this.volumeBlocked.has(k));
     for (const k of keys) {
+      this.unschedulable.delete(k);
+      this.volumeBlocked.delete(k);
       this.retryWhy.set(k, why);
       this.enqueue(k);
     }
@@ -121,6 +125,7 @@ export class Scheduler {
       // PreFilter 에서 막힘: 노드를 하나도 보지 않는다
       const msg = `0/${nodes.length} nodes are available: persistentvolumeclaim "${vol.missing}" not found.`;
       this.unschedulable.add(key);
+      this.volumeBlocked.add(key);
       this.ctx.trace.add(SCHEDULER, "scheduler.fail", `${name}${again} 가 쓰는 PVC ${vol.missing} 가 없음 → 노드를 고르지 않고 Pending 으로 대기 (PVC 가 생기면 다시 시도)`, refOf(pod));
       api.recordEvent(pod, "Warning", "FailedScheduling", msg, SCHEDULER);
       api.patch("Pod", name, ns, SCHEDULER, (p) => setCondition(p, "PodScheduled", "False", this.ctx.clock.now, "Unschedulable", msg));
@@ -138,6 +143,7 @@ export class Scheduler {
     if (!fits.length) {
       const msg = failedSchedulingMessage(nodes.length, reasons);
       this.unschedulable.add(key);
+      if (reasons.has("node(s) had volume node affinity conflict")) this.volumeBlocked.add(key);
       this.ctx.trace.add(
         SCHEDULER,
         "scheduler.fail",

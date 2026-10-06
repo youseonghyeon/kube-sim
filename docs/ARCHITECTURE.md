@@ -54,7 +54,9 @@
 - local-path(k3s 기본): StorageClass 는 클러스터를 만들 때 하나 둔다(default). PVC 는 WaitForFirstConsumer — 스케줄러가 Pod 를 바인딩할 때 PVC 에 selected-node 를 적으면 프로비저너가 그 노드의 `/var/lib/rancher/k3s/storage/...` 로 PV(nodeAffinity = 그 노드)를 만들어 묶는다. PVC 를 지우면 reclaim Delete 로 PV·데이터도 지운다. 데이터(앱이 적은 것)는 API 밖 `Cluster.volumeData`(PV 이름 → 내용), 볼륨 없는 컨테이너 데이터는 `containerData`(Pod uid/재시작 횟수).
 - 스케줄러 VolumeBinding: 없는 PVC 면 노드를 보지 않고 `persistentvolumeclaim "x" not found`, 묶인 PV 가 노드를 정하면 다른 노드는 `volume node affinity conflict` (자원 검사 뒤). kubelet 은 PVC 가 Bound·이 노드의 PV 일 때만 마운트(아니면 FailedMount 재시도).
 - headless Service(clusterIP None): API 가 주소를 주지 않고 kube-proxy 규칙도 없다. DNS 는 ready 엔드포인트 IP 들, `<hostname>.<svc>` 는 그 Pod IP — 요청은 DNAT 없이 Pod 포트로 바로.
-- 축소판: ControllerRevision 오브젝트·partition·persistentVolumeClaimRetentionPolicy·pvc-protection finalizer·용량 검사·정적 PV 짝짓기·다른 StorageClass 없음, PV 프로비저닝을 기다린 뒤 바인딩하지 않는다(PreBind 생략).
+- Parallel 은 줄일 때 한꺼번에 지운다. 한 번의 reconcile 에서는 축소가 먼저, 무엇이든 지웠으면 롤링은 다음 차례로(한 번에 하나).
+- finalizer(일반): API 서버는 finalizer 가 남은 오브젝트를 지울 때 deletionTimestamp 만 찍고(Terminating) 마지막 finalizer 가 빠질 때 정말 지운다. PV 는 pv-protection — 묶인 PVC 가 있는 동안 PV 를 지워도 데이터와 함께 남는다. 스케줄러는 볼륨 때문에 막힌 Pod 만 PVC·PV 변화로 다시 시도한다.
+- 축소판: ControllerRevision 오브젝트·partition·persistentVolumeClaimRetentionPolicy·pvc-protection(PVC 쪽 finalizer)·용량 검사·정적 PV 짝짓기·다른 StorageClass 없음, PV 프로비저닝을 기다린 뒤 바인딩하지 않는다(PreBind 생략).
 
 ## 4. 스케줄러 (`scheduler.ts`)
 - 노드가 없는 Pod 를 큐에 → 필터(cordon, untolerated taint(NotReady 포함), nodeSelector, Too many pods, Insufficient cpu/memory — Terminating Pod 도 자리를 차지) → 점수 LeastAllocated(동점은 노드 이름 순) → `spec.nodeName` 바인딩.

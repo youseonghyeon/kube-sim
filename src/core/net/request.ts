@@ -83,9 +83,12 @@ function lookup(c: Cluster, fqdn: string): { ips: string[]; headless?: boolean }
   const pod = new RegExp(`^([a-z0-9-]+)\\.([a-z0-9-]+)\\.([a-z0-9-]+)${sfx}`).exec(fqdn);
   if (pod) {
     const [, host, sub, ns] = pod;
+    // Pod 마다의 이름은 headless Service 이고 그 셀렉터가 그 Pod 를 고를 때만 (일반 ClusterIP Service 로는 안 생긴다 — 흔한 실수)
     const svc = c.api.peekList("Service", ns).find((s) => s.metadata.name === sub);
-    if (!svc) return undefined;
-    const p = c.api.peekList("Pod", ns).find((x) => x.spec.hostname === host && x.spec.subdomain === sub && x.status.podIP && x.metadata.deletionTimestamp === undefined && isPodReady(x));
+    if (!svc || svc.spec.clusterIP !== "None") return undefined;
+    const p = c.api
+      .peekList("Pod", ns)
+      .find((x) => x.spec.hostname === host && x.spec.subdomain === sub && x.status.podIP && x.metadata.deletionTimestamp === undefined && isPodReady(x) && Object.entries(svc.spec.selector).every(([k, v]) => x.metadata.labels[k] === v));
     return p ? { ips: [p.status.podIP!], headless: true } : undefined;
   }
   const m = new RegExp(`^([a-z0-9-]+)\\.([a-z0-9-]+)${sfx}`).exec(fqdn);

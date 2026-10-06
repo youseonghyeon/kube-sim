@@ -315,7 +315,9 @@ function get(c: Cluster, pos: string[], flags: Map<string, string>): string {
   if (flags.get("o") === "yaml") return getYaml(c, kind, names);
   if (flags.has("o") && !wide) throw new KubectlError(`error: 출력 형식 "${flags.get("o")}" 는 아직 없습니다 (wide · yaml 만)`);
   if (kind === "all") {
-    const parts = [getPods(c, [], false, true), getServices(c, [], true), getDeploys(c, [], true), getRs(c, [], true)].filter(Boolean);
+    const stss = c.api.list("StatefulSet", "default");
+    const stsTable = stss.length ? table(["NAME", "READY", "AGE"], stss.map((s) => [`statefulset.apps/${s.metadata.name}`, `${s.status.readyReplicas}/${s.spec.replicas}`, fmtAge(c.now - s.metadata.creationTimestamp)])) : "";
+    const parts = [getPods(c, [], false, true), getServices(c, [], true), getDeploys(c, [], true), getRs(c, [], true), stsTable].filter(Boolean);
     return parts.join("\n\n") || "No resources found in default namespace.";
   }
   switch (kind) {
@@ -370,7 +372,7 @@ function get(c: Cluster, pos: string[], flags: Map<string, string>): string {
       return ps.length
         ? table(
             ["NAME", "CAPACITY", "ACCESS MODES", "RECLAIM POLICY", "STATUS", "CLAIM", "STORAGECLASS", "VOLUMEATTRIBUTESCLASS", "REASON", "AGE"],
-            ps.map((p) => [p.metadata.name, fmtMem(p.spec.capacity.storage), accessModes(p.spec.accessModes), p.spec.persistentVolumeReclaimPolicy, p.status.phase, p.spec.claimRef ? `${p.spec.claimRef.namespace}/${p.spec.claimRef.name}` : "", p.spec.storageClassName, "<unset>", "", fmtAge(c.now - p.metadata.creationTimestamp)]),
+            ps.map((p) => [p.metadata.name, fmtMem(p.spec.capacity.storage), accessModes(p.spec.accessModes), p.spec.persistentVolumeReclaimPolicy, p.metadata.deletionTimestamp !== undefined ? "Terminating" : p.status.phase, p.spec.claimRef ? `${p.spec.claimRef.namespace}/${p.spec.claimRef.name}` : "", p.spec.storageClassName, "<unset>", "", fmtAge(c.now - p.metadata.creationTimestamp)]),
           )
         : "No resources found";
     }
@@ -1344,10 +1346,13 @@ function rolloutSts(c: Cluster, sub: string, name: string | undefined, line: str
     return ok(`statefulset.apps/${name} restarted`, true);
   }
   if (sub !== "status") throw new KubectlError(`error: statefulset 은 rollout status · restart 만 됩니다 (축소판)`);
+  // 실제 kubectl 의 StatefulSet status viewer 순서
   const st = s.status;
-  if (st.updatedReplicas === s.spec.replicas && st.readyReplicas === s.spec.replicas) return ok(`statefulset rolling update complete ${s.spec.replicas} pods at revision ${st.updateRevision}...`);
-  if (st.readyReplicas < s.spec.replicas) return { ok: true, output: `Waiting for ${s.spec.replicas - st.readyReplicas} pods to be ready...\n(축소판: 실제 kubectl 은 끝날 때까지 기다립니다 — 다시 실행해 보세요)`, mutated: false };
-  return { ok: true, output: `waiting for statefulset rolling update to complete ${st.updatedReplicas} pods at revision ${st.updateRevision}...\n(축소판: 다시 실행해 보세요)`, mutated: false };
+  const again = "\n(축소판: 실제 kubectl 은 끝날 때까지 기다리며 줄을 더 찍습니다 — 다시 실행해 보세요)";
+  if (!st.observedGeneration || s.metadata.generation > st.observedGeneration) return { ok: true, output: `Waiting for statefulset spec update to be observed...${again}`, mutated: false };
+  if (st.readyReplicas < s.spec.replicas) return { ok: true, output: `Waiting for ${s.spec.replicas - st.readyReplicas} pods to be ready...${again}`, mutated: false };
+  if (st.updateRevision !== st.currentRevision) return { ok: true, output: `waiting for statefulset rolling update to complete ${st.updatedReplicas} pods at revision ${st.updateRevision}...${again}`, mutated: false };
+  return ok(`statefulset rolling update complete ${st.currentReplicas} pods at revision ${st.currentRevision}...`);
 }
 
 function accessModes(m: string[]): string {

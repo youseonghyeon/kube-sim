@@ -75,20 +75,32 @@ export class StatefulSetController extends Controller {
       }
     }
 
-    // 2) 줄이기: 큰 번호부터 하나씩 (지우는 중인 것이 있으면 기다림)
+    // 2) 줄이기: OrderedReady 는 큰 번호부터 하나씩 (지우는 중인 것이 있으면 기다림), Parallel 은 한꺼번에
     const extra = [...byOrd.entries()].filter(([i]) => i >= want).sort((a, b) => b[0] - a[0]);
-    if (extra.length && !owned.some((p) => p.metadata.deletionTimestamp !== undefined)) {
+    let acted = false;
+    if (!ordered) {
+      const victims = extra.map(([, p]) => p).filter((p) => p.metadata.deletionTimestamp === undefined);
+      for (const v of victims) {
+        this.api.delete("Pod", v.metadata.name, ns, this.name);
+        this.api.recordEvent(sts, "Normal", "SuccessfulDelete", `delete Pod ${v.metadata.name} in StatefulSet ${name} successful`, this.name);
+      }
+      if (victims.length) {
+        acted = true;
+        this.ctx.trace.add(this.name, "controller.reconcile", `${name} 원하는 ${want} → ${victims.map((v) => v.metadata.name).join(", ")} 를 한꺼번에 지움 (Parallel — 순서를 기다리지 않음, PVC 는 남김)`, refOf(sts));
+      }
+    } else if (extra.length && !owned.some((p) => p.metadata.deletionTimestamp !== undefined)) {
       const lowerReady = !ordered || [...byOrd.entries()].filter(([i]) => i < want).every(([, p]) => healthy(p));
       if (lowerReady) {
         const [, victim] = extra[0]!;
+        acted = true;
         this.api.delete("Pod", victim.metadata.name, ns, this.name);
         this.api.recordEvent(sts, "Normal", "SuccessfulDelete", `delete Pod ${victim.metadata.name} in StatefulSet ${name} successful`, this.name);
         this.ctx.trace.add(this.name, "controller.reconcile", `${name} 원하는 ${want} · 있는 ${byOrd.size} → 가장 큰 번호 ${victim.metadata.name} 부터 지움 (PVC 는 남김 — 다시 늘리면 그 데이터로)`, refOf(sts));
       }
     }
 
-    // 3) 템플릿이 바뀜: 모두 Ready 일 때 큰 번호부터 하나씩 지워 새 템플릿으로 (RollingUpdate)
-    if ((sts.spec.updateStrategy?.type ?? "RollingUpdate") === "RollingUpdate") {
+    // 3) 템플릿이 바뀜: 모두 Ready 이고 지우는 중인 것이 없을 때 큰 번호부터 하나씩 지워 새 템플릿으로 (RollingUpdate) — 축소가 먼저, 한 번에 하나
+    if (!acted && !owned.some((p) => p.metadata.deletionTimestamp !== undefined) && (sts.spec.updateStrategy?.type ?? "RollingUpdate") === "RollingUpdate") {
       const live = [...byOrd.entries()].filter(([i]) => i < want).sort((a, b) => b[0] - a[0]);
       const allReady = live.length === want && live.every(([, p]) => healthy(p));
       const stale = live.find(([, p]) => p.metadata.labels[REVISION_LABEL] !== rev);

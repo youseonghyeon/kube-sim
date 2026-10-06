@@ -14,7 +14,7 @@ function withUnits(v: unknown, key?: string): unknown {
   if (v === null || typeof v !== "object") return v;
   const out: Record<string, unknown> = {};
   for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
-    if (key !== undefined && RESOURCE_KEYS.has(key) && typeof x === "number") out[k] = k === "cpu" ? fmtCpu(x) : k === "memory" ? fmtMem(x) : String(x);
+    if (key !== undefined && RESOURCE_KEYS.has(key) && typeof x === "number") out[k] = k === "cpu" ? fmtCpu(x) : k === "memory" || k === "storage" ? fmtMem(x) : String(x);
     else out[k] = withUnits(x, k);
   }
   return out;

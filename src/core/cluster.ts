@@ -326,11 +326,11 @@ export class Cluster {
       if (m.kind === "ConfigMap" || m.kind === "Secret") return;
       const spec = structuredClone(m.spec);
       const prevApplied = parseApplied(o.metadata.annotations?.[LAST_APPLIED]);
-      if (o.kind === "Deployment" && m.kind === "Deployment") {
+      if ((o.kind === "Deployment" && m.kind === "Deployment") || (o.kind === "StatefulSet" && m.kind === "StatefulSet")) {
         // 3-way merge (kubectl apply 처럼): 템플릿 주석 중 지난번 apply 가 넣었고 이번 매니페스트에 없는 것만 지운다.
         // 그래서 kubectl rollout restart 가 붙인 restartedAt 은 apply 해도 남는다
         const live = o.spec.template.metadata.annotations ?? {};
-        const prev = (prevApplied as DeploymentManifest | undefined)?.spec.template.metadata.annotations ?? {};
+        const prev = (prevApplied as DeploymentManifest | StatefulSetManifest | undefined)?.spec.template.metadata.annotations ?? {};
         const want = m.spec.template.metadata.annotations ?? {};
         const merged: Record<string, string> = { ...live };
         for (const k of Object.keys(prev)) if (!(k in want)) delete merged[k];
