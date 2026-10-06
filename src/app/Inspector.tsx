@@ -3,7 +3,7 @@ import { useSignal } from "@preact/signals";
 import { useEffect, useMemo, useRef } from "preact/hooks";
 import { controllerOf, isNodeReady, limitOf, NODE_LEASE_NS, qosClass, type Application, type ConfigMap, type NetworkPolicy, type PersistentVolume, type PersistentVolumeClaim, type Secret, type StatefulSet, type Deployment, type Ingress, type KObject, type Node, type Pod, type ReplicaSet, type Service } from "../core/api/types";
 import type { DeploymentManifest, Manifest } from "../core/cluster";
-import { eventSource, nodeStatusText, podRestartsText, podStatusText, rolloutStatusLine, runKubectl } from "../core/kubectl";
+import { eventSource, hpaTargets, nodeStatusText, podRestartsText, podStatusText, rolloutStatusLine, runKubectl } from "../core/kubectl";
 import { fmtAge, fmtCpu, fmtMem, parseCpu, parseMem } from "../core/units";
 import { IMAGE_NAMES, IMAGES } from "../core/workloads";
 import { NODE_MONITOR_GRACE_MS } from "../core/controllers/nodelifecycle";
@@ -202,6 +202,7 @@ function StatusBadge({ obj }: { obj: KObject }) {
   if (obj.kind === "NetworkPolicy") return <span class="badge">{(obj.spec.policyTypes ?? ["Ingress"]).join(" · ")}</span>;
   if (obj.kind === "PersistentVolumeClaim" || obj.kind === "PersistentVolume") return <span class={`badge t-${obj.status.phase === "Bound" ? "ok" : "wait"}`}>{obj.status.phase}</span>;
   if (obj.kind === "StorageClass") return <span class="badge">{obj.volumeBindingMode}</span>;
+  if (obj.kind === "HorizontalPodAutoscaler") return <span class={`badge t-${obj.status.currentMetrics ? "ok" : "wait"}`}>{hpaTargets(obj)}</span>;
   const ready = obj.status.readyReplicas;
   return <span class={`badge t-${ready === obj.spec.replicas ? "ok" : "wait"}`}>{`${ready}/${obj.spec.replicas} Ready`}</span>;
 }

@@ -119,6 +119,17 @@
 - 만들 것: PVC·PV·StorageClass(local-path) 오브젝트와 프로비저너, Pod 의 persistentVolumeClaim volume, 스케줄러의 볼륨 필터, kubelet 의 마운트(PVC 가 Bound 될 때까지 기다림), 방문 수를 볼륨에 적는 앱, StatefulSet 컨트롤러, headless Service DNS, `kubectl get/describe sts·pvc·pv·sc`·`scale sts`·`rollout restart|status sts`·`delete pvc`, 화면(목록·노드 칸의 디스크·인스펙터), 예제 묶음 "상태 있는 앱"
 - 완료 기준: 예제의 "해 볼 것" 이 위 학습 포인트를 kubectl 출력·로그·앱 응답(방문 수)으로 보여 주고, 컨트롤러·스케줄러 동작이 트레이스 테스트로 고정된다. 네 가지 검증 통과
 
+### 5e. HPA (2026-10-06 시작, 사용자 승인 — 5단계 마지막 후보)
+- 왜: HPA 를 붙이면 "왜 안 늘어나지(`<unknown>`)", "부하가 끝났는데 왜 안 줄지", "Argo CD 가 replicas 를 되돌린다" 를 겪는다. 사용자의 Argo CD(selfHeal) 구성과 바로 닿는다.
+- 배우는 것
+  - HPA 는 CPU 사용량을 **requests 대비 %** 로 본다 — requests 가 없으면 `<unknown>` (FailedGetResourceMetric: missing request for cpu). limits 가 아니다
+  - 계산: 원하는 수 = ceil(지금 수 × 지금 % / 목표 %), 10% 안쪽 차이는 무시. 15초마다, minReplicas~maxReplicas 안에서
+  - 늘릴 때는 바로(한 번에 최대 두 배 또는 +4), 줄일 때는 **5분 동안의 가장 큰 추천**을 따른다(stabilization window) — 부하가 끝나도 5분은 그대로
+  - 막 뜬 Pod·Ready 아닌 Pod 는 늘릴 때 0% 로 쳐서 과하게 늘리지 않는다
+  - HPA 가 Deployment 의 replicas 를 고친다 → kubectl scale 이나 **Git 의 replicas(Argo CD selfHeal)** 와 싸운다. Git 매니페스트에서 replicas 를 빼야 한다
+- 만들 것: Service 에 거는 부하(초당 요청, ready Pod 가 나눠 받음) → Pod CPU 사용, HPA 오브젝트·컨트롤러(15초 배경 주기·안정화 창·늘리기 정책·조건), `kubectl get/describe/delete hpa`·`autoscale`, apply 가 replicas 를 비운 매니페스트에서 라이브 값을 지킴(3-way), 화면(목록·인스펙터·Service 의 부하 조절·캔버스 표시), 예제 묶음 "자동 확장"
+- 완료 기준: 예제의 "해 볼 것" 이 위 학습 포인트를 kubectl 출력·로그로 보여 주고, 계산·시간이 트레이스 테스트로 고정된다. 네 가지 검증 통과
+
 ## 6. GitOps (ArgoCD 식) ✅ 2026-10-02
 - 된 것: Git 저장소(커밋 이력, 경로별 매니페스트), Argo CD application-controller(3분 폴링·Refresh, Git 에 적은 필드 기준 비교 → Synced/OutOfSync, 리소스 Health, 자동 sync 는 새 리비전마다 한 번, selfHeal 5초, prune, 이력), `argocd app list/get/diff/sync/history/set`·`git log` 흉내, `kubectl get applications -n argocd`, 캔버스 GitOps 칸(Git → Application, '아직 모름' 표시·폴링 카운트다운), Application 인스펙터(정책 토글·리소스·차이), Git 인스펙터(작업 사본 편집 → 커밋), 예제 '내 배포 파이프라인'(CI 태그 커밋 → 폴링 → 자동 sync → 롤아웃)
 - 축소판: Argo CD 는 Pod 없는 부가 기능, Helm 렌더링 결과를 Git 에 있다고 봄, 대상 네임스페이스 default, sync 즉시 완료, 훅·sync wave·finalizer·webhook 없음

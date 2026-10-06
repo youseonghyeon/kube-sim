@@ -116,6 +116,7 @@ const RESOURCE_NAME: Record<Manifest["kind"], string> = {
   Secret: "secret",
   PodDisruptionBudget: "poddisruptionbudget.policy",
   StatefulSet: "statefulset.apps",
+  HorizontalPodAutoscaler: "horizontalpodautoscaler.autoscaling",
 };
 
 function resourceName(kind: Manifest["kind"]): string {

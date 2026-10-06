@@ -519,6 +519,7 @@ function defaultContainerResources(c: Container): void {
 }
 
 function defaultDeployment(d: Deployment): void {
+  d.spec.replicas ??= 1;
   d.spec.strategy ??= { type: "RollingUpdate" };
   if (d.spec.strategy.type === "RollingUpdate") d.spec.strategy.rollingUpdate ??= { maxSurge: "25%", maxUnavailable: "25%" };
   else delete d.spec.strategy.rollingUpdate;
@@ -568,6 +569,8 @@ function emptyStatus(kind: Kind): unknown {
       return {};
     case "PersistentVolumeClaim":
       return { phase: "Pending" };
+    case "HorizontalPodAutoscaler":
+      return { currentReplicas: 0, desiredReplicas: 0, conditions: [] };
     case "PersistentVolume":
       return { phase: "Available" };
     case "StatefulSet":

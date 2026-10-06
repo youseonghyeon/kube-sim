@@ -1,8 +1,8 @@
 // kubectl 흉내: 문자열 명령 → API 호출 + 실제와 같은 모양의 출력. 코어 API 위의 얇은 층이다.
 // 축소판: default 네임스페이스만, 자주 쓰는 하위 명령·플래그만.
 import { ApiError } from "./api/server";
-import { CLUSTER_SCOPED, controllerOf, isNodeReady, NODE_LEASE_NS, podRequests, qosClass, SERVICE_NAME_LABEL, type Deployment, type IngressPath, type KEvent, type Kind, type Node, type Pod, type ServiceType, type NetworkPolicy, type NetworkPolicyPeer, type NetworkPolicyPort } from "./api/types";
-import { configMap, deployment, ingress, pdb, secret, service, type Cluster } from "./cluster";
+import { CLUSTER_SCOPED, controllerOf, isNodeReady, NODE_LEASE_NS, podRequests, qosClass, SERVICE_NAME_LABEL, type Deployment, type IngressPath, type KEvent, type Kind, type Node, type Pod, type ServiceType, type NetworkPolicy, type NetworkPolicyPeer, type NetworkPolicyPort, type HorizontalPodAutoscaler } from "./api/types";
+import { configMap, deployment, hpa as hpaManifest, ingress, pdb, secret, service, type Cluster } from "./cluster";
 import { selectorText } from "./net/netpol";
 import { pvNode } from "./storage";
 import type { DrainJob } from "./drain";
@@ -30,6 +30,9 @@ export const KUBE_VERSION = "v1.31.0";
 type Res = Kind | "Event" | "Endpoints" | "all";
 
 const RESOURCE_ALIASES: Record<string, Res> = {
+  hpa: "HorizontalPodAutoscaler",
+  horizontalpodautoscaler: "HorizontalPodAutoscaler",
+  horizontalpodautoscalers: "HorizontalPodAutoscaler",
   sts: "StatefulSet",
   statefulset: "StatefulSet",
   statefulsets: "StatefulSet",
@@ -101,6 +104,7 @@ const KIND_PREFIX: Record<Kind, string> = {
   Secret: "secret",
   NetworkPolicy: "networkpolicy.networking.k8s.io",
   StatefulSet: "statefulset.apps",
+  HorizontalPodAutoscaler: "horizontalpodautoscaler.autoscaling",
   PersistentVolumeClaim: "persistentvolumeclaim",
   PersistentVolume: "persistentvolume",
   StorageClass: "storageclass.storage.k8s.io",
@@ -120,6 +124,7 @@ const KIND_PLURAL: Record<Kind, string> = {
   Secret: "secrets",
   NetworkPolicy: "networkpolicies.networking.k8s.io",
   StatefulSet: "statefulsets.apps",
+  HorizontalPodAutoscaler: "horizontalpodautoscalers.autoscaling",
   PersistentVolumeClaim: "persistentvolumeclaims",
   PersistentVolume: "persistentvolumes",
   StorageClass: "storageclasses.storage.k8s.io",
@@ -148,6 +153,7 @@ export const KUBECTL_HELP = [
   "  curl http://<호스트·LoadBalancer IP·노드IP:NodePort>   (kubectl 없이 — 클러스터 밖에서 보냄)",
   "  kubectl get leases -n kube-node-lease   (kubelet heartbeat)",
   "  kubectl get <종류> <이름> -o yaml",
+  "  kubectl autoscale deployment <이름> --cpu-percent=50 --min=1 --max=10 · get hpa · describe hpa <이름>",
   "  kubectl get sts · pvc · pv · sc · describe sts|pvc|pv <이름> · scale sts/<이름> --replicas=N · rollout status|restart sts/<이름> · delete pvc <이름>",
   "  kubectl get networkpolicy · describe networkpolicy <이름> · delete networkpolicy <이름>   (만들기는 화면·예제에서)",
   "  kubectl create configmap <이름> --from-literal=KEY=값 …  ·  kubectl create secret generic <이름> --from-literal=KEY=값 …",
@@ -199,6 +205,8 @@ export function runKubectl(cluster: Cluster, line: string): KubectlResult {
         return drainCmd(cluster, pos, line);
       case "rollout":
         return rollout(cluster, pos, flags, line);
+      case "autoscale":
+        return autoscale(cluster, pos, flags, line);
       case "expose":
         return expose(cluster, pos, flags, line);
       case "exec":
@@ -277,7 +285,7 @@ function parseFlags(args: string[]): { pos: string[]; flags: Map<string, string>
     } else if (a.startsWith("--")) {
       const eq = a.indexOf("=");
       if (eq > 0) flags.set(a.slice(2, eq), a.slice(eq + 1));
-      else if (["replicas", "image", "requests", "limits", "grace-period", "port", "target-port", "type", "name", "to-revision", "selector", "min-available", "max-unavailable"].includes(a.slice(2)) && args[i + 1] && !args[i + 1]!.startsWith("-")) flags.set(a.slice(2), args[++i]!);
+      else if (["replicas", "image", "requests", "limits", "min", "max", "cpu-percent", "grace-period", "port", "target-port", "type", "name", "to-revision", "selector", "min-available", "max-unavailable"].includes(a.slice(2)) && args[i + 1] && !args[i + 1]!.startsWith("-")) flags.set(a.slice(2), args[++i]!);
       else flags.set(a.slice(2), "true");
     } else if (a.startsWith("-o")) flags.set("o", a.slice(2));
     else pos.push(a);
@@ -353,6 +361,15 @@ function get(c: Cluster, pos: string[], flags: Map<string, string>): string {
     case "ConfigMap": {
       const cms = pick(c, "ConfigMap", c.api.list("ConfigMap", "default"), names);
       return cms.length ? table(["NAME", "DATA", "AGE"], cms.map((m) => [m.metadata.name, String(Object.keys(m.data).length), fmtAge(c.now - m.metadata.creationTimestamp)])) : "No resources found in default namespace.";
+    }
+    case "HorizontalPodAutoscaler": {
+      const hs = pick(c, "HorizontalPodAutoscaler", c.api.list("HorizontalPodAutoscaler", "default"), names);
+      return hs.length
+        ? table(
+            ["NAME", "REFERENCE", "TARGETS", "MINPODS", "MAXPODS", "REPLICAS", "AGE"],
+            hs.map((h) => [h.metadata.name, `${h.spec.scaleTargetRef.kind}/${h.spec.scaleTargetRef.name}`, hpaTargets(h), String(h.spec.minReplicas ?? 1), String(h.spec.maxReplicas), String(h.status.currentReplicas), fmtAge(c.now - h.metadata.creationTimestamp)]),
+          )
+        : "No resources found in default namespace.";
     }
     case "StatefulSet": {
       const ss = pick(c, "StatefulSet", c.api.list("StatefulSet", "default"), names);
@@ -567,12 +584,34 @@ function getEvents(c: Cluster): string {
 
 function describe(c: Cluster, pos: string[]): string {
   const { kind, names } = resourceArgs(pos);
-  const k = needWorkload(kind, ["Pod", "Deployment", "ReplicaSet", "Node", "Service", "Ingress", "ConfigMap", "Secret", "NetworkPolicy", "StatefulSet", "PersistentVolumeClaim", "PersistentVolume"], "describe");
+  const k = needWorkload(kind, ["Pod", "Deployment", "ReplicaSet", "Node", "Service", "Ingress", "ConfigMap", "Secret", "NetworkPolicy", "StatefulSet", "PersistentVolumeClaim", "PersistentVolume", "HorizontalPodAutoscaler"], "describe");
   const name = names[0];
   if (!name) throw new KubectlError(`error: 이름을 함께 쓰세요. 예: kubectl describe ${k.toLowerCase()} <이름>`);
   const o = c.api.get(k, name, CLUSTER_SCOPED.has(k) ? undefined : "default");
   if (!o) throw new ApiError("NotFound", `${KIND_PLURAL[k]} "${name}" not found`);
   switch (o.kind) {
+    case "HorizontalPodAutoscaler": {
+      const goal = o.spec.metrics[0]?.resource.target.averageUtilization;
+      const cur = o.status.currentMetrics?.[0]?.resource.current;
+      return (
+        kv([
+          ["Name", o.metadata.name],
+          ["Namespace", "default"],
+          ["Labels", labelsText(o.metadata.labels)],
+          ["Annotations", "<none>"],
+          ["CreationTimestamp", fmtClock(o.metadata.creationTimestamp)],
+          ["Reference", `${o.spec.scaleTargetRef.kind}/${o.spec.scaleTargetRef.name}`],
+          ["Metrics", "( current / target )"],
+          ["  resource cpu on pods  (as a percentage of request)", `${cur ? `${cur.averageUtilization}% (${fmtCpu(cur.averageValue)})` : "<unknown>"} / ${goal}%`],
+          ["Min replicas", String(o.spec.minReplicas ?? 1)],
+          ["Max replicas", String(o.spec.maxReplicas)],
+          [`${o.spec.scaleTargetRef.kind} pods`, `${o.status.currentReplicas} current / ${o.status.desiredReplicas} desired`],
+        ]) +
+        "\nConditions:\n" +
+        table(["  Type", "Status", "Reason", "Message"], [["  ----", "------", "------", "-------"], ...o.status.conditions.map((x) => [`  ${x.type}`, x.status, x.reason ?? "", x.message ?? ""])]) +
+        eventsBlock(c, o.metadata.uid)
+      );
+    }
     case "StatefulSet": {
       const pods = c.api.list("Pod", "default").filter((p) => controllerOf(p.metadata)?.uid === o.metadata.uid);
       const running = pods.filter((p) => p.status.phase === "Running").length;
@@ -1133,7 +1172,7 @@ function setCmd(c: Cluster, pos: string[], flags: Map<string, string>, line: str
 
 function del(c: Cluster, pos: string[], flags: Map<string, string>, line: string): KubectlResult {
   const { kind, names } = resourceArgs(pos);
-  const k = needWorkload(kind, ["Pod", "Deployment", "ReplicaSet", "Service", "PodDisruptionBudget", "Ingress", "ConfigMap", "Secret", "NetworkPolicy", "StatefulSet", "PersistentVolumeClaim", "PersistentVolume"], "delete");
+  const k = needWorkload(kind, ["Pod", "Deployment", "ReplicaSet", "Service", "PodDisruptionBudget", "Ingress", "ConfigMap", "Secret", "NetworkPolicy", "StatefulSet", "PersistentVolumeClaim", "PersistentVolume", "HorizontalPodAutoscaler"], "delete");
   if (!names.length) throw new KubectlError(`error: 지울 이름이 필요합니다. 예: kubectl delete ${k.toLowerCase()} <이름>`);
   for (const n of names) if (!c.api.get(k, n, "default")) throw new ApiError("NotFound", `${KIND_PLURAL[k]} "${n}" not found`);
   userTrace(c, line);
@@ -1353,6 +1392,33 @@ function rolloutSts(c: Cluster, sub: string, name: string | undefined, line: str
   if (st.readyReplicas < s.spec.replicas) return { ok: true, output: `Waiting for ${s.spec.replicas - st.readyReplicas} pods to be ready...${again}`, mutated: false };
   if (st.updateRevision !== st.currentRevision) return { ok: true, output: `waiting for statefulset rolling update to complete ${st.updatedReplicas} pods at revision ${st.updateRevision}...${again}`, mutated: false };
   return ok(`statefulset rolling update complete ${st.currentReplicas} pods at revision ${st.currentRevision}...`);
+}
+
+/** kubectl get hpa 의 TARGETS: "cpu: 120%/50%" (사용량을 모르면 <unknown>) */
+export function hpaTargets(h: HorizontalPodAutoscaler): string {
+  const cur = h.status.currentMetrics?.[0]?.resource.current.averageUtilization;
+  return `cpu: ${cur === undefined ? "<unknown>" : `${cur}%`}/${h.spec.metrics[0]?.resource.target.averageUtilization ?? "?"}%`;
+}
+
+/** kubectl autoscale deployment|statefulset <이름> --cpu-percent=50 --min=1 --max=10 */
+function autoscale(c: Cluster, pos: string[], flags: Map<string, string>, line: string): KubectlResult {
+  const { kind, names } = resourceArgs(pos);
+  const k = needWorkload(kind, ["Deployment", "StatefulSet"], "autoscale");
+  const name = names[0];
+  if (!name) throw new KubectlError("error: 이름이 필요합니다. 예: kubectl autoscale deployment web --cpu-percent=50 --min=1 --max=10");
+  if (!c.api.get(k, name, "default")) throw new ApiError("NotFound", `${KIND_PLURAL[k]} "${name}" not found`);
+  const num = (f: string) => (flags.has(f) ? Number(flags.get(f)) : undefined);
+  const max = num("max");
+  const min = num("min") ?? 1;
+  const cpu = num("cpu-percent") ?? 80;
+  if (max === undefined || !Number.isInteger(max) || max < 1) throw new KubectlError("error: --max=MAXPODS is required (1 이상 정수)");
+  if (!Number.isInteger(min) || min < 1 || min > max) throw new KubectlError(`error: --min 은 1 이상이고 --max 이하여야 합니다 (받은 값 min ${min} · max ${max})`);
+  if (!Number.isInteger(cpu) || cpu < 1) throw new KubectlError("error: --cpu-percent 는 1 이상 정수");
+  const hname = flags.get("name") ?? name;
+  if (c.api.get("HorizontalPodAutoscaler", hname, "default")) throw new ApiError("AlreadyExists", `horizontalpodautoscalers.autoscaling "${hname}" already exists`);
+  userTrace(c, line);
+  c.apply(hpaManifest(hname, { target: name, kind: k as "Deployment" | "StatefulSet", min, max, cpuPercent: cpu }), "kubectl");
+  return ok(`horizontalpodautoscaler.autoscaling/${hname} autoscaled`, true);
 }
 
 function accessModes(m: string[]): string {

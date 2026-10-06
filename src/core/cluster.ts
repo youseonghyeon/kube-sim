@@ -1,7 +1,7 @@
 // 클러스터 한 벌: 시계 + 트레이스 + API 서버 + 컨트롤 플레인(스케줄러·컨트롤러) + 노드마다 kubelet.
 // 바깥(모델·kubectl·UI)은 여기 메서드로만 클러스터를 바꾼다.
 import { ApiServer, WATCH_DELAY_MS, type Draft } from "./api/server";
-import type { Application, Deployment, Ingress, Pod, PodDisruptionBudget, PodSpec, Probe, Service, ServiceType, EnvFromSource, EnvVar, NetworkPolicy, StatefulSet } from "./api/types";
+import { SERVICE_NAME_LABEL, type Application, type Deployment, type Ingress, type Pod, type PodDisruptionBudget, type PodSpec, type Probe, type Service, type ServiceType, type EnvFromSource, type EnvVar, type NetworkPolicy, type StatefulSet, type HorizontalPodAutoscaler } from "./api/types";
 import { Clock } from "./clock";
 import type { ComponentContext } from "./controllers/base";
 import { DeploymentController } from "./controllers/deployment";
@@ -11,6 +11,7 @@ import { EndpointSliceController } from "./controllers/endpointslice";
 import { NodeLifecycleController, TaintEvictionController } from "./controllers/nodelifecycle";
 import { ReplicaSetController } from "./controllers/replicaset";
 import { StatefulSetController } from "./controllers/statefulset";
+import { HpaController } from "./controllers/hpa";
 import { LocalPathProvisioner, type VolumeData } from "./storage";
 import { Kubelet, type ContainerConfig, type CpuState, type NodeDef } from "./kubelet";
 import { ARGO, ArgoCD } from "./gitops/argocd";
@@ -90,7 +91,14 @@ export interface StatefulSetManifest {
   spec: StatefulSet["spec"];
 }
 
-export type Manifest = DeploymentManifest | ServiceManifest | PdbManifest | IngressManifest | ApplicationManifest | ConfigMapManifest | SecretManifest | NetworkPolicyManifest | StatefulSetManifest;
+export interface HpaManifest {
+  apiVersion: "autoscaling/v2";
+  kind: "HorizontalPodAutoscaler";
+  metadata: { name: string; namespace?: string; labels?: Record<string, string>; annotations?: Record<string, string> };
+  spec: HorizontalPodAutoscaler["spec"];
+}
+
+export type Manifest = DeploymentManifest | ServiceManifest | PdbManifest | IngressManifest | ApplicationManifest | ConfigMapManifest | SecretManifest | NetworkPolicyManifest | StatefulSetManifest | HpaManifest;
 
 export interface ClusterOptions {
   seed?: number;
@@ -129,6 +137,11 @@ export class Cluster {
     new EndpointSliceController(this.ctx, this.rng);
     new DisruptionController(this.ctx);
     new StatefulSetController(this.ctx);
+    new HpaController(this.ctx, (p) => this.podMetrics(p));
+    // 엔드포인트가 바뀌면 부하를 나눠 받는 Pod 도 바뀐다
+    this.api.watch("EndpointSlice", () => {
+      if (this.load.size) this.loadVersion++;
+    });
     new LocalPathProvisioner(this.ctx, this.volumeData);
     LocalPathProvisioner.install(this.ctx);
     this.metallb = new MetalLB(this.ctx, (n) => this.nodePowered(n));
@@ -161,7 +174,7 @@ export class Cluster {
 
   addNode(def: NodeDef): Kubelet {
     if (this.kubelets.has(def.name)) throw new Error(`노드 ${def.name} 이(가) 이미 있습니다`);
-    const k = new Kubelet(this.ctx, def, ++this.nodeIndex);
+    const k = new Kubelet(this.ctx, def, ++this.nodeIndex, { podRps: (uid) => this.podRps(uid), version: () => this.loadVersion });
     this.kubelets.set(def.name, k);
     k.register();
     this.kubeProxies.set(def.name, new KubeProxy(this.ctx, def.name));
@@ -262,6 +275,40 @@ export class Cluster {
     return this.kubelets.get(p.spec.nodeName)?.appState(p.metadata.uid)?.sick ?? false;
   }
 
+  /** Service 이름 → 초당 요청 수 (부하). ready 엔드포인트가 똑같이 나눠 받는다 */
+  readonly load = new Map<string, number>();
+  /** 부하나 엔드포인트가 바뀔 때마다 +1 — kubelet 이 CPU 분배를 다시 계산한다 */
+  loadVersion = 0;
+  private loadShare?: { version: number; byUid: Map<string, number> };
+
+  /**
+   * Service 에 부하를 건다 (hey·k6 같은 바깥 도구 흉내 — 요청 하나하나를 흉내 내지 않고 비율만). 0 이면 멈춤.
+   * ready 엔드포인트가 나눠 받고, 받는 Pod 는 요청 하나마다 이미지의 workMs 만큼 CPU 를 더 원한다 (HPA 실험용).
+   */
+  setLoad(service: string, rps: number): void {
+    if (rps > 0) this.load.set(service, rps);
+    else this.load.delete(service);
+    this.loadVersion++;
+    this.trace.add("user", "user", rps > 0 ? `부하: Service ${service} 로 초당 ${rps} 요청 (ready Pod 가 나눠 받음 → 받는 만큼 CPU 를 씀)` : `부하 멈춤: Service ${service}`, { kind: "Service", namespace: "default", name: service });
+  }
+
+  /** 이 Pod 가 받는 초당 요청 수 */
+  podRps(uid: string): number {
+    if (!this.load.size) return 0;
+    if (this.loadShare?.version !== this.loadVersion) {
+      const byUid = new Map<string, number>();
+      for (const [svc, rps] of this.load) {
+        const eps = this.api
+          .peekList("EndpointSlice", "default")
+          .filter((s) => s.metadata.labels[SERVICE_NAME_LABEL] === svc)
+          .flatMap((s) => s.endpoints.filter((e) => e.conditions.ready));
+        for (const e of eps) byUid.set(e.targetRef.uid, (byUid.get(e.targetRef.uid) ?? 0) + rps / eps.length);
+      }
+      this.loadShare = { version: this.loadVersion, byUid };
+    }
+    return this.loadShare.byUid.get(uid) ?? 0;
+  }
+
   /** Pod 안에서 curl·ping·nslookup (kubectl exec). 단계를 트레이스에 남긴다 */
   requestFromPod(podName: string, tool: Tool, target: string): NetResult {
     const p = this.api.get("Pod", podName, "default")!;
@@ -348,6 +395,11 @@ export class Cluster {
           if (s.type !== "ClusterIP") p.nodePort ??= (o.spec.ports.find((x) => x.port === p.port) ?? o.spec.ports[i])?.nodePort;
           else delete p.nodePort;
         });
+      }
+      // 3-way: 매니페스트가 replicas 를 적지 않으면(HPA 가 맡을 때) 라이브 값을 지킨다 — 지난번 apply 에 있었는데 지웠으면 기본값 1 로 (실제 kubectl apply 와 같은 한 번의 출렁임)
+      if ((o.kind === "Deployment" || o.kind === "StatefulSet") && (spec as { replicas?: number }).replicas === undefined) {
+        const prevReplicas = (prevApplied as { spec?: { replicas?: number } } | undefined)?.spec?.replicas;
+        (spec as { replicas: number }).replicas = prevReplicas !== undefined ? 1 : o.spec.replicas;
       }
       (o as { spec: unknown }).spec = spec;
       o.metadata.labels = { ...(m.metadata.labels ?? {}) };
@@ -440,6 +492,21 @@ export function statefulSet(
       template: d.spec.template,
       ...(opts.storage?.length ? { volumeClaimTemplates: opts.storage.map((s) => ({ metadata: { name: s.name }, spec: { accessModes: ["ReadWriteOnce"], resources: { requests: { storage: s.size } } } })) } : {}),
       ...(opts.podManagementPolicy ? { podManagementPolicy: opts.podManagementPolicy } : {}),
+    },
+  };
+}
+
+/** kubectl autoscale 과 같은 HPA: CPU 사용률(requests 대비 %) 목표 */
+export function hpa(name: string, opts: { target?: string; kind?: "Deployment" | "StatefulSet"; min?: number; max: number; cpuPercent: number }): HpaManifest {
+  return {
+    apiVersion: "autoscaling/v2",
+    kind: "HorizontalPodAutoscaler",
+    metadata: { name },
+    spec: {
+      scaleTargetRef: { apiVersion: "apps/v1", kind: opts.kind ?? "Deployment", name: opts.target ?? name },
+      minReplicas: opts.min ?? 1,
+      maxReplicas: opts.max,
+      metrics: [{ type: "Resource", resource: { name: "cpu", target: { type: "Utilization", averageUtilization: opts.cpuPercent } } }],
     },
   };
 }

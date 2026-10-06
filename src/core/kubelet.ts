@@ -141,6 +141,7 @@ export class Kubelet {
   private oomWatch?: TimerHandle;
   /** cpuAlloc 결과 — 도는 컨테이너가 바뀌거나 노드 CPU 가 바뀔 때만 다시 계산 (화면이 Pod 마다 물어도 한 번) */
   private cpuCache?: Map<string, number>;
+  private cpuCacheLoad = 0;
 
   readonly def: NodeDef;
 
@@ -148,6 +149,8 @@ export class Kubelet {
     private readonly ctx: ComponentContext,
     def: NodeDef,
     index: number,
+    /** Service 에 건 부하 중 이 Pod 가 받는 초당 요청 수, 그리고 부하·엔드포인트가 바뀔 때마다 오르는 번호 (CPU 수요가 바뀜) */
+    private readonly load: { podRps(uid: string): number; version(): number } = { podRps: () => 0, version: () => 0 },
   ) {
     this.def = { ...def };
     this.actor = `kubelet@${def.name}`;
@@ -997,16 +1000,22 @@ export class Kubelet {
    * requests 비율(cpu.shares, 최소 2m)로 나눈다 — 덜 원하는 쪽은 원하는 만큼만 받고 남는 몫은 다시 나눈다.
    */
   private cpuAlloc(): Map<string, number> {
-    if (this.cpuCache) return this.cpuCache;
+    if (this.cpuCache && this.cpuCacheLoad === this.load.version()) return this.cpuCache;
     const out = this.computeCpuAlloc();
     this.cpuCache = out;
+    this.cpuCacheLoad = this.load.version();
     return out;
+  }
+
+  /** 앱이 원하는 CPU (millicore): 이미지의 기본 수요 + 받는 초당 요청 × 요청 하나의 CPU 시간(ms) */
+  private wantCpu(r: PodRt): number {
+    return (r.image?.cpuM ?? DEFAULT_CPU_M) + this.load.podRps(r.uid) * (r.image?.workMs ?? DEFAULT_WORK_MS);
   }
 
   private computeCpuAlloc(): Map<string, number> {
     const rts = this.alive();
     const out = new Map<string, number>();
-    const capOf = (r: PodRt) => Math.min(r.image?.cpuM ?? DEFAULT_CPU_M, limitOf(r.ct, "cpu") ?? Number.POSITIVE_INFINITY);
+    const capOf = (r: PodRt) => Math.min(this.wantCpu(r), limitOf(r.ct, "cpu") ?? Number.POSITIVE_INFINITY);
     const total = rts.reduce((n, r) => n + capOf(r), 0);
     if (total <= this.def.cpu) {
       for (const r of rts) out.set(r.uid, capOf(r));
@@ -1034,7 +1043,7 @@ export class Kubelet {
   cpuState(podUid: string): CpuState {
     const rt = this.pods.get(podUid);
     if (!rt?.alive) return { want: 0, got: 0, limit: rt ? limitOf(rt.ct, "cpu") : undefined };
-    const want = rt.image?.cpuM ?? DEFAULT_CPU_M;
+    const want = Math.round(this.wantCpu(rt));
     const limit = limitOf(rt.ct, "cpu");
     const got = Math.round(this.cpuAlloc().get(podUid) ?? want);
     const reason = got >= want ? undefined : limit !== undefined && got >= limit ? "limit" : "node";
@@ -1045,7 +1054,7 @@ export class Kubelet {
   private latencyMs(rt: PodRt): number {
     const work = rt.image?.workMs ?? DEFAULT_WORK_MS;
     if (!rt.alive) return work;
-    const want = rt.image?.cpuM ?? DEFAULT_CPU_M;
+    const want = this.wantCpu(rt);
     // 반올림 전 몫으로 (0m 로 보여도 아주 조금은 받는다). 노드 CPU 가 0 이어도 끝이 있게 1m 를 바닥으로
     const got = Math.max(1, this.cpuAlloc().get(rt.uid) ?? want);
     return got >= want ? work : (work * want) / got;

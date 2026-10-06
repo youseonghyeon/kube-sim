@@ -474,7 +474,30 @@ export interface StatefulSet {
   };
 }
 
+/** CPU 사용률(requests 대비 %)을 보고 Deployment·StatefulSet 의 replicas 를 고친다 */
+export interface HorizontalPodAutoscaler {
+  apiVersion: "autoscaling/v2";
+  kind: "HorizontalPodAutoscaler";
+  metadata: ObjectMeta;
+  spec: {
+    scaleTargetRef: { apiVersion: string; kind: "Deployment" | "StatefulSet"; name: string };
+    /** 비우면 1 */
+    minReplicas?: number;
+    maxReplicas: number;
+    metrics: { type: "Resource"; resource: { name: "cpu"; target: { type: "Utilization"; averageUtilization: number } } }[];
+  };
+  status: {
+    currentReplicas: number;
+    desiredReplicas: number;
+    currentMetrics?: { type: "Resource"; resource: { name: "cpu"; current: { averageUtilization: number; averageValue: number } } }[];
+    lastScaleTime?: number;
+    conditions: Condition[];
+    observedGeneration?: number;
+  };
+}
+
 export type KObject =
+  | HorizontalPodAutoscaler
   | Pod
   | ReplicaSet
   | Deployment

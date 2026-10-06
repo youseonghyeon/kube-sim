@@ -24,7 +24,7 @@ export const POLL_MS = 180_000;
 /** 드리프트를 보고 self-heal 하기까지 (실제 기본 selfHealTimeoutSeconds 5) */
 export const SELF_HEAL_MS = 5_000;
 
-const TRACKED = ["Deployment", "Service", "Ingress", "PodDisruptionBudget", "ConfigMap", "Secret", "NetworkPolicy"] as const;
+const TRACKED = ["Deployment", "Service", "Ingress", "PodDisruptionBudget", "ConfigMap", "Secret", "NetworkPolicy", "StatefulSet", "HorizontalPodAutoscaler"] as const;
 type TrackedKind = (typeof TRACKED)[number];
 
 export interface ResourceDiff {

@@ -147,6 +147,17 @@ export const IMAGES: Record<string, ImageSpec> = {
     warmupMs: 3_000,
     description: "방문 수를 세는 작은 DB (포트 8080): 요청마다 visits 를 하나 늘려 /data 에 적습니다. PVC 를 붙이면 Pod 가 바뀌어도 남고, 없으면 컨테이너가 바뀔 때 사라집니다",
   },
+  "example/php-apache:1.0": {
+    pullMs: 2000,
+    sizeMB: 50,
+    termMs: 300,
+    port: 80,
+    body: "OK!",
+    memMi: 20,
+    cpuM: 1,
+    workMs: 10,
+    description: "HPA 실습용 웹 (포트 80, 쿠버네티스 공식 HPA 예제의 php-apache 흉내): 가만히 있으면 CPU 1m, 요청 하나에 CPU 10ms — 초당 요청 × 10 = millicore",
+  },
   "example/thumbs:1.0": {
     pullMs: 2000,
     sizeMB: 60,
