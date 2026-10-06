@@ -155,7 +155,8 @@ export class KubeProxy {
 export function buildRules(services: readonly Service[], slices: readonly EndpointSlice[]): SvcRule[] {
   const out: SvcRule[] = [];
   for (const svc of [...services].sort((a, b) => (a.metadata.name < b.metadata.name ? -1 : 1))) {
-    if (!svc.spec.clusterIP || svc.metadata.namespace === NODE_LEASE_NS) continue;
+    // headless(clusterIP: None) 는 가상 주소가 없어 규칙도 없다 — DNS 가 Pod IP 를 바로 준다
+    if (!svc.spec.clusterIP || svc.spec.clusterIP === "None" || svc.metadata.namespace === NODE_LEASE_NS) continue;
     const ns = svc.metadata.namespace ?? "default";
     const mine = slices.filter((s) => (s.metadata.namespace ?? "default") === ns && s.metadata.labels["kubernetes.io/service-name"] === svc.metadata.name);
     for (const p of svc.spec.ports) {

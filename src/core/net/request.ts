@@ -4,12 +4,13 @@
 // 원래 클라이언트는 X-Forwarded-For 에 남긴다. 응답한 앱이 본 출발지를 출력에 함께 보여 준다.
 // 요청은 시뮬레이션 시간을 쓰지 않고 지금 상태로 한 번에 계산한다 (축소판: 지연·재전송 없음, 타임아웃은 결과로만).
 // 노드 간 Pod 트래픽은 flannel VXLAN(k3s 기본)으로 캡슐화된다고 문구로만 보여 준다.
-import type { Pod } from "../api/types";
+import { isPodReady, type Pod } from "../api/types";
 import type { Cluster } from "../cluster";
 import { imageSpec } from "../workloads";
 import { funnelOn, ingressAddress, lbIP, matchIngress, proxyName, readyEndpoints } from "./ingress";
 import type { SepRule, SvcRule } from "./kubeproxy";
 import { check, COREDNS, type Verdict } from "./netpol";
+import { pvNode } from "../storage";
 
 export const CLUSTER_DOMAIN = "cluster.local";
 export const DNS_SERVICE_IP = "10.96.0.10";
@@ -50,6 +51,10 @@ export type Tool = "curl" | "ping" | "nslookup";
 interface DnsAnswer {
   fqdn: string;
   ip?: string;
+  /** headless Service 면 ready Pod IP 여럿 (ip 는 그 첫째) */
+  ips?: string[];
+  /** headless 로 풀렸는가 (Pod IP 로 바로 감 — kube-proxy 를 거치지 않음) */
+  headless?: boolean;
   tried: string[];
 }
 
@@ -63,18 +68,34 @@ export function resolve(c: Cluster, name: string, podNs = "default"): DnsAnswer 
   const tried: string[] = [];
   for (const q of candidates) {
     tried.push(q);
-    const ip = lookup(c, q);
-    if (ip) return { fqdn: q, ip, tried };
+    const r = lookup(c, q);
+    if (r?.ips.length) return { fqdn: q, ip: r.ips[0], ips: r.ips, headless: r.headless, tried };
   }
   return { fqdn: candidates[0]!, tried };
 }
 
-/** <svc>.<ns>.svc.cluster.local → ClusterIP */
-function lookup(c: Cluster, fqdn: string): string | undefined {
-  const m = new RegExp(`^([a-z0-9-]+)\\.([a-z0-9-]+)\\.svc\\.${CLUSTER_DOMAIN.replace(".", "\\.")}$`).exec(fqdn);
+/**
+ * <svc>.<ns>.svc.cluster.local → ClusterIP. headless(clusterIP: None) 면 ready Pod IP 들,
+ * <hostname>.<svc>.<ns>.svc.cluster.local → 그 이름(spec.hostname·subdomain)의 ready Pod IP (StatefulSet Pod)
+ */
+function lookup(c: Cluster, fqdn: string): { ips: string[]; headless?: boolean } | undefined {
+  const sfx = `\\.svc\\.${CLUSTER_DOMAIN.replace(".", "\\.")}$`;
+  const pod = new RegExp(`^([a-z0-9-]+)\\.([a-z0-9-]+)\\.([a-z0-9-]+)${sfx}`).exec(fqdn);
+  if (pod) {
+    const [, host, sub, ns] = pod;
+    const svc = c.api.peekList("Service", ns).find((s) => s.metadata.name === sub);
+    if (!svc) return undefined;
+    const p = c.api.peekList("Pod", ns).find((x) => x.spec.hostname === host && x.spec.subdomain === sub && x.status.podIP && x.metadata.deletionTimestamp === undefined && isPodReady(x));
+    return p ? { ips: [p.status.podIP!], headless: true } : undefined;
+  }
+  const m = new RegExp(`^([a-z0-9-]+)\\.([a-z0-9-]+)${sfx}`).exec(fqdn);
   if (!m) return undefined;
-  if (m[1] === "kube-dns" && m[2] === "kube-system") return DNS_SERVICE_IP;
-  return c.api.get("Service", m[1]!, m[2]!)?.spec.clusterIP;
+  if (m[1] === "kube-dns" && m[2] === "kube-system") return { ips: [DNS_SERVICE_IP] };
+  const svc = c.api.peekList("Service", m[2]).find((s) => s.metadata.name === m[1]);
+  if (!svc?.spec.clusterIP) return undefined;
+  if (svc.spec.clusterIP !== "None") return { ips: [svc.spec.clusterIP] };
+  const ips = readyEndpoints(c, m[2]!, svc, svc.spec.ports[0]?.port ?? 0).map((e) => e.ip);
+  return { ips: [...new Set(ips)], headless: true };
 }
 
 const IP_RE = /^\d+\.\d+\.\d+\.\d+$/;
@@ -144,9 +165,11 @@ export function simulateFromPod(c: Cluster, from: Pod, tool: Tool, target: strin
       return { ok: false, steps, failure, output: `curl: (6) Could not resolve host: ${t.host}` };
     }
     const extra = a.tried.length > 1 ? ` (먼저 ${a.tried.slice(0, -1).join(", ")} 는 NXDOMAIN — ndots:5 라 search 도메인부터 붙여 봄)` : "";
-    steps.push({ kind: "dns", actor: "coredns", text: `${t.host} → ${a.fqdn} → ${a.ip}${extra}`, at: { dns: true } });
+    const many = a.ips && a.ips.length > 1;
+    const headless = a.headless ? ` — headless Service(clusterIP: None) 라 가상 주소 없이 ready Pod IP${many ? ` ${a.ips!.length}개(${a.ips!.join(", ")})를 돌려줌 → 첫째로` : "로"} 바로 감 (kube-proxy·DNAT 없음, 포트도 Pod 의 포트)` : "";
+    steps.push({ kind: "dns", actor: "coredns", text: `${t.host} → ${a.fqdn} → ${a.ip}${headless}${extra}`, at: { dns: true } });
     ip = a.ip;
-    if (tool === "nslookup") return { ok: true, steps, output: `Server:\t\t${DNS_SERVICE_IP}\nAddress:\t${DNS_SERVICE_IP}:53\n\nName:\t${a.fqdn}\nAddress: ${a.ip}` };
+    if (tool === "nslookup") return { ok: true, steps, output: `Server:\t\t${DNS_SERVICE_IP}\nAddress:\t${DNS_SERVICE_IP}:53\n\n${(a.ips ?? [a.ip]).map((x) => `Name:\t${a.fqdn}\nAddress: ${x}`).join("\n")}` };
   } else if (tool === "nslookup") {
     return { ok: false, steps, output: `** server can't find ${ip.split(".").reverse().join(".")}.in-addr.arpa: NXDOMAIN (축소판: 역방향 조회 없음)` };
   }
@@ -348,7 +371,7 @@ function deliverToIp(c: Cluster, src: Source, req: Req, ip: string, port: number
     text: `${pod.metadata.name} (${ip}:${port}) 의 앱이 HTTP 200 으로 응답 (${ms}ms${slowWhy}) — 앱이 본 출발지 IP 는 ${src.ip}${src.xff ? `, X-Forwarded-For: ${src.xff}` : ""}`,
     at: { pod: pod.metadata.name },
   });
-  const body = spec.role === "config" ? configBody(c, pod) : spec.role === "echo" ? `Hostname: ${pod.metadata.name}\nIP: ${ip}\nRemoteAddr: ${src.ip}:${40000 + c.netRng.int(20000)}\nGET ${req.path} HTTP/1.1\nHost: ${req.httpHost}${src.xff ? `\nX-Forwarded-For: ${src.xff}` : ""}` : spec.body;
+  const body = spec.role === "kv" ? kvBody(c, pod) : spec.role === "config" ? configBody(c, pod) : spec.role === "echo" ? `Hostname: ${pod.metadata.name}\nIP: ${ip}\nRemoteAddr: ${src.ip}:${40000 + c.netRng.int(20000)}\nGET ${req.path} HTTP/1.1\nHost: ${req.httpHost}${src.xff ? `\nX-Forwarded-For: ${src.xff}` : ""}` : spec.body;
   return { ok: true, steps, httpStatus: 200, latencyMs: app.latencyMs, output: `${body}\n${seen}`, servedBy: pod.metadata.name, seenSource: src.ip, forwardedFor: src.xff };
 }
 
@@ -538,6 +561,29 @@ function timedOut(req: Req, steps: NetStep[], ip: string): NetResult {
   const failure = { kind: "timeout" as const, host: req.host, ip };
   if (req.tool === "ping") return { ok: false, steps, failure, output: pingOut(req.host, ip, 0) };
   return { ok: false, steps, failure, output: `curl: (28) Failed to connect to ${req.host} port ${req.port} after 130000 ms: Connection timed out` };
+}
+
+/** 방문 수 DB: PVC 가 있으면 그 PV(노드 디스크)에, 없으면 컨테이너 안(재시작·새 Pod 면 처음부터)에 적는다 */
+function kvBody(c: Cluster, pod: Pod): string {
+  const claim = (pod.spec.volumes ?? []).find((v) => v.persistentVolumeClaim)?.persistentVolumeClaim?.claimName;
+  const pvc = claim ? c.api.peekList("PersistentVolumeClaim", pod.metadata.namespace ?? "default").find((x) => x.metadata.name === claim) : undefined;
+  const pv = pvc?.spec.volumeName ? c.api.peekList("PersistentVolume").find((x) => x.metadata.name === pvc.spec.volumeName) : undefined;
+  let store: Record<string, string>;
+  let where: string;
+  if (pv) {
+    store = c.volumeData.get(pv.metadata.name) ?? {};
+    c.volumeData.set(pv.metadata.name, store);
+    where = `PVC ${claim} → PV ${pv.metadata.name} (${pvNode(pv) ?? "?"} 의 ${pv.spec.hostPath.path}) — Pod 가 바뀌어도 남음`;
+  } else {
+    const restarts = pod.status.containerStatuses[0]?.restartCount ?? 0;
+    const key = `${pod.metadata.uid}/${restarts}`;
+    store = c.containerData.get(key) ?? {};
+    c.containerData.set(key, store);
+    where = "컨테이너 안 (볼륨 없음) — 컨테이너가 다시 뜨거나 Pod 가 바뀌면 사라짐";
+  }
+  const visits = Number(store.visits ?? "0") + 1;
+  store.visits = String(visits);
+  return `hostname=${pod.spec.hostname ?? pod.metadata.name} visits=${visits}\n저장: ${where}`;
 }
 
 /** 설정 앱: env(시작할 때 읽음)와 마운트된 파일(요청마다 다시 읽음)을 그대로 */

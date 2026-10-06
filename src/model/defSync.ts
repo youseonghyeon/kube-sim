@@ -115,6 +115,7 @@ const RESOURCE_NAME: Record<Manifest["kind"], string> = {
   ConfigMap: "configmap",
   Secret: "secret",
   PodDisruptionBudget: "poddisruptionbudget.policy",
+  StatefulSet: "statefulset.apps",
 };
 
 function resourceName(kind: Manifest["kind"]): string {

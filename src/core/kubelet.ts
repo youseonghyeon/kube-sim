@@ -7,6 +7,7 @@
 import { refOf, type WatchEvent } from "./api/server";
 import { limitOf, NODE_LEASE_NS, qosClass, type ConfigMap, type Container, type ContainerState, type Node, type Pod, type QosClass, type Secret } from "./api/types";
 import { b64decode } from "./base64";
+import { pvNode } from "./storage";
 import type { TimerHandle } from "./clock";
 import type { ComponentContext } from "./controllers/base";
 import { setCondition } from "./scheduler";
@@ -905,6 +906,17 @@ export class Kubelet {
       this.ctx.trace.add(this.actor, "kubelet.config", `${rt.name} volume ${volume} 를 붙일 수 없음 (${error}) → 컨테이너를 만들지 않고 ContainerCreating 에 머묾, ${delay / 1000}초 뒤 다시`, refOf(p));
       rt.timer = this.ctx.clock.after(delay, this.actor, () => this.mount(rt));
     };
+    // PVC volume: 디스크(PV)가 이 노드에 묶여 있어야 붙일 수 있다 (local-path 는 스케줄러가 맞춰 보낸다)
+    for (const v of rt.volumes) {
+      const claim = v.persistentVolumeClaim?.claimName;
+      if (!claim) continue;
+      const pvc = this.ctx.api.peekList("PersistentVolumeClaim", rt.ns).find((c) => c.metadata.name === claim);
+      if (!pvc) return fail(v.name, `persistentvolumeclaim "${claim}" not found`);
+      if (pvc.status.phase !== "Bound") return fail(v.name, `PVC ${claim} 가 아직 PV 에 묶이지 않음 (Unable to attach or mount volumes: unmounted volumes=[${v.name}]: timed out waiting for the condition)`);
+      const pv = this.ctx.api.peekList("PersistentVolume").find((x) => x.metadata.name === pvc.spec.volumeName);
+      const node = pv ? pvNode(pv) : undefined;
+      if (node && node !== this.def.name) return fail(v.name, `volume node affinity conflict — PV ${pv!.metadata.name} 은 ${node} 의 디스크`);
+    }
     const vol = new Map<string, Record<string, string>>();
     for (const { v, kind, name } of this.configVolumes(rt)) {
       const data = this.readConfig(kind, name, rt.ns);

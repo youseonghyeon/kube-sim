@@ -1,10 +1,13 @@
 // kube-scheduler: 노드가 정해지지 않은 Pod 를 골라 필터 → 점수 → 바인딩(spec.nodeName).
 // 자리가 없으면 FailedScheduling 이벤트에 노드별 이유를 실제 문구로 모으고, 클러스터가 바뀔 때(노드 추가·변경, 노드에 있던 Pod 삭제) 다시 시도한다.
-// 축소판: 점수는 LeastAllocated 하나 (실제는 여러 플러그인의 가중합), preemption 없음, 5분 주기 재시도 없음.
+// 볼륨(5d): Pod 가 쓰는 PVC 가 없으면 아무 노드도 못 고르고, PVC 가 묶인 PV 가 노드에 묶여 있으면(local-path) 그 노드만 (VolumeBinding 필터).
+// 아직 안 묶인 WaitForFirstConsumer PVC 는 바인딩할 때 고른 노드를 PVC 에 적어(selected-node) 프로비저너가 그 노드에 디스크를 만들게 한다.
+// 축소판: 점수는 LeastAllocated 하나 (실제는 여러 플러그인의 가중합), preemption 없음, 5분 주기 재시도 없음, PV 프로비저닝을 기다린 뒤 바인딩하지 않는다(PreBind 생략).
 import { refOf } from "./api/server";
 import { isNodeReady, isPodTerminal, podRequests, type Node, type Pod, type Resources, type Taint, type Toleration } from "./api/types";
 import { nsKey, splitKey, type ComponentContext } from "./controllers/base";
 import { stableJson } from "./rng";
+import { podClaims, pvNode, SELECTED_NODE } from "./storage";
 import { fmtCpu, fmtMem } from "./units";
 
 export const SCHEDULER = "kube-scheduler";
@@ -53,6 +56,13 @@ export class Scheduler {
       // 실패를 기록한 상태 갱신이 다시 깨우지 않게: 기다리는 Pod 는 클러스터 변화로만 다시 시도
       if (this.unschedulable.has(key)) return;
       this.enqueue(key);
+    });
+    // PVC·PV 가 생기거나 묶이면 기다리던 Pod 가 갈 곳이 생겼을 수 있다
+    ctx.api.watch("PersistentVolumeClaim", (ev) => {
+      if (ev.type !== "DELETED") this.retryUnschedulable(`PVC ${ev.object.metadata.name} 이(가) ${ev.type === "ADDED" ? "생김" : "바뀜"}`);
+    });
+    ctx.api.watch("PersistentVolume", (ev) => {
+      if (ev.type !== "DELETED") this.retryUnschedulable(`PV ${ev.object.metadata.name} 이(가) 바뀜`);
     });
     ctx.api.watch("Node", (ev) => {
       const n = ev.object;
@@ -106,8 +116,19 @@ export class Scheduler {
     const reasons = new Map<string, number>();
     const fits: { node: Readonly<Node>; score: number }[] = [];
     const rejected: string[] = [];
+    const vol = volumeCheck(api, pod);
+    if (vol.missing) {
+      // PreFilter 에서 막힘: 노드를 하나도 보지 않는다
+      const msg = `0/${nodes.length} nodes are available: persistentvolumeclaim "${vol.missing}" not found.`;
+      this.unschedulable.add(key);
+      this.ctx.trace.add(SCHEDULER, "scheduler.fail", `${name}${again} 가 쓰는 PVC ${vol.missing} 가 없음 → 노드를 고르지 않고 Pending 으로 대기 (PVC 가 생기면 다시 시도)`, refOf(pod));
+      api.recordEvent(pod, "Warning", "FailedScheduling", msg, SCHEDULER);
+      api.patch("Pod", name, ns, SCHEDULER, (p) => setCondition(p, "PodScheduled", "False", this.ctx.clock.now, "Unschedulable", msg));
+      return;
+    }
     for (const node of nodes) {
-      const why = filter(node, pod, req, nodeUsage(pods, node.metadata.name));
+      let why = filter(node, pod, req, nodeUsage(pods, node.metadata.name));
+      if (!why.length && vol.node !== undefined && vol.node !== node.metadata.name) why = ["node(s) had volume node affinity conflict"];
       if (why.length) {
         for (const r of why) reasons.set(r, (reasons.get(r) ?? 0) + 1);
         rejected.push(`${node.metadata.name}: ${why.join(", ")}`);
@@ -133,6 +154,8 @@ export class Scheduler {
     const best = fits[0]!;
     const nodeName = best.node.metadata.name;
     const ranking = fits.map((f) => `${f.node.metadata.name} ${f.score}`).join(" > ");
+    // 아직 안 묶인 PVC(WaitForFirstConsumer): 고른 노드를 적어 프로비저너가 그 노드에 디스크를 만들게 한다
+    for (const claim of vol.unbound) api.patch("PersistentVolumeClaim", claim, ns, SCHEDULER, (c) => (c.metadata.annotations = { ...(c.metadata.annotations ?? {}), [SELECTED_NODE]: nodeName }));
     api.patch("Pod", name, ns, SCHEDULER, (p) => {
       p.spec.nodeName = nodeName;
       setCondition(p, "PodScheduled", "True", this.ctx.clock.now);
@@ -140,11 +163,30 @@ export class Scheduler {
     this.ctx.trace.add(
       SCHEDULER,
       "scheduler.bind",
-      `${name}${again} ${reqText} → 후보 ${fits.length}/${nodes.length}${rejected.length ? ` (제외 ${rejected.join(" · ")})` : ""} → 점수 ${ranking} → ${nodeName} 에 바인딩`,
+      `${name}${again} ${reqText}${vol.node ? ` · 디스크(PV)가 ${vol.node} 에 묶여 있어 그 노드만` : ""}${vol.unbound.length ? ` · PVC ${vol.unbound.join(", ")} 는 아직 디스크가 없어 고른 노드에 만들게 함` : ""} → 후보 ${fits.length}/${nodes.length}${rejected.length ? ` (제외 ${rejected.join(" · ")})` : ""} → 점수 ${ranking} → ${nodeName} 에 바인딩`,
       refOf(pod),
     );
     api.recordEvent(pod, "Normal", "Scheduled", `Successfully assigned ${ns}/${name} to ${nodeName}`, SCHEDULER);
   }
+}
+
+/** Pod 의 PVC 들: 없는 것, 묶인 PV 가 정한 노드, 아직 안 묶인(WaitForFirstConsumer) 것 */
+export function volumeCheck(api: ComponentContext["api"], pod: Pod): { missing?: string; node?: string; unbound: string[] } {
+  const ns = pod.metadata.namespace ?? "default";
+  const unbound: string[] = [];
+  let node: string | undefined;
+  for (const { claim } of podClaims(pod)) {
+    const pvc = api.peekList("PersistentVolumeClaim", ns).find((c) => c.metadata.name === claim);
+    if (!pvc) return { missing: claim, unbound };
+    if (pvc.status.phase !== "Bound" || !pvc.spec.volumeName) {
+      unbound.push(claim);
+      continue;
+    }
+    const pv = api.peekList("PersistentVolume").find((v) => v.metadata.name === pvc.spec.volumeName);
+    const n = pv ? pvNode(pv) : undefined;
+    if (n) node = n;
+  }
+  return { node, unbound };
 }
 
 /** 노드가 이 Pod 를 받을 수 없는 이유들 (실제 문구) — 비어 있으면 통과 */

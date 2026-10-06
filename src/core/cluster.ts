@@ -1,7 +1,7 @@
 // 클러스터 한 벌: 시계 + 트레이스 + API 서버 + 컨트롤 플레인(스케줄러·컨트롤러) + 노드마다 kubelet.
 // 바깥(모델·kubectl·UI)은 여기 메서드로만 클러스터를 바꾼다.
 import { ApiServer, WATCH_DELAY_MS, type Draft } from "./api/server";
-import type { Application, Deployment, Ingress, Pod, PodDisruptionBudget, PodSpec, Probe, Service, ServiceType, EnvFromSource, EnvVar, NetworkPolicy } from "./api/types";
+import type { Application, Deployment, Ingress, Pod, PodDisruptionBudget, PodSpec, Probe, Service, ServiceType, EnvFromSource, EnvVar, NetworkPolicy, StatefulSet } from "./api/types";
 import { Clock } from "./clock";
 import type { ComponentContext } from "./controllers/base";
 import { DeploymentController } from "./controllers/deployment";
@@ -10,6 +10,8 @@ import { DrainJob } from "./drain";
 import { EndpointSliceController } from "./controllers/endpointslice";
 import { NodeLifecycleController, TaintEvictionController } from "./controllers/nodelifecycle";
 import { ReplicaSetController } from "./controllers/replicaset";
+import { StatefulSetController } from "./controllers/statefulset";
+import { LocalPathProvisioner, type VolumeData } from "./storage";
 import { Kubelet, type ContainerConfig, type CpuState, type NodeDef } from "./kubelet";
 import { ARGO, ArgoCD } from "./gitops/argocd";
 import { GitRepo, type Commit } from "./gitops/git";
@@ -81,7 +83,14 @@ export interface NetworkPolicyManifest {
   spec: NetworkPolicy["spec"];
 }
 
-export type Manifest = DeploymentManifest | ServiceManifest | PdbManifest | IngressManifest | ApplicationManifest | ConfigMapManifest | SecretManifest | NetworkPolicyManifest;
+export interface StatefulSetManifest {
+  apiVersion: "apps/v1";
+  kind: "StatefulSet";
+  metadata: { name: string; namespace?: string; labels?: Record<string, string>; annotations?: Record<string, string> };
+  spec: StatefulSet["spec"];
+}
+
+export type Manifest = DeploymentManifest | ServiceManifest | PdbManifest | IngressManifest | ApplicationManifest | ConfigMapManifest | SecretManifest | NetworkPolicyManifest | StatefulSetManifest;
 
 export interface ClusterOptions {
   seed?: number;
@@ -101,6 +110,10 @@ export class Cluster {
   readonly git = new Map<string, GitRepo>();
   /** Argo CD application-controller */
   readonly argocd: ArgoCD;
+  /** 노드 디스크에 남은 앱 데이터 (PV 이름 → 내용) — local-path 디렉터리 흉내 */
+  readonly volumeData: VolumeData = new Map();
+  /** 볼륨 없이 컨테이너 안에 적은 데이터 (Pod uid/재시작 횟수 → 내용) — 컨테이너가 바뀌면 새 키라 처음부터 */
+  readonly containerData = new Map<string, Record<string, string>>();
   /** 요청 흉내 전용 난수 (kube-proxy 의 확률 분배) — Pod 이름 난수와 분리해 요청을 보내도 이후 이름이 바뀌지 않게 */
   readonly netRng: Rng;
   private nodeIndex = 0;
@@ -115,6 +128,9 @@ export class Cluster {
     new ReplicaSetController(this.ctx, this.rng);
     new EndpointSliceController(this.ctx, this.rng);
     new DisruptionController(this.ctx);
+    new StatefulSetController(this.ctx);
+    new LocalPathProvisioner(this.ctx, this.volumeData);
+    LocalPathProvisioner.install(this.ctx);
     this.metallb = new MetalLB(this.ctx, (n) => this.nodePowered(n));
     new IngressNginxStatus(this.ctx);
     new TailscaleOperator(this.ctx);
@@ -403,6 +419,31 @@ export function ingress(
   };
 }
 
+/**
+ * 예제·폼에서 쓰는 StatefulSet: Deployment 와 같은 컨테이너 옵션 + headless Service 이름 + Pod 마다의 디스크(volumeClaimTemplates, MiB)
+ */
+export function statefulSet(
+  name: string,
+  opts: Parameters<typeof deployment>[1] & { serviceName?: string; storage?: { name: string; mountPath: string; size: number }[]; podManagementPolicy?: "OrderedReady" | "Parallel" },
+): StatefulSetManifest {
+  const d = deployment(name, opts);
+  const spec = d.spec.template.spec;
+  for (const s of opts.storage ?? []) spec.containers[0]!.volumeMounts = [...(spec.containers[0]!.volumeMounts ?? []), { name: s.name, mountPath: s.mountPath }];
+  return {
+    apiVersion: "apps/v1",
+    kind: "StatefulSet",
+    metadata: { name, labels: { ...d.metadata.labels } },
+    spec: {
+      replicas: opts.replicas,
+      selector: d.spec.selector,
+      serviceName: opts.serviceName ?? name,
+      template: d.spec.template,
+      ...(opts.storage?.length ? { volumeClaimTemplates: opts.storage.map((s) => ({ metadata: { name: s.name }, spec: { accessModes: ["ReadWriteOnce"], resources: { requests: { storage: s.size } } } })) } : {}),
+      ...(opts.podManagementPolicy ? { podManagementPolicy: opts.podManagementPolicy } : {}),
+    },
+  };
+}
+
 /** NetworkPolicy 매니페스트 (podSelector 는 app=… 하나, 비우면 모든 Pod) */
 export function networkPolicy(name: string, spec: NetworkPolicy["spec"]): NetworkPolicyManifest {
   return { apiVersion: "networking.k8s.io/v1", kind: "NetworkPolicy", metadata: { name }, spec: structuredClone(spec) };
@@ -424,7 +465,7 @@ export function pdb(name: string, selector: Record<string, string>, opts: { minA
 /** 예제·폼에서 쓰는 단순 Service */
 export function service(
   name: string,
-  opts: { selector: Record<string, string>; port: number; targetPort?: number; type?: ServiceType; nodePort?: number; externalTrafficPolicy?: "Cluster" | "Local" },
+  opts: { selector: Record<string, string>; port: number; targetPort?: number; type?: ServiceType; nodePort?: number; externalTrafficPolicy?: "Cluster" | "Local"; headless?: boolean },
 ): ServiceManifest {
   return {
     apiVersion: "v1",
@@ -432,6 +473,7 @@ export function service(
     metadata: { name },
     spec: {
       type: opts.type ?? "ClusterIP",
+      ...(opts.headless ? { clusterIP: "None" } : {}),
       ...(opts.externalTrafficPolicy ? { externalTrafficPolicy: opts.externalTrafficPolicy } : {}),
       selector: { ...opts.selector },
       ports: [{ protocol: "TCP", port: opts.port, targetPort: opts.targetPort ?? opts.port, ...(opts.nodePort ? { nodePort: opts.nodePort } : {}) }],

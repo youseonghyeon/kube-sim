@@ -64,6 +64,8 @@ export interface Volume {
   name: string;
   configMap?: { name: string };
   secret?: { secretName: string };
+  /** PVC 로 받은 디스크 (Pod 가 바뀌어도 남는다) */
+  persistentVolumeClaim?: { claimName: string };
 }
 
 export interface Container {
@@ -98,6 +100,9 @@ export interface PodSpec {
   terminationGracePeriodSeconds: number;
   tolerations?: Toleration[];
   volumes?: Volume[];
+  /** StatefulSet Pod: hostname 과 subdomain(= headless Service 이름) 으로 <hostname>.<subdomain> DNS 이름이 생긴다 */
+  hostname?: string;
+  subdomain?: string;
 }
 
 export type ContainerState =
@@ -391,13 +396,106 @@ export interface NetworkPolicy {
   status: Record<string, never>;
 }
 
-export type KObject = Pod | ReplicaSet | Deployment | Node | Lease | Service | EndpointSlice | PodDisruptionBudget | Ingress | Application | ConfigMap | Secret | NetworkPolicy;
+export type AccessMode = "ReadWriteOnce" | "ReadOnlyMany" | "ReadWriteMany" | "ReadWriteOncePod";
+
+export interface PvcSpec {
+  accessModes: AccessMode[];
+  /** storage 는 MiB */
+  resources: { requests: { storage: number } };
+  storageClassName?: string;
+  /** 묶인 PV 이름 (프로비저너·바인더가 채운다) */
+  volumeName?: string;
+}
+
+/** 디스크 요청. StorageClass 의 프로비저너가 맞는 PV 를 만들어 묶는다 (Bound) */
+export interface PersistentVolumeClaim {
+  apiVersion: "v1";
+  kind: "PersistentVolumeClaim";
+  metadata: ObjectMeta;
+  spec: PvcSpec;
+  status: { phase: "Pending" | "Bound" | "Lost"; capacity?: { storage: number }; accessModes?: AccessMode[] };
+}
+
+/** 실제 디스크 (클러스터 범위). local-path 는 노드의 디렉터리라 그 노드에 묶인다 (nodeAffinity) */
+export interface PersistentVolume {
+  apiVersion: "v1";
+  kind: "PersistentVolume";
+  metadata: ObjectMeta;
+  spec: {
+    capacity: { storage: number };
+    accessModes: AccessMode[];
+    persistentVolumeReclaimPolicy: "Delete" | "Retain";
+    storageClassName: string;
+    claimRef?: { name: string; namespace: string; uid: string };
+    hostPath: { path: string };
+    nodeAffinity?: { required: { nodeSelectorTerms: { matchExpressions: { key: string; operator: "In"; values: string[] }[] }[] } };
+  };
+  status: { phase: "Available" | "Bound" | "Released" };
+}
+
+/** 어떤 프로비저너가 디스크를 만들고, 언제 묶을지 (WaitForFirstConsumer = Pod 가 노드에 정해진 뒤) */
+export interface StorageClass {
+  apiVersion: "storage.k8s.io/v1";
+  kind: "StorageClass";
+  metadata: ObjectMeta;
+  provisioner: string;
+  reclaimPolicy: "Delete" | "Retain";
+  volumeBindingMode: "WaitForFirstConsumer" | "Immediate";
+  spec?: undefined;
+  status: Record<string, never>;
+}
+
+/** 고정 이름(<이름>-0, -1 …)·순서·Pod 마다 자기 PVC 를 가진 Pod 묶음 */
+export interface StatefulSet {
+  apiVersion: "apps/v1";
+  kind: "StatefulSet";
+  metadata: ObjectMeta;
+  spec: {
+    replicas: number;
+    selector: LabelSelector;
+    /** Pod 마다 DNS 이름을 주는 headless Service */
+    serviceName: string;
+    template: PodTemplate;
+    volumeClaimTemplates?: { metadata: { name: string }; spec: PvcSpec }[];
+    podManagementPolicy?: "OrderedReady" | "Parallel";
+    updateStrategy?: { type: "RollingUpdate" | "OnDelete" };
+  };
+  status: {
+    replicas: number;
+    readyReplicas: number;
+    availableReplicas: number;
+    currentReplicas: number;
+    updatedReplicas: number;
+    currentRevision?: string;
+    updateRevision?: string;
+    observedGeneration: number;
+  };
+}
+
+export type KObject =
+  | Pod
+  | ReplicaSet
+  | Deployment
+  | Node
+  | Lease
+  | Service
+  | EndpointSlice
+  | PodDisruptionBudget
+  | Ingress
+  | Application
+  | ConfigMap
+  | Secret
+  | NetworkPolicy
+  | PersistentVolumeClaim
+  | PersistentVolume
+  | StorageClass
+  | StatefulSet;
 export type Kind = KObject["kind"];
 
 export type ObjectOf<K extends Kind> = Extract<KObject, { kind: K }>;
 
 /** 클러스터 범위 오브젝트(네임스페이스 없음) */
-export const CLUSTER_SCOPED: ReadonlySet<Kind> = new Set<Kind>(["Node"]);
+export const CLUSTER_SCOPED: ReadonlySet<Kind> = new Set<Kind>(["Node", "PersistentVolume", "StorageClass"]);
 
 /** 쿠버네티스 이벤트 (kubectl get events) */
 export interface KEvent {

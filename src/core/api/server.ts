@@ -298,13 +298,15 @@ export class ApiServer {
     const usedPorts = new Set<number>();
     for (const o of this.store.values()) {
       if (o.kind !== "Service" || o.metadata.uid === svc.metadata.uid || (o.metadata.name === name && (o.metadata.namespace ?? "default") === (svc.metadata.namespace ?? "default"))) continue;
-      if (o.spec.clusterIP) used.add(o.spec.clusterIP);
+      if (o.spec.clusterIP && o.spec.clusterIP !== "None") used.add(o.spec.clusterIP);
       for (const p of o.spec.ports) if (p.nodePort) usedPorts.add(p.nodePort);
     }
     if (prev?.spec.clusterIP) {
       if (svc.spec.clusterIP && svc.spec.clusterIP !== prev.spec.clusterIP)
         throw new ApiError("Invalid", `Service "${name}" is invalid: spec.clusterIP: Invalid value: "${svc.spec.clusterIP}": field is immutable`);
       svc.spec.clusterIP = prev.spec.clusterIP;
+    } else if (svc.spec.clusterIP === "None" && svc.spec.type !== "ClusterIP") {
+      throw new ApiError("Invalid", `Service "${name}" is invalid: spec.clusterIPs[0]: Invalid value: "None": may not be set to 'None' for ${svc.spec.type} services`);
     } else if (svc.spec.clusterIP && used.has(svc.spec.clusterIP)) {
       throw new ApiError("Invalid", `Service "${name}" is invalid: spec.clusterIP: Invalid value: "${svc.spec.clusterIP}": provided IP is already allocated`);
     }
@@ -545,7 +547,14 @@ function emptyStatus(kind: Kind): unknown {
     case "ConfigMap":
     case "Secret":
     case "NetworkPolicy":
+    case "StorageClass":
       return {};
+    case "PersistentVolumeClaim":
+      return { phase: "Pending" };
+    case "PersistentVolume":
+      return { phase: "Available" };
+    case "StatefulSet":
+      return { replicas: 0, readyReplicas: 0, availableReplicas: 0, currentReplicas: 0, updatedReplicas: 0, observedGeneration: 0 };
   }
 }
 

@@ -20,9 +20,10 @@ export interface ImageSpec {
   warmupMs?: number;
   /**
    * 특별한 앱: ingress-nginx = Host·경로로 Ingress 규칙을 찾아 Pod 로 프록시, tailscale-proxy = Tailscale 오퍼레이터의 프록시(TLS 종료 → Service),
-   * echo = 받은 요청의 출발지 IP 를 그대로 돌려줌 (whoami), config = 자기 env 와 마운트된 파일을 보여 줌 (설정 실험용)
+   * echo = 받은 요청의 출발지 IP 를 그대로 돌려줌 (whoami), config = 자기 env 와 마운트된 파일을 보여 줌 (설정 실험용),
+   * kv = 요청마다 방문 수를 하나 늘려 /data 에 적는 작은 DB (PVC 가 있으면 노드 디스크에, 없으면 컨테이너 안에 — 데이터가 남는지 보는 용도)
    */
-  role?: "ingress-nginx" | "tailscale-proxy" | "echo" | "config";
+  role?: "ingress-nginx" | "tailscale-proxy" | "echo" | "config" | "kv";
   /** 메모리 사용(MiB): 시작 후 memRampMs 동안 0 에서 memMi 까지 오른다 (기본 20, 램프 1초) */
   memMi?: number;
   memRampMs?: number;
@@ -134,6 +135,17 @@ export const IMAGES: Record<string, ImageSpec> = {
     role: "config",
     memMi: 20,
     description: "설정을 보여 주는 앱 (포트 8080): env 는 시작할 때 읽은 값, /etc/config 아래 파일은 요청마다 다시 읽은 값을 돌려줍니다",
+  },
+  "example/kv:1.0": {
+    pullMs: 2000,
+    sizeMB: 30,
+    termMs: 500,
+    port: 8080,
+    body: "",
+    role: "kv",
+    memMi: 40,
+    warmupMs: 3_000,
+    description: "방문 수를 세는 작은 DB (포트 8080): 요청마다 visits 를 하나 늘려 /data 에 적습니다. PVC 를 붙이면 Pod 가 바뀌어도 남고, 없으면 컨테이너가 바뀔 때 사라집니다",
   },
   "example/thumbs:1.0": {
     pullMs: 2000,

@@ -105,6 +105,18 @@
 - 만들 것: NetworkPolicy 오브젝트(podSelector · policyTypes · ingress/egress 규칙 — podSelector·namespaceSelector·ipBlock·ports), 요청 경로의 검사(egress → ingress, DNS 포함, 막히면 DROP), `kubectl get/describe/delete networkpolicy`, 화면(목록 +·인스펙터 개요와 규칙 편집·Pod 의 격리 표시·칩 배지), 예제 묶음 "네트워크 정책"
 - 완료 기준: 예제의 "해 볼 것" 이 위 학습 포인트를 curl 결과·단계·로그로 보여 주고, 판단 규칙이 테스트로 고정된다. 네 가지 검증 통과
 
+### 5d. StatefulSet + PVC (2026-10-06 시작, 사용자 승인 — 5c 다음 후보)
+- 왜: 홈 클러스터(k3s)의 기본 스토리지 local-path 는 디스크가 노드 하나에 묶인다. DB 를 올렸을 때 "Pod 를 지웠는데 데이터가 남나", "노드가 죽었는데 DB 가 왜 다른 노드로 안 옮겨지나" 를 추측하지 않고 보게 한다.
+- 배우는 것
+  - StatefulSet: 고정 이름(db-0, db-1), 순서대로 생성(앞 번호가 Ready 여야 다음)·역순 삭제, 지운 Pod 는 **같은 이름·같은 디스크**로 돌아온다, 업데이트는 큰 번호부터 하나씩
+  - volumeClaimTemplates → Pod 마다 PVC(data-db-0). scale down 해도 PVC 는 남는다(다시 늘리면 그 데이터로)
+  - PVC·PV·StorageClass: local-path 는 WaitForFirstConsumer — Pod 가 노드에 정해져야 그 노드에 PV 를 만들고, PV 는 그 노드에 묶인다(nodeAffinity) → 그 Pod 는 다른 노드로 못 간다(`volume node affinity conflict`)
+  - 노드가 죽으면 StatefulSet Pod 는 Terminating 에 멈추고 같은 이름이라 대신할 Pod 도 안 생긴다(at most one) → `--force` 로 지워야 하는데, 지워도 디스크가 죽은 노드에 있어 Pending
+  - headless Service(clusterIP: None): DNS 가 Pod IP 를 바로 돌려주고 `db-0.db` 처럼 Pod 마다 이름이 생긴다
+  - Deployment 로 DB 를 띄우면(볼륨 없음) Pod 가 바뀔 때 데이터가 사라진다
+- 만들 것: PVC·PV·StorageClass(local-path) 오브젝트와 프로비저너, Pod 의 persistentVolumeClaim volume, 스케줄러의 볼륨 필터, kubelet 의 마운트(PVC 가 Bound 될 때까지 기다림), 방문 수를 볼륨에 적는 앱, StatefulSet 컨트롤러, headless Service DNS, `kubectl get/describe sts·pvc·pv·sc`·`scale sts`·`rollout restart|status sts`·`delete pvc`, 화면(목록·노드 칸의 디스크·인스펙터), 예제 묶음 "상태 있는 앱"
+- 완료 기준: 예제의 "해 볼 것" 이 위 학습 포인트를 kubectl 출력·로그·앱 응답(방문 수)으로 보여 주고, 컨트롤러·스케줄러 동작이 트레이스 테스트로 고정된다. 네 가지 검증 통과
+
 ## 6. GitOps (ArgoCD 식) ✅ 2026-10-02
 - 된 것: Git 저장소(커밋 이력, 경로별 매니페스트), Argo CD application-controller(3분 폴링·Refresh, Git 에 적은 필드 기준 비교 → Synced/OutOfSync, 리소스 Health, 자동 sync 는 새 리비전마다 한 번, selfHeal 5초, prune, 이력), `argocd app list/get/diff/sync/history/set`·`git log` 흉내, `kubectl get applications -n argocd`, 캔버스 GitOps 칸(Git → Application, '아직 모름' 표시·폴링 카운트다운), Application 인스펙터(정책 토글·리소스·차이), Git 인스펙터(작업 사본 편집 → 커밋), 예제 '내 배포 파이프라인'(CI 태그 커밋 → 폴링 → 자동 sync → 롤아웃)
 - 축소판: Argo CD 는 Pod 없는 부가 기능, Helm 렌더링 결과를 Git 에 있다고 봄, 대상 네임스페이스 default, sync 즉시 완료, 훅·sync wave·finalizer·webhook 없음

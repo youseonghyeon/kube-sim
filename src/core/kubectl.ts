@@ -1,9 +1,10 @@
 // kubectl 흉내: 문자열 명령 → API 호출 + 실제와 같은 모양의 출력. 코어 API 위의 얇은 층이다.
 // 축소판: default 네임스페이스만, 자주 쓰는 하위 명령·플래그만.
 import { ApiError } from "./api/server";
-import { controllerOf, isNodeReady, NODE_LEASE_NS, podRequests, qosClass, SERVICE_NAME_LABEL, type Deployment, type IngressPath, type KEvent, type Kind, type Node, type Pod, type ServiceType, type NetworkPolicy, type NetworkPolicyPeer, type NetworkPolicyPort } from "./api/types";
+import { CLUSTER_SCOPED, controllerOf, isNodeReady, NODE_LEASE_NS, podRequests, qosClass, SERVICE_NAME_LABEL, type Deployment, type IngressPath, type KEvent, type Kind, type Node, type Pod, type ServiceType, type NetworkPolicy, type NetworkPolicyPeer, type NetworkPolicyPort } from "./api/types";
 import { configMap, deployment, ingress, pdb, secret, service, type Cluster } from "./cluster";
 import { selectorText } from "./net/netpol";
+import { pvNode } from "./storage";
 import type { DrainJob } from "./drain";
 import type { NetResult } from "./net/request";
 import { deploymentHash, HASH_LABEL, revisionOf } from "./controllers/deployment";
@@ -29,6 +30,18 @@ export const KUBE_VERSION = "v1.31.0";
 type Res = Kind | "Event" | "Endpoints" | "all";
 
 const RESOURCE_ALIASES: Record<string, Res> = {
+  sts: "StatefulSet",
+  statefulset: "StatefulSet",
+  statefulsets: "StatefulSet",
+  pvc: "PersistentVolumeClaim",
+  persistentvolumeclaim: "PersistentVolumeClaim",
+  persistentvolumeclaims: "PersistentVolumeClaim",
+  pv: "PersistentVolume",
+  persistentvolume: "PersistentVolume",
+  persistentvolumes: "PersistentVolume",
+  sc: "StorageClass",
+  storageclass: "StorageClass",
+  storageclasses: "StorageClass",
   netpol: "NetworkPolicy",
   networkpolicy: "NetworkPolicy",
   networkpolicies: "NetworkPolicy",
@@ -87,6 +100,10 @@ const KIND_PREFIX: Record<Kind, string> = {
   ConfigMap: "configmap",
   Secret: "secret",
   NetworkPolicy: "networkpolicy.networking.k8s.io",
+  StatefulSet: "statefulset.apps",
+  PersistentVolumeClaim: "persistentvolumeclaim",
+  PersistentVolume: "persistentvolume",
+  StorageClass: "storageclass.storage.k8s.io",
 };
 const KIND_PLURAL: Record<Kind, string> = {
   Pod: "pods",
@@ -102,6 +119,10 @@ const KIND_PLURAL: Record<Kind, string> = {
   ConfigMap: "configmaps",
   Secret: "secrets",
   NetworkPolicy: "networkpolicies.networking.k8s.io",
+  StatefulSet: "statefulsets.apps",
+  PersistentVolumeClaim: "persistentvolumeclaims",
+  PersistentVolume: "persistentvolumes",
+  StorageClass: "storageclasses.storage.k8s.io",
 };
 
 export const KUBECTL_HELP = [
@@ -127,6 +148,7 @@ export const KUBECTL_HELP = [
   "  curl http://<호스트·LoadBalancer IP·노드IP:NodePort>   (kubectl 없이 — 클러스터 밖에서 보냄)",
   "  kubectl get leases -n kube-node-lease   (kubelet heartbeat)",
   "  kubectl get <종류> <이름> -o yaml",
+  "  kubectl get sts · pvc · pv · sc · describe sts|pvc|pv <이름> · scale sts/<이름> --replicas=N · rollout status|restart sts/<이름> · delete pvc <이름>",
   "  kubectl get networkpolicy · describe networkpolicy <이름> · delete networkpolicy <이름>   (만들기는 화면·예제에서)",
   "  kubectl create configmap <이름> --from-literal=KEY=값 …  ·  kubectl create secret generic <이름> --from-literal=KEY=값 …",
   "  kubectl patch configmap <이름> -p '{\"data\":{\"KEY\":\"새 값\"}}'   (secret 은 stringData 로 평문을, data 로 base64 를)",
@@ -330,6 +352,37 @@ function get(c: Cluster, pos: string[], flags: Map<string, string>): string {
       const cms = pick(c, "ConfigMap", c.api.list("ConfigMap", "default"), names);
       return cms.length ? table(["NAME", "DATA", "AGE"], cms.map((m) => [m.metadata.name, String(Object.keys(m.data).length), fmtAge(c.now - m.metadata.creationTimestamp)])) : "No resources found in default namespace.";
     }
+    case "StatefulSet": {
+      const ss = pick(c, "StatefulSet", c.api.list("StatefulSet", "default"), names);
+      return ss.length ? table(["NAME", "READY", "AGE"], ss.map((s) => [s.metadata.name, `${s.status.readyReplicas}/${s.spec.replicas}`, fmtAge(c.now - s.metadata.creationTimestamp)])) : "No resources found in default namespace.";
+    }
+    case "PersistentVolumeClaim": {
+      const ps = pick(c, "PersistentVolumeClaim", c.api.list("PersistentVolumeClaim", "default"), names);
+      return ps.length
+        ? table(
+            ["NAME", "STATUS", "VOLUME", "CAPACITY", "ACCESS MODES", "STORAGECLASS", "VOLUMEATTRIBUTESCLASS", "AGE"],
+            ps.map((p) => [p.metadata.name, p.status.phase, p.spec.volumeName ?? "", p.status.capacity ? fmtMem(p.status.capacity.storage) : "", p.status.phase === "Bound" ? accessModes(p.spec.accessModes) : "", p.spec.storageClassName ?? "", "<unset>", fmtAge(c.now - p.metadata.creationTimestamp)]),
+          )
+        : "No resources found in default namespace.";
+    }
+    case "PersistentVolume": {
+      const ps = pick(c, "PersistentVolume", c.api.list("PersistentVolume"), names);
+      return ps.length
+        ? table(
+            ["NAME", "CAPACITY", "ACCESS MODES", "RECLAIM POLICY", "STATUS", "CLAIM", "STORAGECLASS", "VOLUMEATTRIBUTESCLASS", "REASON", "AGE"],
+            ps.map((p) => [p.metadata.name, fmtMem(p.spec.capacity.storage), accessModes(p.spec.accessModes), p.spec.persistentVolumeReclaimPolicy, p.status.phase, p.spec.claimRef ? `${p.spec.claimRef.namespace}/${p.spec.claimRef.name}` : "", p.spec.storageClassName, "<unset>", "", fmtAge(c.now - p.metadata.creationTimestamp)]),
+          )
+        : "No resources found";
+    }
+    case "StorageClass": {
+      const ss = pick(c, "StorageClass", c.api.list("StorageClass"), names);
+      return ss.length
+        ? table(
+            ["NAME", "PROVISIONER", "RECLAIMPOLICY", "VOLUMEBINDINGMODE", "ALLOWVOLUMEEXPANSION", "AGE"],
+            ss.map((s) => [`${s.metadata.name}${s.metadata.annotations?.["storageclass.kubernetes.io/is-default-class"] === "true" ? " (default)" : ""}`, s.provisioner, s.reclaimPolicy, s.volumeBindingMode, "false", fmtAge(c.now - s.metadata.creationTimestamp)]),
+          )
+        : "No resources found";
+    }
     case "NetworkPolicy": {
       const nps = pick(c, "NetworkPolicy", c.api.list("NetworkPolicy", "default"), names);
       return nps.length ? table(["NAME", "POD-SELECTOR", "AGE"], nps.map((n) => [n.metadata.name, selectorText(n.spec.podSelector), fmtAge(c.now - n.metadata.creationTimestamp)])) : "No resources found in default namespace.";
@@ -512,12 +565,77 @@ function getEvents(c: Cluster): string {
 
 function describe(c: Cluster, pos: string[]): string {
   const { kind, names } = resourceArgs(pos);
-  const k = needWorkload(kind, ["Pod", "Deployment", "ReplicaSet", "Node", "Service", "Ingress", "ConfigMap", "Secret", "NetworkPolicy"], "describe");
+  const k = needWorkload(kind, ["Pod", "Deployment", "ReplicaSet", "Node", "Service", "Ingress", "ConfigMap", "Secret", "NetworkPolicy", "StatefulSet", "PersistentVolumeClaim", "PersistentVolume"], "describe");
   const name = names[0];
   if (!name) throw new KubectlError(`error: 이름을 함께 쓰세요. 예: kubectl describe ${k.toLowerCase()} <이름>`);
-  const o = c.api.get(k, name, "default");
+  const o = c.api.get(k, name, CLUSTER_SCOPED.has(k) ? undefined : "default");
   if (!o) throw new ApiError("NotFound", `${KIND_PLURAL[k]} "${name}" not found`);
   switch (o.kind) {
+    case "StatefulSet": {
+      const pods = c.api.list("Pod", "default").filter((p) => controllerOf(p.metadata)?.uid === o.metadata.uid);
+      const running = pods.filter((p) => p.status.phase === "Running").length;
+      return (
+        kv([
+          ["Name", o.metadata.name],
+          ["Namespace", "default"],
+          ["CreationTimestamp", fmtClock(o.metadata.creationTimestamp)],
+          ["Selector", Object.entries(o.spec.selector.matchLabels).map(([a, b]) => `${a}=${b}`).join(",")],
+          ["Labels", labelsText(o.metadata.labels)],
+          ["Replicas", `${o.spec.replicas} desired | ${o.status.replicas} total`],
+          ["Update Strategy", o.spec.updateStrategy?.type ?? "RollingUpdate"],
+          ["Pods Status", `${running} Running / ${pods.length - running} Waiting / 0 Succeeded / 0 Failed`],
+          ["Pod Template", ""],
+          ...templateLines(o.spec.template.spec.containers[0]),
+          ["Volume Claims", ""],
+          ...(o.spec.volumeClaimTemplates ?? []).flatMap((t) => [
+            ["  Name", t.metadata.name] as [string, string],
+            ["  StorageClass", t.spec.storageClassName ?? "local-path"] as [string, string],
+            ["  Capacity", fmtMem(t.spec.resources.requests.storage)] as [string, string],
+            ["  Access Modes", accessModes(t.spec.accessModes)] as [string, string],
+          ]),
+        ]) + eventsBlock(c, o.metadata.uid)
+      );
+    }
+    case "PersistentVolumeClaim": {
+      const users = c.api.list("Pod", "default").filter((p) => (p.spec.volumes ?? []).some((v) => v.persistentVolumeClaim?.claimName === o.metadata.name));
+      return (
+        kv([
+          ["Name", o.metadata.name],
+          ["Namespace", "default"],
+          ["StorageClass", o.spec.storageClassName ?? ""],
+          ["Status", o.status.phase],
+          ["Volume", o.spec.volumeName ?? ""],
+          ["Labels", labelsText(o.metadata.labels)],
+          ["Annotations", Object.entries(o.metadata.annotations ?? {}).filter(([k2]) => k2 !== "kubectl.kubernetes.io/last-applied-configuration").map(([a, b]) => `${a}: ${b}`).join("\n               ") || "<none>"],
+          ["Capacity", o.status.capacity ? fmtMem(o.status.capacity.storage) : ""],
+          ["Access Modes", o.status.phase === "Bound" ? accessModes(o.spec.accessModes) : ""],
+          ["VolumeMode", "Filesystem"],
+          ["Used By", users.map((p) => p.metadata.name).join("\n               ") || "<none>"],
+        ]) + eventsBlock(c, o.metadata.uid)
+      );
+    }
+    case "PersistentVolume": {
+      const node = pvNode(o);
+      return (
+        kv([
+          ["Name", o.metadata.name],
+          ["Labels", labelsText(o.metadata.labels)],
+          ["StorageClass", o.spec.storageClassName],
+          ["Status", o.status.phase],
+          ["Claim", o.spec.claimRef ? `${o.spec.claimRef.namespace}/${o.spec.claimRef.name}` : ""],
+          ["Reclaim Policy", o.spec.persistentVolumeReclaimPolicy],
+          ["Access Modes", accessModes(o.spec.accessModes)],
+          ["VolumeMode", "Filesystem"],
+          ["Capacity", fmtMem(o.spec.capacity.storage)],
+          ["Node Affinity", ""],
+          ["  Required Terms", ""],
+          ["    Term 0", node ? `kubernetes.io/hostname in [${node}]` : "<none>"],
+          ["Source", ""],
+          ["    Type", "HostPath (bare host directory volume)"],
+          ["    Path", o.spec.hostPath.path],
+        ]) + eventsBlock(c, o.metadata.uid)
+      );
+    }
     case "NetworkPolicy":
       return describeNetpol(c, o);
     case "ConfigMap":
@@ -645,6 +763,8 @@ function describe(c: Cluster, pos: string[]): string {
         ...templateLines(o.spec.template.spec.containers[0]),
       ]) + eventsBlock(c, o.metadata.uid);
     }
+    default:
+      throw new KubectlError(`error: describe ${k.toLowerCase()} 는 아직 없습니다 (축소판)`);
   }
 }
 
@@ -949,7 +1069,7 @@ function createConfig(c: Cluster, kind: "ConfigMap" | "Secret", name: string | u
 
 function scale(c: Cluster, pos: string[], flags: Map<string, string>, line: string): KubectlResult {
   const { kind, names } = resourceArgs(pos);
-  const k = needWorkload(kind, ["Deployment", "ReplicaSet"], "scale");
+  const k = needWorkload(kind, ["Deployment", "ReplicaSet", "StatefulSet"], "scale");
   const name = names[0];
   if (!name) throw new KubectlError("error: 이름이 필요합니다. 예: kubectl scale deployment/web --replicas=5");
   if (!flags.has("replicas")) throw new KubectlError("error: --replicas=COUNT 가 필요합니다");
@@ -1011,7 +1131,7 @@ function setCmd(c: Cluster, pos: string[], flags: Map<string, string>, line: str
 
 function del(c: Cluster, pos: string[], flags: Map<string, string>, line: string): KubectlResult {
   const { kind, names } = resourceArgs(pos);
-  const k = needWorkload(kind, ["Pod", "Deployment", "ReplicaSet", "Service", "PodDisruptionBudget", "Ingress", "ConfigMap", "Secret", "NetworkPolicy"], "delete");
+  const k = needWorkload(kind, ["Pod", "Deployment", "ReplicaSet", "Service", "PodDisruptionBudget", "Ingress", "ConfigMap", "Secret", "NetworkPolicy", "StatefulSet", "PersistentVolumeClaim", "PersistentVolume"], "delete");
   if (!names.length) throw new KubectlError(`error: 지울 이름이 필요합니다. 예: kubectl delete ${k.toLowerCase()} <이름>`);
   for (const n of names) if (!c.api.get(k, n, "default")) throw new ApiError("NotFound", `${KIND_PLURAL[k]} "${n}" not found`);
   userTrace(c, line);
@@ -1170,8 +1290,9 @@ function rollout(c: Cluster, pos: string[], flags: Map<string, string>, line: st
   const sub = pos.shift();
   if (!sub || !["status", "history", "undo", "restart"].includes(sub)) throw new KubectlError("error: rollout 다음에 status · history · undo · restart 중 하나를 쓰세요 (축소판). 예: kubectl rollout status deployment/web");
   const { kind, names } = resourceArgs(pos);
-  needWorkload(kind, ["Deployment"], `rollout ${sub}`);
+  needWorkload(kind, ["Deployment", "StatefulSet"], `rollout ${sub}`);
   const name = names[0];
+  if (kind === "StatefulSet") return rolloutSts(c, sub, name, line);
   if (!name) throw new KubectlError(`error: 이름이 필요합니다. 예: kubectl rollout ${sub} deployment/web`);
   const d = c.api.get("Deployment", name, "default");
   if (!d) throw new ApiError("NotFound", `deployments.apps "${name}" not found`);
@@ -1208,6 +1329,29 @@ function rollout(c: Cluster, pos: string[], flags: Map<string, string>, line: st
       return ok(`deployment.apps/${name} restarted`, true);
     }
   }
+}
+
+/** rollout status|restart statefulset — 큰 번호부터 하나씩 새 리비전으로 */
+function rolloutSts(c: Cluster, sub: string, name: string | undefined, line: string): KubectlResult {
+  if (!name) throw new KubectlError(`error: 이름이 필요합니다. 예: kubectl rollout ${sub} statefulset/db`);
+  const s = c.api.get("StatefulSet", name, "default");
+  if (!s) throw new ApiError("NotFound", `statefulsets.apps "${name}" not found`);
+  if (sub === "restart") {
+    userTrace(c, line);
+    c.api.patch("StatefulSet", name, "default", "kubectl", (o) => {
+      o.spec.template.metadata.annotations = { ...(o.spec.template.metadata.annotations ?? {}), "kubectl.kubernetes.io/restartedAt": `sim-${fmtClock(c.now)}` };
+    });
+    return ok(`statefulset.apps/${name} restarted`, true);
+  }
+  if (sub !== "status") throw new KubectlError(`error: statefulset 은 rollout status · restart 만 됩니다 (축소판)`);
+  const st = s.status;
+  if (st.updatedReplicas === s.spec.replicas && st.readyReplicas === s.spec.replicas) return ok(`statefulset rolling update complete ${s.spec.replicas} pods at revision ${st.updateRevision}...`);
+  if (st.readyReplicas < s.spec.replicas) return { ok: true, output: `Waiting for ${s.spec.replicas - st.readyReplicas} pods to be ready...\n(축소판: 실제 kubectl 은 끝날 때까지 기다립니다 — 다시 실행해 보세요)`, mutated: false };
+  return { ok: true, output: `waiting for statefulset rolling update to complete ${st.updatedReplicas} pods at revision ${st.updateRevision}...\n(축소판: 다시 실행해 보세요)`, mutated: false };
+}
+
+function accessModes(m: string[]): string {
+  return m.map((x) => ({ ReadWriteOnce: "RWO", ReadOnlyMany: "ROX", ReadWriteMany: "RWX", ReadWriteOncePod: "RWOP" })[x] ?? x).join(",");
 }
 
 function expose(c: Cluster, pos: string[], flags: Map<string, string>, line: string): KubectlResult {
