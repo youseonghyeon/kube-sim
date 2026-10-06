@@ -3,6 +3,8 @@ import { deployment, service } from "../core/cluster";
 import type { ClusterView } from "../model/view";
 import { currentView, sim } from "../model/sim";
 import { addManifest, addNodeDef, clusterDef, removeNodeDef, selection, uniqueDeploymentName } from "../model/store";
+import { newIngress } from "../model/ingressForm";
+import { NGINX_SERVICE } from "../core/net/ingress";
 import { Icon } from "./Icons";
 
 export function Sidebar() {
@@ -116,19 +118,39 @@ export function Sidebar() {
           ))}
         </div>
       )}
-      {ings.length > 0 && (
-        <div class="side-section">
-          <div class="side-head">
-            <span>Ingress</span>
-          </div>
-          {ings.map((i) => (
-            <button key={i.metadata.uid} class={`tree-row${isSel("Ingress", i.metadata.name) ? " sel" : ""}`} onClick={() => (selection.value = { kind: "Ingress", namespace: "default", name: i.metadata.name })}>
-              <span class="tree-name">{i.metadata.name}</span>
-              <span class="tree-kind">{i.spec.ingressClassName}</span>
-            </button>
-          ))}
+      <div class="side-section">
+        <div class="side-head">
+          <span>Ingress</span>
+          <button
+            class="icon-btn sm"
+            title={
+              ingressTarget(view)
+                ? `Ingress 추가 — Service 를 바깥에 엽니다 (${view.services.some((s) => s.name === NGINX_SERVICE) ? "ingress-nginx 가 있어 nginx 클래스" : "ingress-nginx 가 없어 설치가 필요 없는 tailscale 클래스"})`
+                : "Ingress 추가 — 가리킬 Service 가 먼저 있어야 합니다"
+            }
+            aria-label="Ingress 추가"
+            disabled={!ingressTarget(view)}
+            onClick={() => {
+              const svcs = ingressTarget(view)!;
+              const used = new Set(ings.flatMap((i) => [i.spec.defaultBackend?.service.name, ...(i.spec.rules ?? []).flatMap((r) => r.http.paths.map((p) => p.backend.service.name))].filter((x): x is string => !!x)));
+              const first = svcs.find((s) => !used.has(s.name)) ?? svcs[0]!;
+              const m = newIngress(uniqueDeploymentName(first.name, "Ingress"), svcs, used, view.services.some((s) => s.name === NGINX_SERVICE));
+              if (!m) return;
+              addManifest(m);
+              selection.value = { kind: "Ingress", namespace: "default", name: m.metadata.name };
+            }}
+          >
+            <Icon name="plus" size={15} />
+          </button>
         </div>
-      )}
+        {ings.map((i) => (
+          <button key={i.metadata.uid} class={`tree-row${isSel("Ingress", i.metadata.name) ? " sel" : ""}`} data-tree={`ingress/${i.metadata.name}`} onClick={() => (selection.value = { kind: "Ingress", namespace: "default", name: i.metadata.name })}>
+            <span class="tree-name">{i.metadata.name}</span>
+            <span class="tree-kind">{i.spec.ingressClassName}</span>
+          </button>
+        ))}
+        {!ings.length && <div class="side-empty">없음. + 또는 kubectl create ingress</div>}
+      </div>
       {pdbs.length > 0 && (
         <div class="side-section">
           <div class="side-head">
@@ -193,6 +215,12 @@ export function Sidebar() {
       </div>
     </aside>
   );
+}
+
+/** Ingress 가 가리킬 수 있는 Service (ingress-nginx 의 것은 빼고). 없으면 undefined */
+function ingressTarget(view: ClusterView): { name: string; port: number }[] | undefined {
+  const out = view.services.filter((s) => s.name !== NGINX_SERVICE).map((s) => ({ name: s.name, port: s.svc.spec.ports[0]?.port ?? 80 }));
+  return out.length ? out : undefined;
 }
 
 /** Service 가 아직 가리키지 않는 첫 Deployment */

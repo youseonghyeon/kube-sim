@@ -674,6 +674,56 @@ pre {
   grid-template-columns: 1fr 1fr;
   gap: 8px;
 }
+/* Ingress 규칙 한 줄: Host · 경로 · Service · 포트 · 지우기 */
+.rules {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+/* 두 줄: [Host ········ 경로 · 지우기] / [→ Service ···· 포트] — 기본 폭 340px 에서도 Host 가 잘리지 않게 */
+.rule-row {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) 72px 24px;
+  grid-template-areas:
+    "host host path del"
+    "arrow svc port .";
+  gap: 4px;
+  align-items: start;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.r-host {
+  grid-area: host;
+}
+.r-path {
+  grid-area: path;
+}
+.r-del {
+  grid-area: del;
+  margin-top: 2px;
+}
+.r-arrow {
+  grid-area: arrow;
+  align-self: center;
+  color: var(--ink-3);
+}
+.r-svc {
+  grid-area: svc;
+}
+.r-port {
+  grid-area: port;
+}
+.rule-cell {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.rule-row .input {
+  min-width: 0;
+  padding-left: 6px;
+  padding-right: 6px;
+}
 
 /* GitOps: Git · Application */
 .git-box,

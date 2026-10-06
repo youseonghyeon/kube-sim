@@ -11,9 +11,11 @@ import { exampleById, resolveCommand, type TryAction } from "../model/examples";
 import { appGet } from "../core/gitops/cli";
 import { deploymentHash, HASH_LABEL, revisionOf } from "../core/controllers/deployment";
 import { sim, simTime, simVersion } from "../model/sim";
-import { clusterDef, drawerOpen, drawerTab, exampleId, findManifest, INSPECTOR_MIN, INSPECTOR_WIDE, inspectorOpen, inspectorWidth, setInspectorWidth, toggleInspector, toggleInspectorWide, removeManifest, selection, updateManifest, updateNodeDef, updateServiceManifest } from "../model/store";
+import { addManifest, clusterDef, drawerOpen, drawerTab, exampleId, findManifest, updateIngressManifest, INSPECTOR_MIN, INSPECTOR_WIDE, inspectorOpen, inspectorWidth, setInspectorWidth, toggleInspector, toggleInspectorWide, removeManifest, selection, updateManifest, updateNodeDef, updateServiceManifest } from "../model/store";
 import { toneOf } from "../model/view";
 import { toYaml } from "../model/yaml";
+import { flattenRules, hostError, ingressNginxManifests, pathError, setRules, type RuleRow } from "../model/ingressForm";
+import { NGINX_SERVICE } from "../core/net/ingress";
 import { Icon } from "./Icons";
 
 type Tab = "overview" | "settings" | "iptables" | "describe" | "yaml";
@@ -97,7 +99,8 @@ function InspectorPanel() {
   const sel = selection.value;
   const tab = useSignal<Tab>("overview");
   const obj = sel ? sim.cluster.api.get(sel.kind as KObject["kind"], sel.name, sel.namespace ?? "default") : undefined;
-  const hasSettings = obj?.kind === "Deployment" || obj?.kind === "Node" || (obj?.kind === "Service" && !!findManifest("Service", obj.metadata.name));
+  const hasSettings =
+    obj?.kind === "Deployment" || obj?.kind === "Node" || (obj?.kind === "Service" && !!findManifest("Service", obj.metadata.name)) || (obj?.kind === "Ingress" && !!findManifest("Ingress", obj.metadata.name));
   const hasIptables = obj?.kind === "Node";
   useEffect(() => {
     if ((tab.value === "settings" && !hasSettings) || (tab.value === "iptables" && !hasIptables)) tab.value = "overview";
@@ -152,6 +155,7 @@ function InspectorPanel() {
         {tab.value === "settings" && obj.kind === "Deployment" && <DeploymentSettings d={obj} />}
         {tab.value === "settings" && obj.kind === "Node" && <NodeSettings n={obj} />}
         {tab.value === "settings" && obj.kind === "Service" && <ServiceSettings name={obj.metadata.name} />}
+        {tab.value === "settings" && obj.kind === "Ingress" && <IngressSettings name={obj.metadata.name} />}
         {tab.value === "iptables" && obj.kind === "Node" && <IptablesView node={obj.metadata.name} />}
         {tab.value === "describe" && (
           <pre class="term">{obj.kind === "Application" ? appGet(sim.cluster, obj) : runKubectl(sim.cluster, `describe ${obj.kind.toLowerCase()} ${obj.metadata.name}`).output}</pre>
@@ -814,13 +818,20 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
 function TextInput({ value, onCommit, validate, list, placeholder }: { value: string; onCommit: (v: string) => void; validate?: (v: string) => string | undefined; list?: string; placeholder?: string }) {
   const draft = useSignal(value);
   const err = useSignal<string | undefined>(undefined);
+  // 바깥 값이 실제로 바뀌었을 때만 고쳐 쓰던 글자를 덮는다 — 처음 그린 뒤 늦게 도는 effect 가 그사이 입력을 지우지 않게
+  const shown = useRef(value);
   useEffect(() => {
+    if (shown.current === value) return;
+    shown.current = value;
     draft.value = value;
     err.value = undefined;
   }, [value]);
   const commit = () => {
     const v = draft.value.trim();
-    if (v === value) return;
+    if (v === value) {
+      err.value = undefined;
+      return;
+    }
     const e = validate?.(v);
     err.value = e;
     if (!e) onCommit(v);
@@ -1156,6 +1167,7 @@ function IngressOverview({ ing }: { ing: Ingress }) {
   const urls = ts && address ? [`https://${address}/`] : hosts.map((h) => `http://${h}/`);
   return (
     <>
+      <NoControllerNote ing={ing} />
       <div class="callout">
         <div class="small">
           {ts
@@ -1203,6 +1215,172 @@ function IngressOverview({ ing }: { ing: Ingress }) {
       </div>
       <h3>이벤트</h3>
       <Events uid={ing.metadata.uid} />
+    </>
+  );
+}
+
+/** class 를 처리할 컨트롤러가 없으면 아무도 이 Ingress 를 보지 않는다 — 주소가 안 붙는 이유와 고치는 법 */
+function NoControllerNote({ ing }: { ing: Ingress }) {
+  const cls = ing.spec.ingressClassName;
+  if (cls === "tailscale") return null;
+  if (cls === "nginx" && sim.cluster.api.get("Service", NGINX_SERVICE, "default")) return null;
+  return (
+    <div class="callout warn">
+      <div class="callout-title">{cls === "nginx" ? "ingress-nginx 컨트롤러가 없습니다" : `class "${cls ?? "(없음)"}" 를 처리할 컨트롤러가 없습니다`}</div>
+      <div class="small">
+        Ingress 는 규칙일 뿐이고, 그 class 를 맡은 컨트롤러가 있어야 ADDRESS 가 붙고 요청이 갑니다. 이 시뮬레이터에는 nginx(설치 필요)와 tailscale(오퍼레이터가 있음) 두 가지가 있습니다.
+      </div>
+      {cls === "nginx" && (
+        <button class="btn sm" onClick={() => ingressNginxManifests().forEach((m) => addManifest(m))} title="helm install ingress-nginx 의 축소판: 컨트롤러 Deployment + LoadBalancer Service 를 매니페스트에 더합니다">
+          ingress-nginx 설치
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** Ingress 매니페스트 편집: class · funnel · 규칙(Host·경로 → Service:포트) · 기본 backend */
+function IngressSettings({ name }: { name: string }) {
+  const m = findManifest("Ingress", name);
+  if (!m) return <p class="note">이 Ingress 는 매니페스트에 없습니다 (kubectl 로 만듦).</p>;
+  const ing = sim.cluster.api.get("Ingress", name, "default");
+  const services = sim.cluster.api.list("Service", "default").filter((s) => s.metadata.name !== NGINX_SERVICE);
+  const portOf = (svc: string) => services.find((s) => s.metadata.name === svc)?.spec.ports[0]?.port ?? 80;
+  const rows = flattenRules(m);
+  const ts = m.spec.ingressClassName === "tailscale";
+  const setRow = (i: number, patch: Partial<RuleRow>) =>
+    updateIngressManifest(name, (x) => {
+      const next = flattenRules(x);
+      next[i] = { ...next[i]!, ...patch };
+      setRules(x, next);
+    });
+  const svcOptions = (cur: string) => (
+    <>
+      {!services.some((s) => s.metadata.name === cur) && <option value={cur}>{cur} (없음)</option>}
+      {services.map((s) => (
+        <option key={s.metadata.uid} value={s.metadata.name}>
+          {s.metadata.name}
+        </option>
+      ))}
+    </>
+  );
+  return (
+    <>
+      <p class="note">여기서 바꾸면 매니페스트를 고쳐 kubectl apply 한 것과 같습니다.</p>
+      {ing && <NoControllerNote ing={ing} />}
+      <Field label="ingressClassName" hint="어느 컨트롤러가 이 규칙을 처리하나 — nginx: LoadBalancer IP 로 들어옴 · tailscale: 프록시 Pod 가 tailnet 기기로 붙음">
+        <select
+          class="input"
+          value={m.spec.ingressClassName ?? "nginx"}
+          onChange={(e) =>
+            updateIngressManifest(name, (x) => {
+              x.spec.ingressClassName = e.currentTarget.value;
+              // tailnet 기기 이름은 tls.hosts 에서 온다
+              if (x.spec.ingressClassName === "tailscale" && !x.spec.tls?.length) x.spec.tls = [{ hosts: [name] }];
+            })
+          }
+        >
+          <option value="nginx">nginx</option>
+          <option value="tailscale">tailscale</option>
+        </select>
+      </Field>
+      {ts && (
+        <label class="check field">
+          <input
+            type="checkbox"
+            checked={m.metadata.annotations?.["tailscale.com/funnel"] === "true"}
+            onChange={(e) =>
+              updateIngressManifest(name, (x) => {
+                const ann = { ...x.metadata.annotations };
+                if (e.currentTarget.checked) ann["tailscale.com/funnel"] = "true";
+                else delete ann["tailscale.com/funnel"];
+                if (Object.keys(ann).length) x.metadata.annotations = ann;
+                else delete x.metadata.annotations;
+              })
+            }
+          />
+          funnel — 공인 인터넷에서도 접근 (끄면 tailnet 안에서만)
+        </label>
+      )}
+      <h3>규칙 (Host · 경로 → Service:포트)</h3>
+      {ts && <p class="muted small">tailscale 은 Host 를 보지 않습니다 (주소는 기기 이름 하나). 경로로만 나눕니다.</p>}
+      <div class="rules">
+        {rows.map((r, i) => (
+          <div key={i} class="rule-row" data-rule={i}>
+            <div class="rule-cell r-host">
+              <TextInput value={r.host} placeholder="* (모든 Host)" validate={hostError} onCommit={(v) => setRow(i, { host: v })} />
+            </div>
+            <div class="rule-cell r-path">
+              <TextInput value={r.path} validate={pathError} onCommit={(v) => setRow(i, { path: v })} />
+            </div>
+            <span class="r-arrow">→</span>
+            <select class="input r-svc" value={r.service} onChange={(e) => setRow(i, { service: e.currentTarget.value, port: portOf(e.currentTarget.value) })} aria-label="Service">
+              {svcOptions(r.service)}
+            </select>
+            <div class="rule-cell r-port">
+              <TextInput value={String(r.port)} validate={(v) => (/^\d+$/.test(v) && Number(v) > 0 && Number(v) < 65536 ? undefined : "1~65535")} onCommit={(v) => setRow(i, { port: Number(v) })} />
+            </div>
+            <button
+              class="icon-btn sm r-del"
+              title="이 규칙 지우기"
+              aria-label="규칙 지우기"
+              onClick={() =>
+                updateIngressManifest(name, (x) => {
+                  const next = flattenRules(x);
+                  next.splice(i, 1);
+                  setRules(x, next);
+                })
+              }
+            >
+              <Icon name="trash" size={14} />
+            </button>
+          </div>
+        ))}
+        {!rows.length && <p class="muted small">규칙 없음 — 아래 기본 backend 로만 보냅니다.</p>}
+      </div>
+      <div class="actions">
+        <button
+          class="btn sm"
+          disabled={!services.length}
+          onClick={() =>
+            updateIngressManifest(name, (x) => {
+              const svc = services[0]!.metadata.name;
+              setRules(x, [...flattenRules(x), { host: ts ? "" : `${svc}.example.com`, path: "/", pathType: "Prefix", service: svc, port: portOf(svc) }]);
+            })
+          }
+        >
+          <Icon name="plus" size={14} />
+          규칙 더하기
+        </button>
+      </div>
+      <Field label="기본 backend (defaultBackend)" hint="어느 규칙에도 맞지 않는 요청이 가는 곳. 없으면 nginx 는 404">
+        <select
+          class="input"
+          value={m.spec.defaultBackend?.service.name ?? ""}
+          onChange={(e) =>
+            updateIngressManifest(name, (x) => {
+              const v = e.currentTarget.value;
+              if (v) x.spec.defaultBackend = { service: { name: v, port: { number: portOf(v) } } };
+              else delete x.spec.defaultBackend;
+            })
+          }
+        >
+          <option value="">없음</option>
+          {svcOptions(m.spec.defaultBackend?.service.name ?? "")}
+        </select>
+      </Field>
+      <div class="actions">
+        <button
+          class="btn danger"
+          onClick={() => {
+            removeManifest("Ingress", name);
+            selection.value = null;
+          }}
+        >
+          <Icon name="trash" size={14} />
+          Ingress 지우기
+        </button>
+      </div>
     </>
   );
 }

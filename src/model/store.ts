@@ -1,7 +1,7 @@
 // 앱 상태: 사용자가 고치는 원본(노드 + 매니페스트), 선택, 화면 설정. localStorage 에 저장한다.
 // 클러스터의 "라이브" 상태는 sim.ts 의 Cluster 가 가진다 — kubectl 로 바꾼 것은 여기(매니페스트)에 돌아오지 않는다 (실제와 같다).
 import { effect, signal } from "@preact/signals";
-import type { DeploymentManifest, Manifest, ServiceManifest } from "../core/cluster";
+import type { DeploymentManifest, IngressManifest, Manifest, ServiceManifest } from "../core/cluster";
 import type { NodeDef } from "../core/kubelet";
 import type { ObjRef } from "../core/trace";
 import { DEFAULT_EXAMPLE, exampleById, type ClusterDef } from "./examples";
@@ -165,6 +165,14 @@ export function updateManifest(name: string, mutate: (m: DeploymentManifest) => 
 export function updateServiceManifest(name: string, mutate: (m: ServiceManifest) => void): void {
   const def = structuredClone(clusterDef.value);
   const m = def.manifests.find((x): x is ServiceManifest => x.kind === "Service" && x.metadata.name === name);
+  if (!m) return;
+  mutate(m);
+  clusterDef.value = def;
+}
+
+export function updateIngressManifest(name: string, mutate: (m: IngressManifest) => void): void {
+  const def = structuredClone(clusterDef.value);
+  const m = def.manifests.find((x): x is IngressManifest => x.kind === "Ingress" && x.metadata.name === name);
   if (!m) return;
   mutate(m);
   clusterDef.value = def;

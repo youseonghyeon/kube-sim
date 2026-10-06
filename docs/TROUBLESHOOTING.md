@@ -44,6 +44,8 @@
 | `EXTERNAL-IP <pending>` | MetalLB 주소 풀이 다 찼음 (192.168.0.240~250) | 안 쓰는 LoadBalancer Service 를 지우거나 ClusterIP 로 |
 | 앱 로그의 클라이언트 IP 가 노드 IP | externalTrafficPolicy: Cluster 의 SNAT | `kubectl patch svc … -p '{"spec":{"externalTrafficPolicy":"Local"}}'` (Ingress 컨트롤러의 Service 에) |
 | Local 로 바꾼 뒤 어떤 노드의 NodePort 로는 시간 초과 | 그 노드에 Pod 가 없으면 Local 은 버린다 | 앞단(LB)이 Pod 있는 노드로만 보내게 — MetalLB 는 자동으로 그렇게 한다 |
+| `kubectl get ingress` 의 ADDRESS 가 비어 있음 (nginx 클래스) | 그 class 를 처리할 컨트롤러(ingress-nginx)가 없다 — Ingress 는 규칙일 뿐 | ingress-nginx 설치 (인스펙터의 "ingress-nginx 설치" = 컨트롤러 Deployment + LoadBalancer Service) 또는 tailscale 클래스 |
+| 막 만든 LoadBalancer IP 로 curl 이 `Couldn't connect` ("규칙을 쓰기 전") | kube-proxy 가 노드에 규칙을 쓰기 전 (반영 1초) | 잠깐 뒤 다시 |
 | ingress-nginx 의 `404 Not Found` | Host·경로에 맞는 Ingress 규칙이 없음 (IP 로 접속하면 Host 가 IP) | 도메인으로 접속하거나 규칙·defaultBackend 추가 |
 | ingress-nginx 의 `503 Service Temporarily Unavailable` | 규칙의 Service 에 ready 엔드포인트가 없음 | `kubectl get endpoints <svc>` |
 | `*.ts.net` 이 공인 인터넷에서 `Could not resolve host` | Ingress 에 `tailscale.com/funnel: "true"` 가 없음 (tailnet 안에서만) | annotation 추가 (tailnet 정책에 funnel 허용도 필요) |

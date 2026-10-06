@@ -340,6 +340,39 @@ await page.locator(".tree-row", { hasText: "worker-1" }).first().click();
 await page.waitForTimeout(200);
 await page.screenshot({ path: `${OUT}/23-node-usage.png` });
 
+// 15b) Ingress 를 화면에서 만들고 고치기
+console.log("15b) Ingress 만들기");
+await page.click(".menu-btn");
+await page.click('.menu-item[data-example="service"]');
+await page.locator('button[aria-label="Ingress 추가"]').click();
+await waitFor(async () => (await page.locator('[data-tree="ingress/web"]').count()) === 1, "Ingress web 이 목록에", 5000);
+check(true, "+ Ingress 로 Service web 을 가리키는 Ingress 가 생긴다");
+await page.locator(".tabs button", { hasText: "설정" }).click();
+check((await page.locator(".insp-body select.input").first().inputValue()) === "tailscale", "ingress-nginx 가 없으면 tailscale 클래스로 만든다", "ingressForm.ts newIngress");
+await page.locator(".insp-body select.input").first().selectOption("nginx");
+await waitFor(async () => (await page.locator(".callout", { hasText: "ingress-nginx 컨트롤러가 없습니다" }).count()) === 1, "컨트롤러 없음 안내", 5000);
+check(true, "nginx 로 바꾸면 컨트롤러가 없다는 안내와 설치 단추");
+await page.locator("button", { hasText: "규칙 더하기" }).click();
+check((await page.locator(".rule-row").count()) === 1, "규칙 더하기로 규칙 줄이 생긴다", "Inspector IngressSettings");
+await page.locator(".rule-row .input").first().fill("Bad_Host");
+await page.locator(".rule-row .input").first().press("Enter");
+check((await page.locator(".rule-row .field-err").count()) === 1, "잘못된 Host 는 확정하지 않고 이유를 보인다", "ingressForm.ts hostError");
+await page.locator(".rule-row .input").first().fill("web.example.com");
+await page.locator(".rule-row .input").first().press("Enter");
+await page.screenshot({ path: `${OUT}/23b-ingress-settings.png` });
+await page.locator("button", { hasText: "ingress-nginx 설치" }).click();
+await page.selectOption(".transport .speed", "10");
+await waitFor(async () => ((await page.locator('[data-tree="service/ingress-nginx-controller"]').count()) === 1), "컨트롤러 Service", 5000);
+await page.locator(".tabs button", { hasText: "개요" }).click();
+await waitFor(async () => (await page.locator(".insp-body .rows").textContent())?.includes("192.168.0.240"), "Ingress ADDRESS", 30000);
+check(true, "ingress-nginx 를 설치하면 Ingress 에 LoadBalancer IP 가 붙는다");
+await waitFor(async () => (await page.locator('[data-tree="service/ingress-nginx-controller"] .tree-count').textContent()) === "1", "컨트롤러 엔드포인트 ready", 30000);
+await page.waitForTimeout(300); // kube-proxy 규칙 반영 1초 (10× 속도)
+await page.locator("button", { hasText: "바깥에서 curl http://web.example.com/" }).click();
+await page.waitForTimeout(300);
+check((await page.locator(".drawer").textContent())?.includes("Welcome to nginx"), "만든 Ingress 로 바깥에서 web 까지 닿는다", "ingress.ts / request.ts viaIngressNginx");
+await page.screenshot({ path: `${OUT}/23c-ingress-created.png` });
+
 // 16) 패널 크기: 인스펙터 폭·서랍 높이 끌기, 접기·펴기, 저장
 console.log("16) 패널 크기");
 await page.click(".menu-btn");

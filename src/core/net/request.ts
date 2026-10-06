@@ -430,7 +430,15 @@ export function simulateExternal(c: Cluster, url: string, clientIp = CLIENT_IP):
     });
     const rule = c.kubeProxies.get(node)?.currentRules.find((r) => r.lbIP === ip && r.port === t.port);
     if (!rule) {
-      steps.push({ kind: "dnat", actor: `iptables@${node}`, text: `${ip}:${t.port} 에 맞는 규칙 없음 (Service 포트는 ${svc.spec.ports.map((p) => p.port).join(", ")})`, at: { node } });
+      const portOk = svc.spec.ports.some((p) => p.port === t.port);
+      steps.push({
+        kind: "dnat",
+        actor: `iptables@${node}`,
+        text: portOk
+          ? `${ip}:${t.port} 에 맞는 규칙이 아직 없음 — Service ${svc.metadata.name} 가 막 생겨 kube-proxy 가 이 노드에 규칙을 쓰기 전 (조금 뒤 다시)`
+          : `${ip}:${t.port} 에 맞는 규칙 없음 (Service 포트는 ${svc.spec.ports.map((p) => p.port).join(", ")})`,
+        at: { node },
+      });
       return refused(req, steps, ip, 1);
     }
     return viaService(c, { node, ip: clientIp, outside: "lb" }, rule, req, steps);
