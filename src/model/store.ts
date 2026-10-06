@@ -54,6 +54,9 @@ interface UiPrefs {
   drawerOpen: boolean;
   drawerTab: "log" | "kubectl";
   showApi: boolean;
+  inspectorOpen?: boolean;
+  inspectorWidth?: number;
+  drawerHeight?: number;
 }
 const ui = load<UiPrefs>(UI_KEY);
 export const drawerOpen = signal(ui?.drawerOpen ?? true);
@@ -63,12 +66,79 @@ export const showApi = signal(ui?.showApi ?? false);
 /** 로그에서 고른 오브젝트에 관한 줄만 */
 export const logOnlySelected = signal(false);
 
+// ---------- 패널 크기 (net-sim 과 같은 방식): 브라우저별 편의 설정이라 localStorage ----------
+
+/** 캔버스가 이보다 좁아지게는 넓히지 않는다 (왼쪽 목록 232px 도 뺀다) */
+const CANVAS_MIN = 360;
+const SIDEBAR_W = 232;
+
+export const INSPECTOR_MIN = 280;
+export const INSPECTOR_MAX = 760;
+export const INSPECTOR_DEFAULT = 340;
+/** "넓게" — describe·YAML 이 가로 스크롤 없이 읽히는 폭 */
+export const INSPECTOR_WIDE = 560;
+/** 접힌 상태에서는 레일만 (펼치기 버튼 28px + 양옆 여백) */
+export const INSPECTOR_RAIL = 40;
+export const inspectorOpen = signal<boolean>(ui?.inspectorOpen ?? true);
+export const inspectorWidth = signal<number>(clampInspector(ui?.inspectorWidth ?? INSPECTOR_DEFAULT));
+
+function clampInspector(w: number): number {
+  const fit = typeof window === "undefined" ? INSPECTOR_MAX : window.innerWidth - SIDEBAR_W - CANVAS_MIN;
+  return Math.min(Math.max(INSPECTOR_MIN, Math.min(INSPECTOR_MAX, fit)), Math.max(INSPECTOR_MIN, Math.round(Number.isFinite(w) ? w : INSPECTOR_DEFAULT)));
+}
+
+export function setInspectorWidth(w: number): void {
+  inspectorWidth.value = clampInspector(w);
+}
+
+/** 보통 ↔ 넓게 */
+export function toggleInspectorWide(): void {
+  setInspectorWidth(inspectorWidth.value >= INSPECTOR_WIDE - 40 ? INSPECTOR_DEFAULT : INSPECTOR_WIDE);
+}
+
+export function toggleInspector(): void {
+  inspectorOpen.value = !inspectorOpen.value;
+}
+
+/** 서랍 내용 높이(px, 머리 줄 36px 제외). 끝까지 올리면 상단바 바로 아래까지 */
+export const DRAWER_MIN = 120;
+export const DRAWER_DEFAULT = 260;
+const TOPBAR_H = 44;
+const DRAWER_HEAD_H = 36;
+export const drawerHeight = signal<number>(clampDrawer(ui?.drawerHeight ?? DRAWER_DEFAULT));
+
+export function drawerMaxHeight(): number {
+  return typeof window === "undefined" ? Number.POSITIVE_INFINITY : Math.max(DRAWER_MIN, window.innerHeight - TOPBAR_H - DRAWER_HEAD_H - 2);
+}
+
+function clampDrawer(h: number): number {
+  return Math.min(drawerMaxHeight(), Math.max(DRAWER_MIN, Math.round(Number.isFinite(h) ? h : DRAWER_DEFAULT)));
+}
+
+export function setDrawerHeight(h: number): void {
+  drawerHeight.value = clampDrawer(h);
+}
+
+/** 기본 ↔ 끝까지 */
+export function toggleDrawerMax(): void {
+  setDrawerHeight(drawerHeight.value >= drawerMaxHeight() - 8 ? DRAWER_DEFAULT : drawerMaxHeight());
+}
+
 effect(() => save(DEF_KEY, { exampleId: exampleId.value, def: clusterDef.value } satisfies Saved));
 effect(() => {
   save(THEME_KEY, theme.value);
   if (typeof document !== "undefined") document.documentElement.dataset.theme = theme.value;
 });
-effect(() => save(UI_KEY, { drawerOpen: drawerOpen.value, drawerTab: drawerTab.value, showApi: showApi.value } satisfies UiPrefs));
+effect(() =>
+  save(UI_KEY, {
+    drawerOpen: drawerOpen.value,
+    drawerTab: drawerTab.value,
+    showApi: showApi.value,
+    inspectorOpen: inspectorOpen.value,
+    inspectorWidth: inspectorWidth.value,
+    drawerHeight: drawerHeight.value,
+  } satisfies UiPrefs),
+);
 
 export function toggleTheme(): void {
   theme.value = theme.value === "dark" ? "light" : "dark";

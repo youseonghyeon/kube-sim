@@ -1,6 +1,6 @@
 // 오른쪽 인스펙터: 고른 오브젝트의 개요·설정·describe·YAML. 아무것도 안 골랐으면 예제의 "해 볼 것".
 import { useSignal } from "@preact/signals";
-import { useEffect, useMemo } from "preact/hooks";
+import { useEffect, useMemo, useRef } from "preact/hooks";
 import { controllerOf, isNodeReady, limitOf, NODE_LEASE_NS, qosClass, type Application, type Deployment, type Ingress, type KObject, type Node, type Pod, type ReplicaSet, type Service } from "../core/api/types";
 import type { DeploymentManifest, Manifest } from "../core/cluster";
 import { eventSource, nodeStatusText, podRestartsText, podStatusText, rolloutStatusLine, runKubectl } from "../core/kubectl";
@@ -11,7 +11,7 @@ import { exampleById, resolveCommand, type TryAction } from "../model/examples";
 import { appGet } from "../core/gitops/cli";
 import { deploymentHash, HASH_LABEL, revisionOf } from "../core/controllers/deployment";
 import { sim, simTime, simVersion } from "../model/sim";
-import { clusterDef, drawerOpen, drawerTab, exampleId, findManifest, removeManifest, selection, updateManifest, updateNodeDef, updateServiceManifest } from "../model/store";
+import { clusterDef, drawerOpen, drawerTab, exampleId, findManifest, INSPECTOR_MIN, INSPECTOR_WIDE, inspectorOpen, inspectorWidth, setInspectorWidth, toggleInspector, toggleInspectorWide, removeManifest, selection, updateManifest, updateNodeDef, updateServiceManifest } from "../model/store";
 import { toneOf } from "../model/view";
 import { toYaml } from "../model/yaml";
 import { Icon } from "./Icons";
@@ -24,7 +24,75 @@ export function runAndShow(cmd: string): void {
   drawerOpen.value = true;
 }
 
+/**
+ * 오른쪽 틀: 왼쪽 가장자리를 끌어 폭 조절(두 번 누르면 보통 ↔ 넓게), 최소보다 한참 더 끌면 접힘(레일만), ⌘\ 로 접기·펴기.
+ * net-sim 의 인스펙터와 같은 방식. 폭·접힘은 브라우저에 저장한다.
+ */
 export function Inspector() {
+  const resizing = useRef<{ start: number; grab: number } | null>(null);
+  if (!inspectorOpen.value) {
+    return (
+      <div class="inspector-frame collapsed">
+        <button class="icon-btn" onClick={toggleInspector} title="오른쪽 패널 펼치기 (⌘\)" aria-label="오른쪽 패널 펼치기">
+          <Icon name="panel" size={18} />
+        </button>
+      </div>
+    );
+  }
+  // 패널 오른쪽 끝은 창에 붙어 있으므로 폭 = 창 오른쪽 - 포인터 x (- 잡은 자리)
+  const onDown = (e: PointerEvent) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    // 잡은 자리와 실제 가장자리의 차이 — 누르기만 해도 폭이 튀지 않게
+    resizing.current = { start: inspectorWidth.peek(), grab: window.innerWidth - e.clientX - inspectorWidth.peek() };
+    document.body.classList.add("resizing-col");
+  };
+  const onMove = (e: PointerEvent) => {
+    const r = resizing.current;
+    if (!r) return;
+    const w = window.innerWidth - e.clientX - r.grab;
+    if (w < INSPECTOR_MIN - 70) {
+      // 최소 폭보다 한참 더 끌면 접는다 — 다시 펴면 끌기 전 폭으로
+      onUp(e);
+      setInspectorWidth(r.start);
+      toggleInspector();
+      return;
+    }
+    setInspectorWidth(w);
+  };
+  const onUp = (e: PointerEvent) => {
+    if (!resizing.current) return;
+    resizing.current = null;
+    (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
+    document.body.classList.remove("resizing-col");
+  };
+  const wide = inspectorWidth.value >= INSPECTOR_WIDE - 40;
+  return (
+    <div class="inspector-frame">
+      <div
+        class="inspector-resize"
+        onPointerDown={onDown}
+        onPointerMove={onMove}
+        onPointerUp={onUp}
+        onPointerCancel={onUp}
+        onDblClick={toggleInspectorWide}
+        title="끌어서 폭 조절 · 두 번 눌러 보통/넓게 · 오른쪽 끝까지 끌면 접힘"
+      />
+      <InspectorPanel />
+      <div class="inspector-tools">
+        <button class="icon-btn sm" onClick={toggleInspectorWide} title={wide ? "보통 폭" : "넓게 (describe·YAML 이 한눈에)"} aria-label={wide ? "보통 폭" : "넓게"}>
+          <Icon name="widen" size={15} />
+        </button>
+        <button class="icon-btn sm" onClick={toggleInspector} title="오른쪽 패널 접기 (⌘\)" aria-label="오른쪽 패널 접기">
+          <Icon name="panel" size={15} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function InspectorPanel() {
   simVersion.value;
   const sel = selection.value;
   const tab = useSignal<Tab>("overview");

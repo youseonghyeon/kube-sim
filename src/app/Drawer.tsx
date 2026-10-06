@@ -5,7 +5,7 @@ import type { NetStep } from "../core/net/request";
 import type { TraceEvent } from "../core/trace";
 import { fmtClock } from "../core/units";
 import { kubectlHistory, sim, simVersion } from "../model/sim";
-import { drawerOpen, drawerTab, logOnlySelected, selection, showApi } from "../model/store";
+import { DRAWER_MIN, drawerHeight, drawerOpen, drawerTab, logOnlySelected, selection, setDrawerHeight, showApi, toggleDrawerMax } from "../model/store";
 import { Icon } from "./Icons";
 
 /** 로그 창에 그리는 줄 수 상한 */
@@ -14,8 +14,46 @@ const LOG_ROWS = 400;
 export function Drawer() {
   const open = drawerOpen.value;
   const tab = drawerTab.value;
+  // 위쪽 가장자리를 끌어 높이 조절 (두 번 누르면 기본 ↔ 끝까지), 최소보다 한참 아래로 끌면 접는다 — net-sim 의 로그와 같은 방식
+  const resizing = useRef<{ y: number; h: number } | null>(null);
+  const onDown = (e: PointerEvent) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    resizing.current = { y: e.clientY, h: drawerHeight.peek() };
+    document.body.classList.add("resizing-row");
+  };
+  const onMove = (e: PointerEvent) => {
+    const r = resizing.current;
+    if (!r) return;
+    const h = r.h + (r.y - e.clientY);
+    if (h < DRAWER_MIN - 70) {
+      onUp(e);
+      setDrawerHeight(r.h); // 다시 펴면 끌기 전 높이로
+      drawerOpen.value = false;
+      return;
+    }
+    setDrawerHeight(h);
+  };
+  const onUp = (e: PointerEvent) => {
+    if (!resizing.current) return;
+    resizing.current = null;
+    (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
+    document.body.classList.remove("resizing-row");
+  };
   return (
-    <section class={`drawer${open ? " open" : ""}`}>
+    <section class={`drawer${open ? " open" : ""}`} style={{ "--drawer-h": `${drawerHeight.value}px` }}>
+      {open && (
+        <div
+          class="drawer-resize"
+          onPointerDown={onDown}
+          onPointerMove={onMove}
+          onPointerUp={onUp}
+          onPointerCancel={onUp}
+          onDblClick={toggleDrawerMax}
+          title="끌어서 높이 조절 · 두 번 눌러 기본/끝까지 · 아래 끝까지 끌면 접힘"
+        />
+      )}
       <div class="drawer-head">
         <div class="tabs inline" role="tablist">
           <button

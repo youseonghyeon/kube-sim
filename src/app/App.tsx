@@ -3,7 +3,7 @@ import { useEffect, useLayoutEffect, useRef } from "preact/hooks";
 import { fmtClock } from "../core/units";
 import { EXAMPLE_GROUPS, EXAMPLES, exampleById } from "../model/examples";
 import { running, sim, simNotice, simTime, speed, togglePlay } from "../model/sim";
-import { exampleId, loadExample, selection, theme, toggleTheme } from "../model/store";
+import { drawerHeight, exampleId, INSPECTOR_RAIL, inspectorOpen, inspectorWidth, loadExample, selection, setDrawerHeight, setInspectorWidth, theme, toggleInspector, toggleTheme } from "../model/store";
 import { Canvas } from "./Canvas";
 import { Drawer } from "./Drawer";
 import { Icon } from "./Icons";
@@ -30,6 +30,12 @@ export function App() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // ⌘\ (Ctrl+\): 오른쪽 패널 접기·펴기 — 입력칸 안에서도 (net-sim 과 같은 단축키)
+      if ((e.metaKey || e.ctrlKey) && e.code === "Backslash") {
+        e.preventDefault();
+        toggleInspector();
+        return;
+      }
       const el = e.target as HTMLElement;
       if (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
@@ -40,8 +46,17 @@ export function App() {
         if (!running.value) sim.step();
       } else if (e.key === "Escape") selection.value = null;
     };
+    // 창이 작아지면 서랍이 상단바를 덮지 않게, 인스펙터가 캔버스를 다 먹지 않게 다시 자른다
+    const onResize = () => {
+      setDrawerHeight(drawerHeight.peek());
+      setInspectorWidth(inspectorWidth.peek());
+    };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("resize", onResize);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("resize", onResize);
+    };
   }, []);
 
   const isRunning = running.value;
@@ -95,7 +110,7 @@ export function App() {
           </button>
         </div>
       </header>
-      <div class="body">
+      <div class="body" style={{ "--inspector-w": `${inspectorOpen.value ? inspectorWidth.value : INSPECTOR_RAIL}px` }}>
         <Sidebar />
         <Canvas />
         <Inspector />

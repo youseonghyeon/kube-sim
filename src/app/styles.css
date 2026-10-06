@@ -1225,6 +1225,72 @@ pre {
   color: var(--ink-3);
 }
 
+/* ---------- 인스펙터 틀: 폭 조절 손잡이 · 도구(넓게·접기) · 접힌 레일 ---------- */
+.inspector-frame {
+  position: relative;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  /* 서랍을 끝까지 올려 이 줄의 높이가 0 이 돼도 도구 단추가 서랍 위로 삐져나오지 않게: 잘라 내고, 안쪽 z-index 가 밖으로 새지 않게 */
+  overflow: hidden;
+  isolation: isolate;
+}
+.inspector-frame.collapsed {
+  display: flex;
+  justify-content: center;
+  padding-top: 10px;
+  background: var(--surface);
+  border-left: 1px solid var(--line);
+}
+.inspector-frame.collapsed .icon-btn {
+  width: 28px;
+  height: 28px;
+}
+.inspector-resize {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 5;
+  width: 6px;
+  cursor: col-resize;
+}
+.drawer-resize {
+  position: absolute;
+  top: -3px;
+  left: 0;
+  right: 0;
+  z-index: 5;
+  height: 6px;
+  cursor: row-resize;
+}
+.inspector-resize:hover,
+.drawer-resize:hover,
+body.resizing-col .inspector-resize,
+body.resizing-row .drawer-resize {
+  background: var(--accent-soft);
+}
+/* 끄는 동안: 글자 선택·다른 커서가 끼어들지 않게 */
+body.resizing-col,
+body.resizing-row {
+  user-select: none;
+}
+body.resizing-col * {
+  cursor: col-resize !important;
+}
+body.resizing-row * {
+  cursor: row-resize !important;
+}
+.inspector-tools {
+  position: absolute;
+  top: 9px;
+  right: 8px;
+  z-index: 4;
+  display: flex;
+  gap: 2px;
+}
+
 /* ---------- 인스펙터 ---------- */
 .inspector {
   display: flex;
@@ -1235,8 +1301,12 @@ pre {
 }
 .insp-head {
   position: relative;
-  padding: 12px 14px 10px;
+  /* 오른쪽은 도구 단추(넓게·접기) 자리 — 머리 글자가 단추 밑으로 들어가지 않게 */
+  padding: 12px 76px 10px 14px;
   border-bottom: 1px solid var(--line);
+}
+.insp-head:has(.insp-close) {
+  padding-right: 106px;
 }
 .insp-kind {
   color: var(--ink-3);
@@ -1258,7 +1328,7 @@ pre {
 .insp-close {
   position: absolute;
   top: 10px;
-  right: 10px;
+  right: 72px;
 }
 .badge {
   padding: 1px 7px;
@@ -1626,6 +1696,7 @@ pre {
 
 /* ---------- 아래 서랍 ---------- */
 .drawer {
+  position: relative;
   display: grid;
   grid-template-rows: 36px;
   border-top: 1px solid var(--line);

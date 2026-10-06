@@ -1,6 +1,6 @@
 import type { JSX } from "preact";
 
-export type IconName = "mark" | "play" | "pause" | "step" | "refresh" | "sun" | "moon" | "plus" | "trash" | "chevron" | "close" | "send" | "terminal" | "list" | "power";
+export type IconName = "mark" | "play" | "pause" | "step" | "refresh" | "sun" | "moon" | "plus" | "trash" | "chevron" | "close" | "send" | "terminal" | "list" | "power" | "panel" | "widen";
 
 const PATHS: Record<IconName, JSX.Element> = {
   // 바퀴(조타륜) 대신 단순한 표식: 원 안의 세 점 — 컨트롤 루프
@@ -40,6 +40,13 @@ const PATHS: Record<IconName, JSX.Element> = {
     </>
   ),
   power: <path d="M12 3.5v8M7.2 6.3a7 7 0 1 0 9.6 0" />,
+  panel: (
+    <>
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <path d="M15 5v14" />
+    </>
+  ),
+  widen: <path d="M3 12h18M7 8l-4 4 4 4M17 8l4 4-4 4" />,
   list: <path d="M8 6.5h12M8 12h12M8 17.5h12M4 6.5h.01M4 12h.01M4 17.5h.01" />,
 };
 
