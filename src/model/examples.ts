@@ -1,5 +1,5 @@
 // 예제: 노드 + 매니페스트 + "해 볼 것"(학습 포인트를 직접 확인하는 행동).
-import { application, deployment, ingress, pdb, service, type Manifest } from "../core/cluster";
+import { application, configMap, deployment, ingress, pdb, secret, service, type Manifest } from "../core/cluster";
 
 const NET_SIM_REPO = "https://github.com/youseonghyeon/net-sim.git";
 import type { Pod } from "../core/api/types";
@@ -29,7 +29,9 @@ export interface TryStep {
     /** CI: 새 이미지를 빌드해 Git 의 그 파일 image 태그를 바꿔 커밋 (github-actions) */
     | { type: "ci-bump"; repo: string; file: string }
     /** Git 에서 파일을 지우고 커밋 */
-    | { type: "git-rm"; repo: string; file: string };
+    | { type: "git-rm"; repo: string; file: string }
+    /** helm upgrade 흉내: values 의 설정으로 ConfigMap 을 바꾸고, checksum 이면 Pod 템플릿의 checksum/config 주석도 (설정 해시) */
+    | { type: "helm-upgrade"; configMap: string; deployment: string; data: Record<string, string>; checksum: boolean };
   /** 무엇을 보게 되나 (학습 포인트) */
   expect: string;
   /** 실패하는 것이 학습 포인트인 명령 (예: ClusterIP 로 ping) */
@@ -701,6 +703,106 @@ export const EXAMPLES: Example[] = [
       },
     ],
   },
+  {
+    id: "config-env",
+    title: "ConfigMap 을 바꿔도 Pod 는 그대로 (env · volume)",
+    summary: "설정 앱은 GREETING 을 env 로도, /etc/config 아래 파일로도 받습니다. ConfigMap 을 바꾸면 무엇이 언제 바뀌는지 — env 는 재시작 전까지 그대로, 파일은 1분쯤 뒤에, subPath 파일은 영영 그대로 — 를 봅니다.",
+    build: () => ({
+      nodes: [node("worker-1"), node("worker-2")],
+      manifests: [
+        configMap("app-config", { GREETING: "hello", MODE: "dev" }),
+        deployment("app", {
+          replicas: 1,
+          image: "example/config-app:1.0",
+          cpu: 50,
+          memory: 32,
+          port: 8080,
+          envFrom: [{ configMapRef: { name: "app-config" } }],
+          mounts: [
+            { name: "config", configMap: "app-config", mountPath: "/etc/config" },
+            { name: "config", configMap: "app-config", mountPath: "/etc/app/greeting", subPath: "GREETING" },
+          ],
+        }),
+        service("app", { selector: { app: "app" }, port: 80, targetPort: 8080 }),
+        deployment("client", { replicas: 1, image: "curlimages/curl:8.10.1", cpu: 50, memory: 32 }),
+      ],
+    }),
+    tries: [
+      { title: "설정 보기", command: "kubectl exec {pod:client} -- curl http://app", expect: "env 의 GREETING 과 파일 /etc/config/GREETING · subPath 파일 /etc/app/greeting 이 모두 hello 입니다." },
+      {
+        title: "ConfigMap 바꾸기",
+        command: `kubectl patch configmap app-config -p '{"data":{"GREETING":"안녕"}}'`,
+        expect: "API 의 ConfigMap 은 바로 바뀝니다. 하지만 Deployment 템플릿은 그대로라 롤아웃은 없습니다. 로그에 kubelet 이 'env 로 읽는 … 의 값은 그대로' 라고 남깁니다.",
+      },
+      { title: "바로 다시 보기", command: "kubectl exec {pod:client} -- curl http://app", expect: "아직 전부 hello 입니다. 파일은 kubelet 동기화 주기(축소판 1분) 뒤에 바뀝니다 — 상단의 +1분 을 누르세요." },
+      { title: "1분 뒤 다시 보기", command: "kubectl exec {pod:client} -- curl http://app", expect: "/etc/config/GREETING 만 안녕. env 는 hello 그대로(시작할 때 읽음), subPath 파일도 hello 그대로(subPath 는 갱신되지 않음). 앱이 파일을 요청마다 다시 읽으니 반영된 것이지, 시작할 때만 읽는 앱이면 여전히 hello 입니다." },
+      { title: "env 직접 보기", command: "kubectl exec {pod:app} -- printenv GREETING", expect: "hello — 컨테이너가 시작할 때 만든 env 입니다." },
+      { title: "재시작", command: "kubectl rollout restart deployment/app", expect: "새 Pod 는 지금의 ConfigMap 으로 env 를 만듭니다. 다시 '설정 보기' 를 누르면 셋 다 안녕입니다." },
+    ],
+  },
+  {
+    id: "config-checksum",
+    title: "Helm 의 checksum/config — 설정이 바뀌면 롤아웃",
+    summary: "helm upgrade 로 values 의 설정을 바꾸면 ConfigMap 만 바뀌고 Pod 는 재시작되지 않습니다. 차트가 Pod 템플릿에 checksum/config 주석(설정 내용의 해시)을 달면, 설정이 바뀔 때 템플릿이 바뀌어 롤링 업데이트가 일어납니다.",
+    build: () => ({
+      nodes: [node("worker-1"), node("worker-2")],
+      manifests: [
+        configMap("app-config", { GREETING: "hello" }),
+        deployment("app", { replicas: 2, image: "example/config-app:1.0", cpu: 50, memory: 32, port: 8080, envFrom: [{ configMapRef: { name: "app-config" } }] }),
+        service("app", { selector: { app: "app" }, port: 80, targetPort: 8080 }),
+        deployment("client", { replicas: 1, image: "curlimages/curl:8.10.1", cpu: 50, memory: 32 }),
+      ],
+    }),
+    tries: [
+      {
+        title: "helm upgrade (checksum 없는 차트)",
+        action: { type: "helm-upgrade", configMap: "app-config", deployment: "app", data: { GREETING: "안녕" }, checksum: false },
+        expect: "ConfigMap 의 GREETING 이 안녕이 됐지만 Deployment 는 그대로입니다. ReplicaSet 이 새로 생기지 않고, Pod 는 계속 hello 를 씁니다.",
+      },
+      { title: "확인", command: "kubectl exec {pod:client} -- curl http://app", expect: "env  GREETING=hello — 'Synced 인데 반영이 안 됨' 의 정체입니다." },
+      {
+        title: "helm upgrade (checksum/config 를 다는 차트)",
+        action: { type: "helm-upgrade", configMap: "app-config", deployment: "app", data: { GREETING: "안녕" }, checksum: true },
+        expect: "템플릿에 checksum/config 주석이 붙어 템플릿 해시가 바뀝니다 → 새 ReplicaSet 으로 롤링 업데이트. 새 Pod 는 안녕을 씁니다.",
+      },
+      {
+        title: "values 다시 바꾸기",
+        action: { type: "helm-upgrade", configMap: "app-config", deployment: "app", data: { GREETING: "반가워" }, checksum: true },
+        expect: "설정이 바뀌면 checksum 도 바뀌어 다시 롤아웃됩니다. kubectl rollout history deployment/app 으로 리비전을 보세요.",
+      },
+      { title: "확인", command: "kubectl exec {pod:client} -- curl http://app", expect: "env  GREETING=반가워" },
+    ],
+  },
+  {
+    id: "config-missing",
+    title: "없는 ConfigMap·Secret 을 가리키면 (CreateContainerConfigError)",
+    summary: "api 는 env 로 ConfigMap app-config 를, web 은 volume 으로 Secret web-tls 를 쓰는데 둘 다 아직 없습니다. 하나는 CreateContainerConfigError, 하나는 ContainerCreating(FailedMount)에 멈춥니다. 만들어 주면 kubelet 이 다시 시도해 뜹니다. Secret 이 암호화가 아니라 base64 라는 것도 봅니다.",
+    build: () => ({
+      nodes: [node("worker-1"), node("worker-2")],
+      manifests: [
+        secret("db", { password: "s3cr3t!" }),
+        deployment("api", {
+          replicas: 1,
+          image: "example/config-app:1.0",
+          cpu: 50,
+          memory: 32,
+          port: 8080,
+          envFrom: [{ configMapRef: { name: "app-config" } }],
+          env: [{ name: "DB_PASSWORD", valueFrom: { secretKeyRef: { name: "db", key: "password" } } }],
+        }),
+        deployment("web", { replicas: 1, image: "nginx:1.27", cpu: 50, memory: 32, port: 80, mounts: [{ name: "tls", secret: "web-tls", mountPath: "/etc/tls" }] }),
+      ],
+    }),
+    tries: [
+      { title: "Pod 상태", command: "kubectl get pods", expect: "api 는 CreateContainerConfigError(이미지는 받았지만 env 를 못 만듦), web 은 ContainerCreating(volume 을 못 붙여 이미지 pull 도 안 함)." },
+      { title: "api 의 이유", command: "kubectl describe pod {pod:api}", expect: 'Events 에 Error: configmap "app-config" not found.' },
+      { title: "web 의 이유", command: "kubectl describe pod {pod:web}", expect: 'Events 에 FailedMount — MountVolume.SetUp failed for volume "tls" : secret "web-tls" not found. 재시도 간격이 2초부터 두 배로 늘어납니다(최대 2분).' },
+      { title: "ConfigMap 만들기", command: "kubectl create configmap app-config --from-literal=GREETING=hello", expect: "10초 안에 kubelet 이 다시 시도해 api 가 Running 이 됩니다." },
+      { title: "Secret 만들기", command: "kubectl create secret generic web-tls --from-literal=tls.crt=CERT --from-literal=tls.key=KEY", expect: "다음 마운트 재시도 때 web 이 이미지를 받고 뜹니다 (재시도 간격에 따라 최대 2분)." },
+      { title: "Secret 들여다보기", command: "kubectl get secret db -o yaml", expect: "data.password 가 czNjcjN0IQ== — 암호화가 아니라 base64 입니다. 이 값을 볼 수 있는 사람(RBAC)은 비밀번호를 압니다." },
+      { title: "base64 풀기", command: "echo czNjcjN0IQ== | base64 -d", expect: "s3cr3t! — 그래서 Secret 은 Git 에 그대로 올리면 안 됩니다 (Sealed Secrets·External Secrets 같은 도구를 씁니다)." },
+    ],
+  },
 ];
 
 
@@ -716,6 +818,7 @@ export const EXAMPLE_GROUPS: { label: string; ids: string[] }[] = [
   { label: "배포·헬스", ids: ["rolling", "rollout-stuck", "graceful", "liveness"] },
   { label: "바깥 트래픽", ids: ["ingress", "source-ip", "tailscale"] },
   { label: "자원", ids: ["oom", "node-oom", "throttle"] },
+  { label: "설정", ids: ["config-env", "config-checksum", "config-missing"] },
   { label: "GitOps", ids: ["gitops"] },
 ];
 

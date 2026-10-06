@@ -2,7 +2,7 @@
 
 쿠버네티스가 "왜 이렇게 동작하는지" 를 직접 구성하고 한 단계씩 보며 익히는 학습 시뮬레이터. 자매 프로젝트 `../net-sim`(네트워크 시뮬레이터)과 같은 방식이다: 브라우저에서 돌고, 실제 클러스터에 연결하지 않으며, 모든 시뮬레이션은 결정론적. 디자인 품질이 최우선(`DESIGN.md`).
 
-지금 상태: **0·1단계 (2026-10-02).** Deployment·ReplicaSet·스케줄러·kubelet(pull·크래시 백오프·종료·heartbeat)·노드 장애(NotReady·taint·eviction)·kubectl 흉내·캔버스 UI. 2단계(Service·EndpointSlice·kube-proxy·CoreDNS·readiness), 3단계(롤링 업데이트·liveness·preStop·PDB/drain), 4단계(LoadBalancer·Ingress·externalTrafficPolicy·Tailscale funnel), 6단계(Argo CD 식 GitOps), 5a(requests/limits·OOMKilled·throttling, 2026-10-06)도 됨. 남은 것은 `docs/ROADMAP.md` 5단계의 나머지 후보.
+지금 상태: **0·1단계 (2026-10-02).** Deployment·ReplicaSet·스케줄러·kubelet(pull·크래시 백오프·종료·heartbeat)·노드 장애(NotReady·taint·eviction)·kubectl 흉내·캔버스 UI. 2단계(Service·EndpointSlice·kube-proxy·CoreDNS·readiness), 3단계(롤링 업데이트·liveness·preStop·PDB/drain), 4단계(LoadBalancer·Ingress·externalTrafficPolicy·Tailscale funnel), 6단계(Argo CD 식 GitOps), 5a(requests/limits·OOMKilled·throttling)·5b(ConfigMap/Secret 과 재시작, 2026-10-06)도 됨. 남은 것은 `docs/ROADMAP.md` 5단계의 나머지 후보(HPA·NetworkPolicy·StatefulSet).
 저장소: https://github.com/youseonghyeon/kube-sim (public). 배포: net-sim 과 같은 방식(아래 "배포" 절, 2026-10-05).
 
 ## 목적 — 누구의 어떤 이해를 바꾸나
@@ -32,15 +32,16 @@
   - `controllers/` 공통 워크큐(`base.ts`) + Deployment(롤링·Recreate·리비전)·ReplicaSet·EndpointSlice·disruption(PDB) + `nodelifecycle.ts`(node-lifecycle·taint-eviction) (나중에 HPA·StatefulSet)
   - `drain.ts` kubectl drain 진행(Eviction API, 5초 재시도), `net/traffic.ts` 부하 발생기
   - `scheduler.ts` 필터 → 점수 → 바인딩, FailedScheduling 문구
-  - `kubelet.ts` 노드마다 Pod 수명주기: 샌드박스·IP → 이미지 pull → 시작 → 크래시 백오프 → SIGTERM·정리, Lease heartbeat, readiness·liveness probe(timeoutSeconds), preStop, 전원 끄기·켜기, 자원(메모리 사용 → cgroup OOM·노드 OOM(oom_score), CPU 나눠 받기·throttling → 응답 시간) (startup probe 없음)
+  - `kubelet.ts` 노드마다 Pod 수명주기: 샌드박스·IP → 이미지 pull → 시작 → 크래시 백오프 → SIGTERM·정리, Lease heartbeat, readiness·liveness probe(timeoutSeconds), preStop, 전원 끄기·켜기, 자원(메모리 사용 → cgroup OOM·노드 OOM(oom_score), CPU 나눠 받기·throttling → 응답 시간), 설정(volume 마운트·env 해석·FailedMount/CreateContainerConfigError·파일 갱신) (startup probe 없음)
   - `cluster.ts` 위 컴포넌트를 묶은 한 벌 + pod-garbage-collector. 바깥은 여기로만 클러스터를 바꾼다
   - `kubectl.ts` 문자열 명령 → API 호출 + 실제 모양의 출력 (`podStatusText` 등 표시 도우미는 UI 도 쓴다)
   - `workloads.ts` 이미지 카탈로그 = 컨테이너 안 앱 흉내(pull 시간, 크래시 조건, SIGTERM 반응, 메모리·CPU 사용 모양). 카탈로그에 없는 이미지는 pull 실패
   - `gitops/` Git 저장소(`git.ts`), Argo CD 컨트롤러(`argocd.ts` — 비교·자동 sync·selfHeal·prune), argocd·git CLI 흉내(`cli.ts`)
+  - `yaml.ts` 오브젝트 → YAML(인스펙터·`kubectl get -o yaml`) · `base64.ts` Secret 값
   - `units.ts` cpu(millicore)·memory(MiB)·AGE 표기 · `rng.ts` 시드 고정 난수·이름 접미사·템플릿 해시
   - `net/kubeproxy.ts` 노드마다 iptables 규칙(모양·확률·KUBE-EXT/SVL), `net/request.ts` CoreDNS 이름 풀기 + 요청 한 번의 단계(DNS → DNAT → 경로 → 응답/실패, 바깥 → LB·NodePort·Ingress·funnel, 출발지 IP 추적), `net/ingress.ts` MetalLB·ingress-nginx 상태·Tailscale 오퍼레이터·Ingress 규칙 고르기
   - `controllers/endpointslice.ts` Service 셀렉터 + Pod Ready → 엔드포인트
-- `src/model/` 편집 가능한 클러스터 정의(노드 + 매니페스트, Ingress 폼 변환 `ingressForm.ts`)와 예제(`examples.ts`, "해 볼 것" 포함, 메뉴 묶음 `EXAMPLE_GROUPS`), 정의 → 클러스터 diff 반영(`defSync.ts`), 화면 시계(`simClock.ts`), 신호·rAF(`sim.ts`), 화면 모양 뽑기(`view.ts`), 명령 한 줄 나누기(`commands.ts` — curl·argocd·git·kubectl), 앱 상태(`store.ts` — localStorage. 되돌리기는 아직 없음)
+- `src/model/` 편집 가능한 클러스터 정의(노드 + 매니페스트, Ingress 폼 변환 `ingressForm.ts`, ConfigMap·Secret 쓰는 곳 `configUse.ts`, helm upgrade 흉내 `helm.ts`)와 예제(`examples.ts`, "해 볼 것" 포함, 메뉴 묶음 `EXAMPLE_GROUPS`), 정의 → 클러스터 diff 반영(`defSync.ts`), 화면 시계(`simClock.ts`), 신호·rAF(`sim.ts`), 화면 모양 뽑기(`view.ts`), 명령 한 줄 나누기(`commands.ts` — curl·argocd·git·kubectl), 앱 상태(`store.ts` — localStorage. 되돌리기는 아직 없음)
 - `src/app/` Preact UI: 왼쪽 오브젝트 나무, 캔버스(컨트롤 플레인 · 스케줄 대기 · 노드 안 Pod 칩), 인스펙터(개요·설정·describe·YAML, 선택 없으면 예제의 "해 볼 것"), 아래 서랍(로그 · kubectl)
 - `tests/` vitest. 코어는 트레이스 시퀀스(`kind` 배열)를 그대로 단언한다
 - `scripts/` `ui-check.mjs`(Playwright 스모크 — Vite 를 **포트 5199** 로 직접 띄움, 사용자가 5173 을 쓸 수 있음), `perf-check.mjs`(프로덕션 빌드로 fps 측정)

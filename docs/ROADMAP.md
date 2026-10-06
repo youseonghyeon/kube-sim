@@ -63,7 +63,7 @@
 - 메모: 사용자의 실제 구성(Tailscale funnel → Ingress → Service)을 예제로 만들 수 있다
 
 ## 5. 운영 (후보 — 시작할 때 고른다)
-- 후보: requests/limits 와 OOMKilled·CPU throttling(5a 로 시작), HPA(메트릭 흉내로 replicas 조정), NetworkPolicy(기본 허용 → 정책이 하나라도 걸리면 기본 차단), ConfigMap/Secret 변경과 재시작, StatefulSet + PVC(순서·고정 이름·고정 볼륨)
+- 후보: requests/limits 와 OOMKilled·CPU throttling(5a ✅), ConfigMap/Secret 변경과 재시작(5b ✅), HPA(메트릭 흉내로 replicas 조정), NetworkPolicy(기본 허용 → 정책이 하나라도 걸리면 기본 차단), StatefulSet + PVC(순서·고정 이름·고정 볼륨)
 
 ### 5a. requests/limits · OOMKilled · CPU throttling ✅ 2026-10-06 (사용자 선택)
 - 된 것: `resources.limits`(requests > limits 거절, limits 만 적으면 requests = limits), QoS 클래스, 이미지별 메모리(램프·누수)·CPU(수요·요청당 일) 모양, cgroup OOM·노드 OOM(oom_score·SystemOOM 이벤트), CPU 나눠 받기(requests 비율)·throttling → 응답 시간·probe timeout, `kubectl top pods|nodes`·`set resources --limits`·describe 의 Limits/QoS/OOMKilled·describe node 의 Limits·overcommit, 인스펙터(limits 편집·Pod 자원 막대·OOMKilled 이유), 노드 칸의 요청·사용, Pod 칩 배지(mem %·throttled), 예제 묶음 "자원" 3개
@@ -79,7 +79,9 @@
 - 예제: "메모리 limit 을 넘으면 (OOMKilled)", "limits 없는 메모리 누수와 이웃 Pod (노드 OOM)", "CPU limit 은 느리게 할 뿐 (throttling)"
 - 완료 기준: 예제마다 "해 볼 것" 이 위 학습 포인트를 화면·kubectl 출력으로 보여 주고, 코어 동작이 트레이스 테스트로 고정된다. 네 가지 검증 통과
 
-### 5b. ConfigMap/Secret 과 재시작 (2026-10-06 시작, 사용자 승인 — 5a 다음 후보)
+### 5b. ConfigMap/Secret 과 재시작 ✅ 2026-10-06 (사용자 승인 — 5a 다음 후보)
+- 된 것: ConfigMap·Secret(stringData→base64), env·envFrom·volume(subPath), kubelet 의 시작 시 env·FailedMount/CreateContainerConfigError 재시도·1분 뒤 파일 갱신, 설정 앱, `kubectl create/patch/describe configmap|secret`·`get -o yaml`·`exec -- env|cat|ls`·`base64 -d`, Argo CD 추적(data 비교), 화면(목록 +·개요의 쓰는 곳·재시작·Secret 가리기·키 편집·Pod 의 설정), helm upgrade 흉내(checksum/config), 예제 묶음 "설정" 3개
+- 축소판: ARCHITECTURE 5-2
 - 왜: Helm values 를 바꿔 ArgoCD 가 ConfigMap 을 sync 해도 Pod 는 옛 설정으로 계속 돈다. "Synced 인데 왜 반영이 안 되지" 를 추측하지 않고 보게 한다.
 - 배우는 것
   - env(`envFrom`·`valueFrom`)는 **컨테이너가 시작할 때 한 번** 읽는다 — ConfigMap 을 바꿔도 돌고 있는 Pod 는 그대로, 새 Pod(재시작·롤아웃)만 새 값

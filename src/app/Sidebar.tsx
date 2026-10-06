@@ -1,5 +1,5 @@
 // 왼쪽: 오브젝트 나무 (Deployment → ReplicaSet → Pod 수) 와 노드 목록. 고르면 인스펙터에 보인다.
-import { deployment, service } from "../core/cluster";
+import { configMap, deployment, service } from "../core/cluster";
 import type { ClusterView } from "../model/view";
 import { currentView, sim } from "../model/sim";
 import { addManifest, addNodeDef, clusterDef, removeNodeDef, selection, uniqueDeploymentName } from "../model/store";
@@ -12,6 +12,7 @@ export function Sidebar() {
   const pdbs = sim.cluster.api.list("PodDisruptionBudget", "default");
   const ings = sim.cluster.api.list("Ingress", "default");
   const apps = sim.cluster.api.list("Application", "argocd");
+  const configs = [...sim.cluster.api.list("ConfigMap", "default"), ...sim.cluster.api.list("Secret", "default")];
   const sel = selection.value;
   const isSel = (kind: string, name: string) => sel?.kind === kind && sel.name === name;
   const manifestNames = new Set(clusterDef.value.manifests.filter((m) => m.kind === "Deployment").map((m) => m.metadata.name));
@@ -104,6 +105,31 @@ export function Sidebar() {
           </button>
         ))}
         {!view.services.length && <div class="side-empty">없음. + 또는 kubectl expose</div>}
+      </div>
+      <div class="side-section">
+        <div class="side-head">
+          <span>ConfigMap · Secret</span>
+          <button
+            class="icon-btn sm"
+            title="ConfigMap 추가 (GREETING=hello) — Deployment 가 env·파일로 읽게 하려면 매니페스트에 envFrom·volume 이 필요합니다 (예제 '설정' 묶음 참고)"
+            aria-label="ConfigMap 추가"
+            onClick={() => {
+              const name = uniqueDeploymentName("app-config", "ConfigMap");
+              addManifest(configMap(name, { GREETING: "hello" }));
+              selection.value = { kind: "ConfigMap", namespace: "default", name };
+            }}
+          >
+            <Icon name="plus" size={15} />
+          </button>
+        </div>
+        {configs.map((o) => (
+          <button key={o.metadata.uid} class={`tree-row${isSel(o.kind, o.metadata.name) ? " sel" : ""}`} data-tree={`${o.kind.toLowerCase()}/${o.metadata.name}`} onClick={() => (selection.value = { kind: o.kind, namespace: "default", name: o.metadata.name })}>
+            <span class="tree-name">{o.metadata.name}</span>
+            <span class="tree-kind">{o.kind === "Secret" ? "secret" : "cm"}</span>
+            <span class="tree-count">{Object.keys(o.data).length}</span>
+          </button>
+        ))}
+        {!configs.length && <div class="side-empty">없음. + 또는 kubectl create configmap</div>}
       </div>
       {apps.length > 0 && (
         <div class="side-section">

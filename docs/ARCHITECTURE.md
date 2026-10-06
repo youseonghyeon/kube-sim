@@ -1,6 +1,6 @@
 # kube-sim 코어 설계
 
-만들면서 고쳐 온 지금의 설계다 (0~4·6단계 2026-10-02, 5a 2026-10-06). 바뀌면 이 문서를 먼저 고친다. 실제와 다르게 줄인 것은 "축소판" 으로 적는다. 남은 결정은 맨 끝 "열린 결정".
+만들면서 고쳐 온 지금의 설계다 (0~4·6단계 2026-10-02, 5a·5b 2026-10-06). 바뀌면 이 문서를 먼저 고친다. 실제와 다르게 줄인 것은 "축소판" 으로 적는다. 남은 결정은 맨 끝 "열린 결정".
 
 ## 1. 시계와 이벤트 큐 (`clock.ts`, `model/simClock.ts`)
 - 이벤트 = `{ at(ms), seq, actor, run() }`. `at` 다음 `seq`(넣은 순서) 로 정렬 → 결정론. 코어에 `Math.random`·`Date.now` 없음 (난수는 `rng.ts` 시드 고정).
@@ -71,6 +71,13 @@
 - CPU: 컨테이너마다 원하는 만큼(`cpuM`, limits.cpu 까지). 합이 노드 CPU 를 넘으면 requests 비율(cpu.shares, 최소 2m)로 물 채우기 분배. 덜 받은 비율만큼 응답이 느려진다: 응답 = `workMs` × 원함/받음 (받음은 반올림 전 값, 바닥 1m — 화면의 `0m` 에서도 끝이 있는 값). 지워지는 중(watch 가 오기 전)에 죽은 컨테이너는 재시작하지 않고 종료 상태(예: OOMKilled)를 남긴 채 정리된다. probe 도 같은 응답 시간이라 timeoutSeconds(기본 1초)를 넘으면 실패(`context deadline exceeded`). 분배는 도는 컨테이너가 바뀔 때만 다시 계산(`cpuCache`).
 - 축소판: kubelet 의 node-pressure eviction(memory.available)·시스템 예약(kube-reserved)·페이지 캐시 없음, CPU 는 CFS 주기·버스트 없이 비율로만, 요청 수가 CPU 사용을 늘리지 않음(수요는 이미지마다 고정), metrics-server 지연(15초) 없음. `kubectl top` 은 실제처럼 Mi·% 를 버림.
 
+### 5-2. 설정 — ConfigMap·Secret (5b, 2026-10-06)
+- 오브젝트: ConfigMap(data 평문), Secret(data base64 — 쓸 때 stringData 를 주면 API 서버가 data 로 바꾸고 stringData 는 저장하지 않음). spec 이 없어 `apply` 와 Argo CD 비교는 data 를 따로 다룬다 (Argo CD 는 Git 의 stringData 를 base64 로 바꿔 라이브 data 와 키 집합까지 비교).
+- kubelet 순서: 샌드박스 → **volume 마운트**(ConfigMap·Secret 이 없으면 FailedMount 로 ContainerCreating 에 머물며 2초부터 두 배·최대 2분 재시도 — 이미지 pull 도 안 함) → pull → 컨테이너 만들기 직전 **env 해석**(envFrom → env 순, 없으면 CreateContainerConfigError 로 10초마다 재시도).
+- env 는 컨테이너마다 시작할 때 한 번 (크래시 재시작이면 같은 Pod 라도 다시 해석). 파일은 Pod 단위: ConfigMap·Secret 이 바뀌면 watch 로 알고 `VOLUME_SYNC_MS`(1분) 뒤 non-subPath 파일만 다시 쓴다. 지워져도 이미 붙은 파일은 남긴다.
+- `kubectl exec -- env|printenv|cat|ls` 와 설정 앱(`example/config-app`, 요청마다 env 와 파일을 그대로 돌려줌)이 컨테이너가 본 값을 보여 준다.
+- 축소판: kubelet 동기화 주기·캐시 TTL 대신 1분 고정, 원자적 심볼릭 링크 교체(..data) 없음, optional 참조·items(키 골라 마운트)·defaultMode·immutable·binaryData·Secret 종류(tls·dockerconfigjson) 없음, 네임스페이스는 default 하나.
+
 ## 6. 네트워크 — 요청 단위 (2·4단계, `net/`)
 - ClusterIP·NodePort 는 API 서버가 정한다. kube-proxy 는 노드마다 Service·EndpointSlice 를 watch 해 그 노드의 규칙을 **1초 뒤**(RULE_SYNC_MS) 다시 쓴다 — 이 틈 때문에 Pod 삭제·롤아웃 중 요청이 실패하고 preStop 이 그것을 막는다. 요청은 **출발 노드의 규칙**으로 DNAT 된다(꺼진 노드의 규칙은 멈춰 있다).
 - `iptables-save` 모양: filter(KUBE-SERVICES·KUBE-EXTERNAL-SERVICES 의 has no endpoints REJECT), nat(KUBE-SERVICES → KUBE-SVC → 확률 1/n → KUBE-SEP → DNAT, 바깥은 KUBE-EXT, Local 은 KUBE-SVL, Pod 대역은 "pod traffic" 규칙).
@@ -103,4 +110,4 @@
 - 노드 간 Pod 트래픽을 패킷 단위(VXLAN 캡슐화)로 그릴지 — 지금은 문구로만
 - kube-proxy IPVS·nftables 모드 비교
 - conntrack(같은 연결은 같은 대상)·headless Service
-- 5단계(운영) 남은 후보: HPA(실사용 모양이 생겼으니 metrics 를 그대로 쓸 수 있다), NetworkPolicy, ConfigMap/Secret, StatefulSet+PVC. 5a 뒤: kubelet node-pressure eviction(Evicted Pod)을 보여 줄지
+- 5단계(운영) 남은 후보: HPA(실사용 모양이 생겼으니 metrics 를 그대로 쓸 수 있다), NetworkPolicy, StatefulSet+PVC. 5a 뒤: kubelet node-pressure eviction(Evicted Pod)을 보여 줄지

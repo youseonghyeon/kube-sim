@@ -2029,3 +2029,47 @@ body.resizing-row * {
 .usage-legend .lg.lim {
   background: var(--bad);
 }
+
+/* ---- 인스펙터: ConfigMap·Secret (키·값, 쓰는 곳) ---- */
+.kv-list li {
+  align-items: baseline;
+}
+.kv-val {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+.config-users li {
+  align-items: baseline;
+}
+.config-users li .small {
+  color: var(--ink-2);
+  text-align: right;
+}
+.kv-edit {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.kv-row {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr) 24px;
+  gap: 6px;
+  align-items: center;
+}
+.kv-key {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kv-row .field-err {
+  grid-column: 2;
+}
+.kv-new .kv-err {
+  grid-column: 1 / -1;
+}
+.small-term {
+  font-size: 11px;
+  max-height: 160px;
+  overflow: auto;
+}

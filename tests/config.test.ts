@@ -223,3 +223,67 @@ describe("GitOps: Helm values → ConfigMap 이 sync 돼도 Pod 는 그대로 (c
     expect(c.api.get("ConfigMap", "app-config")!.data.GREETING).toBe("hello"); // selfHeal 이 되돌림
   });
 });
+
+describe("예제 '설정' 묶음이 학습 포인트를 실제로 보여 준다", () => {
+  const load = async (id: string) => {
+    const { DefSync } = await import("../src/model/defSync");
+    const { exampleById } = await import("../src/model/examples");
+    const s = new DefSync();
+    const def = exampleById(id)!.build();
+    s.reset(def, id);
+    s.cluster.runFor(15_000);
+    return { s, def, c: s.cluster };
+  };
+  const curl = (c: C) => c.requestFromPod(live(c, "client")[0]!.metadata.name, "curl", "http://app").output;
+
+  test("config-env: patch 직후 그대로 → 1분 뒤 파일만 → 재시작하면 env 도", async () => {
+    const { c } = await load("config-env");
+    expect(curl(c)).toMatch(/env {2}GREETING=hello[\s\S]*file \/etc\/config\/GREETING = hello[\s\S]*file \/etc\/app\/greeting = hello/);
+    kubectl(c, `kubectl patch configmap app-config -p '{"data":{"GREETING":"안녕"}}'`);
+    c.runFor(1_000);
+    expect(curl(c)).not.toContain("안녕");
+    c.runFor(60_000);
+    const out = curl(c);
+    expect(out).toContain("env  GREETING=hello");
+    expect(out).toContain("file /etc/config/GREETING = 안녕");
+    expect(out).toContain("file /etc/app/greeting = hello");
+    kubectl(c, "kubectl rollout restart deployment/app");
+    c.runFor(60_000);
+    expect(curl(c)).toMatch(/env {2}GREETING=안녕[\s\S]*file \/etc\/app\/greeting = 안녕/);
+  });
+
+  test("config-checksum: checksum 없으면 롤아웃 없음, 있으면 롤아웃 · 값이 다시 바뀌면 또 롤아웃", async () => {
+    const { helmUpgrade, helmUpgradeBlocked } = await import("../src/model/helm");
+    const { s, c, def: first } = await load("config-checksum");
+    let def = first;
+    const step = (data: Record<string, string>, checksum: boolean) => {
+      const a = { type: "helm-upgrade" as const, configMap: "app-config", deployment: "app", data, checksum };
+      expect(helmUpgradeBlocked(def, a)).toBeUndefined();
+      def = helmUpgrade(def, a);
+      s.sync(def);
+      c.runFor(60_000);
+    };
+    step({ GREETING: "안녕" }, false);
+    expect(c.api.list("ReplicaSet").filter((r) => r.metadata.labels.app === "app")).toHaveLength(1);
+    expect(curl(c)).toContain("env  GREETING=hello");
+    step({ GREETING: "안녕" }, true);
+    expect(c.api.list("ReplicaSet").filter((r) => r.metadata.labels.app === "app")).toHaveLength(2);
+    expect(curl(c)).toContain("env  GREETING=안녕");
+    expect(helmUpgradeBlocked(def, { type: "helm-upgrade", configMap: "app-config", deployment: "app", data: { GREETING: "안녕" }, checksum: true })).toBe("이미 그 값입니다");
+    step({ GREETING: "반가워" }, true);
+    expect(c.api.list("ReplicaSet").filter((r) => r.metadata.labels.app === "app")).toHaveLength(3);
+    expect(curl(c)).toContain("env  GREETING=반가워");
+  });
+
+  test("config-missing: 둘 다 멈춰 있다가, 만들어 주면 2분 안에 둘 다 Running", async () => {
+    const { c } = await load("config-missing");
+    const out = kubectl(c, "kubectl get pods").output;
+    expect(out).toMatch(/api-\S+\s+0\/1\s+CreateContainerConfigError/);
+    expect(out).toMatch(/web-\S+\s+0\/1\s+ContainerCreating/);
+    kubectl(c, "kubectl create configmap app-config --from-literal=GREETING=hello");
+    kubectl(c, "kubectl create secret generic web-tls --from-literal=tls.crt=CERT --from-literal=tls.key=KEY");
+    c.runFor(120_000);
+    expect(kubectl(c, "kubectl get pods").output).not.toMatch(/CreateContainerConfigError|ContainerCreating/);
+    expect(kubectl(c, `kubectl exec ${live(c, "api")[0]!.metadata.name} -- printenv DB_PASSWORD`).output).toBe("s3cr3t!");
+  });
+});

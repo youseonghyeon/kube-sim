@@ -62,6 +62,17 @@
 | 노드 메모리가 꽉 찼는데 새 Pod 가 계속 스케줄됨 | 스케줄러는 requests 합만 본다 (실사용은 안 봄) | requests 를 실사용에 맞춘다. `kubectl describe node` 의 Allocated resources 와 `kubectl top nodes` 를 비교 |
 | `error: Metrics not available for pod` | 컨테이너가 돌고 있지 않음 (크래시 백오프 중 등) | 컨테이너가 뜬 뒤 다시 |
 
+## 설정 (5b)
+
+| 증상 / 출력 | 원인 | 고치는 법 |
+|---|---|---|
+| ConfigMap 을 바꿨는데(Argo CD 도 Synced) 앱이 옛 값 | env 는 컨테이너가 시작할 때 한 번 읽는다. 템플릿이 그대로라 롤아웃도 없다 | `kubectl rollout restart deployment/<이름>`, 또는 차트에 `checksum/config` 주석 |
+| 마운트한 파일은 바뀌었는데 앱이 그대로 | 앱이 시작할 때만 파일을 읽는다 | 앱이 파일을 다시 읽게(감시·SIGHUP) 하거나 재시작 |
+| 마운트한 파일이 영영 안 바뀜 | `subPath` 마운트는 갱신되지 않는다 | 디렉터리째 마운트하거나 재시작 |
+| `CreateContainerConfigError` · `configmap "x" not found` / `couldn't find key K in ConfigMap default/x` | env 가 가리키는 ConfigMap·Secret·키가 없다 | 만들면 kubelet 이 10초 안에 다시 시도한다 (이름·키 오타 확인) |
+| `ContainerCreating` 에서 멈춤 · `FailedMount … secret "x" not found` | volume 이 가리키는 Secret·ConfigMap 이 없다 (이미지 pull 도 안 한다) | 만들면 다음 재시도(최대 2분 간격) 때 뜬다 |
+| `illegal base64 data` | Secret 의 data 에 평문을 넣었다 | 평문은 `stringData` 로, data 는 base64 로 |
+
 ## GitOps (6단계)
 
 | 증상 / 출력 | 원인 | 고치는 법 |

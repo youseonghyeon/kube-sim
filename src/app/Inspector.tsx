@@ -1,7 +1,7 @@
 // 오른쪽 인스펙터: 고른 오브젝트의 개요·설정·describe·YAML. 아무것도 안 골랐으면 예제의 "해 볼 것".
 import { useSignal } from "@preact/signals";
 import { useEffect, useMemo, useRef } from "preact/hooks";
-import { controllerOf, isNodeReady, limitOf, NODE_LEASE_NS, qosClass, type Application, type Deployment, type Ingress, type KObject, type Node, type Pod, type ReplicaSet, type Service } from "../core/api/types";
+import { controllerOf, isNodeReady, limitOf, NODE_LEASE_NS, qosClass, type Application, type ConfigMap, type Secret, type Deployment, type Ingress, type KObject, type Node, type Pod, type ReplicaSet, type Service } from "../core/api/types";
 import type { DeploymentManifest, Manifest } from "../core/cluster";
 import { eventSource, nodeStatusText, podRestartsText, podStatusText, rolloutStatusLine, runKubectl } from "../core/kubectl";
 import { fmtAge, fmtCpu, fmtMem, parseCpu, parseMem } from "../core/units";
@@ -11,11 +11,13 @@ import { exampleById, resolveCommand, type TryAction } from "../model/examples";
 import { appGet } from "../core/gitops/cli";
 import { deploymentHash, HASH_LABEL, revisionOf } from "../core/controllers/deployment";
 import { sim, simTime, simVersion } from "../model/sim";
-import { addManifest, clusterDef, drawerOpen, drawerTab, exampleId, findManifest, updateIngressManifest, INSPECTOR_MIN, INSPECTOR_WIDE, inspectorOpen, inspectorWidth, setInspectorWidth, toggleInspector, toggleInspectorWide, removeManifest, selection, updateManifest, updateNodeDef, updateServiceManifest } from "../model/store";
+import { addManifest, clusterDef, drawerOpen, drawerTab, exampleId, findManifest, updateConfigManifest, updateIngressManifest, INSPECTOR_MIN, INSPECTOR_WIDE, inspectorOpen, inspectorWidth, setInspectorWidth, toggleInspector, toggleInspectorWide, removeManifest, selection, updateManifest, updateNodeDef, updateServiceManifest } from "../model/store";
 import { toneOf } from "../model/view";
 import { toYaml } from "../core/yaml";
 import { flattenRules, hostError, ingressNginxManifests, pathError, setRules, type RuleRow } from "../model/ingressForm";
 import { NGINX_SERVICE } from "../core/net/ingress";
+import { b64decode } from "../core/base64";
+import { configUsers } from "../model/configUse";
 import { Icon } from "./Icons";
 
 type Tab = "overview" | "settings" | "iptables" | "describe" | "yaml";
@@ -100,7 +102,11 @@ function InspectorPanel() {
   const tab = useSignal<Tab>("overview");
   const obj = sel ? sim.cluster.api.get(sel.kind as KObject["kind"], sel.name, sel.namespace ?? "default") : undefined;
   const hasSettings =
-    obj?.kind === "Deployment" || obj?.kind === "Node" || (obj?.kind === "Service" && !!findManifest("Service", obj.metadata.name)) || (obj?.kind === "Ingress" && !!findManifest("Ingress", obj.metadata.name));
+    obj?.kind === "Deployment" ||
+    obj?.kind === "Node" ||
+    (obj?.kind === "Service" && !!findManifest("Service", obj.metadata.name)) ||
+    (obj?.kind === "Ingress" && !!findManifest("Ingress", obj.metadata.name)) ||
+    ((obj?.kind === "ConfigMap" || obj?.kind === "Secret") && !!findManifest(obj.kind, obj.metadata.name));
   const hasIptables = obj?.kind === "Node";
   useEffect(() => {
     if ((tab.value === "settings" && !hasSettings) || (tab.value === "iptables" && !hasIptables)) tab.value = "overview";
@@ -156,6 +162,7 @@ function InspectorPanel() {
         {tab.value === "settings" && obj.kind === "Node" && <NodeSettings n={obj} />}
         {tab.value === "settings" && obj.kind === "Service" && <ServiceSettings name={obj.metadata.name} />}
         {tab.value === "settings" && obj.kind === "Ingress" && <IngressSettings name={obj.metadata.name} />}
+        {tab.value === "settings" && (obj.kind === "ConfigMap" || obj.kind === "Secret") && <ConfigSettings kind={obj.kind} name={obj.metadata.name} />}
         {tab.value === "iptables" && obj.kind === "Node" && <IptablesView node={obj.metadata.name} />}
         {tab.value === "describe" && (
           <pre class="term">{obj.kind === "Application" ? appGet(sim.cluster, obj) : runKubectl(sim.cluster, `describe ${obj.kind.toLowerCase()} ${obj.metadata.name}`).output}</pre>
@@ -209,6 +216,9 @@ function Overview({ obj }: { obj: KObject }) {
       return <IngressOverview ing={obj} />;
     case "Application":
       return <ApplicationOverview app={obj} />;
+    case "ConfigMap":
+    case "Secret":
+      return <ConfigOverview obj={obj} />;
     case "PodDisruptionBudget":
       return (
         <>
@@ -355,6 +365,7 @@ function PodOverview({ p }: { p: Pod }) {
       </div>
       {cs && "running" in cs.state && !deleting && <CurlFrom pod={p.metadata.name} />}
       <PodResources p={p} />
+      <PodConfig p={p} />
       <h3>이벤트</h3>
       <Events uid={p.metadata.uid} />
     </>
@@ -914,6 +925,7 @@ function actionLabel(a: TryAction): string {
   if (a.type === "prestop") return `${a.deployment} 에 preStop sleep ${a.seconds}초 넣기 (apply)`;
   if (a.type === "ci-bump") return `CI: 새 이미지 빌드 → Git 의 ${a.file.split("/").pop()} 태그 커밋`;
   if (a.type === "git-rm") return `Git 에서 ${a.file.split("/").pop()} 지우고 커밋`;
+  if (a.type === "helm-upgrade") return `helm upgrade — ${Object.entries(a.data).map(([k, v]) => `${k}=${v}`).join(", ")}${a.checksum ? " (checksum/config 주석 있음)" : " (checksum 주석 없음)"}`;
   return `(클러스터 밖에서) curl ${a.node}:<${a.service} 의 NodePort>`;
 }
 
@@ -1384,6 +1396,173 @@ function IngressSettings({ name }: { name: string }) {
       </div>
     </>
   );
+}
+
+// ---------- 설정: ConfigMap·Secret (5b) ----------
+
+/** ConfigMap·Secret 개요: 값, 쓰는 곳(env/파일/subPath — 바뀔 때 반영되는 방식이 다름), 쓰는 Deployment 재시작 */
+function ConfigOverview({ obj }: { obj: ConfigMap | Secret }) {
+  const reveal = useSignal(false);
+  const c = sim.cluster;
+  const secretKind = obj.kind === "Secret";
+  const users = configUsers(c.api.list("Pod", "default").filter((p) => p.metadata.deletionTimestamp === undefined), obj.kind, obj.metadata.name);
+  const deployments = [...new Set(users.map((u) => u.pod.metadata.labels.app).filter((x): x is string => !!x && !!c.api.get("Deployment", x, "default")))];
+  const entries = Object.entries(obj.data);
+  return (
+    <>
+      <div class="callout">
+        <div class="small">
+          바꿔도 돌고 있는 Pod 에 바로 반영되지 않습니다. <b>env</b> 로 읽는 컨테이너는 시작할 때 한 번 읽어 재시작해야 새 값이 되고, <b>파일</b>로 마운트한 것은 kubelet 이 잠시 뒤(축소판 1분) 파일을 바꿉니다 — 앱이 다시 읽어야 반영됩니다. <b>subPath</b> 파일은 영영 그대로입니다.
+        </div>
+      </div>
+      <h3>{secretKind ? "data (base64 로 저장 — 암호화 아님)" : "data"}</h3>
+      <ul class="list kv-list">
+        {entries.map(([k, v]) => (
+          <li key={k}>
+            <span class="mono small">{k}</span>
+            <span class="mono small kv-val">{secretKind ? (reveal.value ? `${b64decode(v) ?? "(base64 아님)"}  ← ${v}` : "••••••") : v}</span>
+          </li>
+        ))}
+        {!entries.length && <li class="muted small">키 없음</li>}
+      </ul>
+      {secretKind && entries.length > 0 && (
+        <div class="actions">
+          <button class="btn sm" onClick={() => (reveal.value = !reveal.value)} title="base64 를 풀어 보여 줍니다 — get secret -o yaml 을 볼 수 있는 사람은 누구나 할 수 있습니다">
+            {reveal.value ? "값 가리기" : "값 보기 (base64 풀기)"}
+          </button>
+        </div>
+      )}
+      <h3>쓰는 곳 ({users.length})</h3>
+      <ul class="list config-users">
+        {users.map(({ pod, use }) => (
+          <li key={pod.metadata.uid}>
+            <Link kind="Pod" name={pod.metadata.name} />
+            <span class="small">
+              {[...use.env.map((x) => `env ${x}`), ...use.volume.map((x) => `파일 ${x}`), ...use.subPath.map((x) => `subPath ${x}`)].join(" · ")}
+            </span>
+          </li>
+        ))}
+        {!users.length && <li class="muted small">이 {obj.kind} 를 쓰는 Pod 가 없습니다</li>}
+      </ul>
+      {deployments.length > 0 && (
+        <div class="actions">
+          {deployments.map((d) => (
+            <button key={d} class="btn sm" onClick={() => runAndShow(`kubectl rollout restart deployment/${d}`)} title="새 Pod 가 지금의 값으로 env 를 만듭니다">
+              {d} 재시작 (rollout restart)
+            </button>
+          ))}
+        </div>
+      )}
+      <h3>이벤트</h3>
+      <Events uid={obj.metadata.uid} />
+    </>
+  );
+}
+
+/** ConfigMap(data)·Secret(stringData — 평문으로 쓰면 API 서버가 base64 로) 의 키·값 편집 */
+function ConfigSettings({ kind, name }: { kind: "ConfigMap" | "Secret"; name: string }) {
+  const m = findManifest(kind, name);
+  if (!m) return <p class="note">이 {kind} 는 매니페스트에 없습니다 (kubectl 로 만듦). kubectl patch 로 바꾸세요.</p>;
+  const data = m.kind === "ConfigMap" ? m.data : (m.stringData ?? {});
+  const keyErr = (v: string) => (/^[-._a-zA-Z0-9]+$/.test(v) ? undefined : "키는 영문·숫자·-·_·. 만 (실제 API 검사)");
+  return (
+    <>
+      <p class="note">
+        여기서 바꾸면 매니페스트를 고쳐 kubectl apply 한 것과 같습니다. {kind === "Secret" ? "Secret 은 stringData(평문)로 적고, 저장은 base64 data 로 됩니다. " : ""}돌고 있는 Pod 의 env 는 바뀌지 않습니다 (개요 탭 참고).
+      </p>
+      <div class="kv-edit">
+        {Object.entries(data).map(([k, v]) => (
+          <div key={k} class="kv-row" data-key={k}>
+            <span class="mono small kv-key">{k}</span>
+            <TextInput value={v} onCommit={(nv) => updateConfigManifest(kind, name, (d) => (d[k] = nv))} />
+            <button class="icon-btn sm" title={`${k} 지우기`} aria-label={`${k} 지우기`} onClick={() => updateConfigManifest(kind, name, (d) => delete d[k])}>
+              <Icon name="trash" size={14} />
+            </button>
+          </div>
+        ))}
+      </div>
+      <NewKey onAdd={(k, v) => updateConfigManifest(kind, name, (d) => (d[k] = v))} exists={(k) => k in data} keyErr={keyErr} />
+      <div class="actions">
+        <button
+          class="btn danger"
+          onClick={() => {
+            removeManifest(kind, name);
+            selection.value = null;
+          }}
+        >
+          <Icon name="trash" size={14} />
+          {kind} 지우기
+        </button>
+      </div>
+    </>
+  );
+}
+
+function NewKey({ onAdd, exists, keyErr }: { onAdd: (k: string, v: string) => void; exists: (k: string) => boolean; keyErr: (k: string) => string | undefined }) {
+  const key = useSignal("");
+  const val = useSignal("");
+  const err = key.value ? keyErr(key.value) ?? (exists(key.value) ? "이미 있는 키" : undefined) : undefined;
+  const add = () => {
+    if (!key.value || err) return;
+    onAdd(key.value, val.value);
+    key.value = "";
+    val.value = "";
+  };
+  return (
+    <div class="kv-row kv-new">
+      <input class={`input mono${err ? " invalid" : ""}`} placeholder="새 키" value={key.value} onInput={(e) => (key.value = e.currentTarget.value.trim())} onKeyDown={(e) => e.key === "Enter" && add()} />
+      <input class="input mono" placeholder="값" value={val.value} onInput={(e) => (val.value = e.currentTarget.value)} onKeyDown={(e) => e.key === "Enter" && add()} />
+      <button class="icon-btn sm" disabled={!key.value || !!err} title={err ?? "키 더하기"} aria-label="키 더하기" onClick={add}>
+        <Icon name="plus" size={14} />
+      </button>
+      {err && <span class="field-err kv-err">{err}</span>}
+    </div>
+  );
+}
+
+/** Pod 의 설정 출처와, 컨테이너가 지금 가진 env (시작할 때 만든 것) */
+function PodConfig({ p }: { p: Pod }) {
+  const ct = p.spec.containers[0];
+  if (!ct || (!ct.env?.length && !ct.envFrom?.length && !ct.volumeMounts?.length)) return null;
+  const view = sim.cluster.containerConfig(p);
+  const sources = [
+    ...(ct.envFrom ?? []).map((f) => (f.configMapRef ? { kind: "ConfigMap", name: f.configMapRef.name, how: "env (모든 키)" } : { kind: "Secret", name: f.secretRef!.name, how: "env (모든 키)" })),
+    ...(ct.env ?? []).flatMap((e) => {
+      const ref = e.valueFrom?.configMapKeyRef ?? e.valueFrom?.secretKeyRef;
+      return ref ? [{ kind: e.valueFrom?.configMapKeyRef ? "ConfigMap" : "Secret", name: ref.name, how: `env ${e.name} ← ${ref.key}` }] : [];
+    }),
+    ...(ct.volumeMounts ?? []).flatMap((m) => {
+      const v = p.spec.volumes?.find((x) => x.name === m.name);
+      if (!v?.configMap && !v?.secret) return [];
+      return [{ kind: v.configMap ? "ConfigMap" : "Secret", name: v.configMap?.name ?? v.secret!.secretName, how: m.subPath ? `subPath ${m.mountPath}` : `파일 ${m.mountPath}/` }];
+    }),
+  ];
+  return (
+    <>
+      <h3>설정</h3>
+      <ul class="list config-users">
+        {sources.map((s, i) => (
+          <li key={i}>
+            <Link kind={s.kind} name={s.name} />
+            <span class="small">{s.how}</span>
+          </li>
+        ))}
+      </ul>
+      {view && view.env.length > 0 && (
+        <>
+          <div class="muted small">컨테이너의 env — 시작할 때 만든 값 (kubectl exec -- env)</div>
+          <pre class="term small-term">{view.env.map(([k, v]) => `${k}=${maskIfSecret(p, k, v)}`).join("\n")}</pre>
+        </>
+      )}
+    </>
+  );
+}
+
+/** Secret 에서 온 env 는 화면에서 가린다 (실제로는 exec 로 다 보이지만, 화면에 늘 띄워 두지는 않는다) */
+function maskIfSecret(p: Pod, key: string, v: string): string {
+  const ct = p.spec.containers[0]!;
+  const fromSecret = ct.env?.some((e) => e.name === key && e.valueFrom?.secretKeyRef) || (ct.envFrom ?? []).some((f) => f.secretRef && sim.cluster.api.get("Secret", f.secretRef.name, "default")?.data[key] !== undefined);
+  return fromSecret ? "•••••• (Secret)" : v;
 }
 
 // ---------- GitOps (6단계) ----------

@@ -104,7 +104,7 @@ await page.screenshot({ path: `${OUT}/05-scaled-drift.png` });
 // 3b) 예제 메뉴: 묶음별 열 + 검색
 console.log("3b) 예제 메뉴 묶음·검색");
 await page.click(".menu-btn");
-check((await page.locator(".menu-group").count()) === 8, "예제 메뉴가 묶음 8개로 나뉜다", "examples.ts EXAMPLE_GROUPS / App.tsx ExampleMenu");
+check((await page.locator(".menu-group").count()) === 9, "예제 메뉴가 묶음 9개로 나뉜다", "examples.ts EXAMPLE_GROUPS / App.tsx ExampleMenu");
 await page.screenshot({ path: `${OUT}/05b-example-menu.png` });
 await page.keyboard.type("readiness");
 const found = await page.locator(".example-item").evaluateAll((els) => els.map((e) => e.getAttribute("data-example")));
@@ -372,6 +372,43 @@ await page.locator("button", { hasText: "바깥에서 curl http://web.example.co
 await page.waitForTimeout(300);
 check((await page.locator(".drawer").textContent())?.includes("Welcome to nginx"), "만든 Ingress 로 바깥에서 web 까지 닿는다", "ingress.ts / request.ts viaIngressNginx");
 await page.screenshot({ path: `${OUT}/23c-ingress-created.png` });
+
+// 15c) 설정: ConfigMap·Secret
+console.log("15c) ConfigMap·Secret");
+await page.click(".menu-btn");
+await page.click('.menu-item[data-example="config-env"]');
+await page.selectOption(".transport .speed", "5");
+await waitFor(async () => (await page.locator('.node .pod[data-pod^="app-"] .pod-status').textContent().catch(() => "")) === "Running", "app Running", 30000);
+await waitFor(async () => (await page.locator('[data-tree="service/app"] .tree-count').textContent()) === "1", "app 엔드포인트", 20000);
+await page.waitForTimeout(400);
+await page.locator(".try", { hasText: "설정 보기" }).first().locator("button").click();
+await page.waitForTimeout(300);
+check((await page.locator(".drawer").textContent())?.includes("env  GREETING=hello"), "설정 앱이 env·파일 값을 보여 준다", "request.ts configBody / kubelet containerConfig");
+await page.locator('[data-tree="configmap/app-config"]').click();
+await page.locator(".tabs button", { hasText: "개요" }).click();
+check((await page.locator(".config-users").first().textContent())?.includes("subPath"), "ConfigMap 개요에 쓰는 곳(env·파일·subPath)", "Inspector ConfigOverview / configUse.ts");
+await page.locator(".tabs button", { hasText: "설정" }).click();
+const gIn = page.locator('.kv-row[data-key="GREETING"] input');
+await gIn.click();
+await page.keyboard.press("ControlOrMeta+a");
+await page.keyboard.type("안녕");
+await page.keyboard.press("Enter");
+await waitFor(async () => (await page.evaluate(() => document.querySelector('.kv-row[data-key="GREETING"] input')?.value)) === "안녕", "매니페스트에 반영", 5000);
+await page.locator('.node .pod[data-pod^="app-"]').first().click();
+await page.locator(".tabs button", { hasText: "개요" }).click();
+await page.waitForTimeout(200);
+check((await page.locator(".insp-body .small-term").textContent())?.includes("GREETING=hello"), "ConfigMap 을 바꿔도 돌고 있는 Pod 의 env 는 그대로 보인다", "Inspector PodConfig");
+await page.screenshot({ path: `${OUT}/23d-config-pod.png` });
+
+await page.click(".menu-btn");
+await page.click('.menu-item[data-example="config-missing"]');
+await waitFor(async () => (await statusTexts()).includes("CreateContainerConfigError"), "CreateContainerConfigError", 30000);
+check((await statusTexts()).includes("ContainerCreating"), "없는 ConfigMap(env)·Secret(volume): CreateContainerConfigError 와 ContainerCreating", "kubelet.ts start/mount");
+await page.locator('[data-tree="secret/db"]').click();
+check((await page.locator(".kv-list").textContent())?.includes("••••••"), "Secret 값은 기본으로 가린다", "Inspector ConfigOverview");
+await page.locator("button", { hasText: "값 보기" }).click();
+check((await page.locator(".kv-list").textContent())?.includes("s3cr3t!"), "값 보기로 base64 를 풀어 보인다", "Inspector ConfigOverview b64decode");
+await page.screenshot({ path: `${OUT}/23e-secret.png` });
 
 // 16) 패널 크기: 인스펙터 폭·서랍 높이 끌기, 접기·펴기, 저장
 console.log("16) 패널 크기");
