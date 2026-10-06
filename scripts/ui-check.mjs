@@ -104,7 +104,7 @@ await page.screenshot({ path: `${OUT}/05-scaled-drift.png` });
 // 3b) 예제 메뉴: 묶음별 열 + 검색
 console.log("3b) 예제 메뉴 묶음·검색");
 await page.click(".menu-btn");
-check((await page.locator(".menu-group").count()) === 11, "예제 메뉴가 묶음 11개로 나뉜다", "examples.ts EXAMPLE_GROUPS / App.tsx ExampleMenu");
+check((await page.locator(".menu-group").count()) === 12, "예제 메뉴가 묶음 12개로 나뉜다", "examples.ts EXAMPLE_GROUPS / App.tsx ExampleMenu");
 await page.screenshot({ path: `${OUT}/05b-example-menu.png` });
 await page.keyboard.type("readiness");
 const found = await page.locator(".example-item").evaluateAll((els) => els.map((e) => e.getAttribute("data-example")));
@@ -453,6 +453,28 @@ check(true, "줄여도 PVC 는 남고 목록에 흐리게");
 await page.screenshot({ path: `${OUT}/23h-sts.png` });
 await page.locator('[data-tree="pvc/data-db-0"]').click();
 check((await page.locator(".insp-body").textContent())?.includes("에만 갈 수 있음"), "PVC 개요에 디스크가 묶인 노드", "Inspector PvcOverview");
+
+// 15f) HPA: Service 에 CPU 부하 → HPA 가 늘림, 캔버스 Service 상자에 부하, HPA 개요
+console.log("15f) HPA");
+await page.click(".menu-btn");
+await page.click('.menu-item[data-example="hpa-basics"]');
+await page.selectOption(".transport .speed", "10");
+await waitFor(async () => (await page.locator('[data-tree="deployment/web"] .tree-count').textContent()) === "1/1", "web 1/1", 30000);
+check((await page.locator('[data-tree="hpa/web"]').count()) === 1, "목록에 HPA web", "Sidebar HPA section");
+await page.locator('[data-tree="service/web"]').click();
+await page.locator(".tabs button", { hasText: "개요" }).click();
+await page.locator('.insp-body [aria-label="CPU 부하"] button', { hasText: "40/s" }).click();
+check((await page.locator('.svc[data-service="web"] .svc-load').textContent())?.includes("초당 40 요청"), "Service 상자에 초당 40 요청", "Canvas ServiceBox svc-load");
+await waitFor(async () => (await page.locator('[data-tree="hpa/web"] .tree-count').textContent())?.trim() === "4", "HPA 가 4 로 늘림", 30000);
+await waitFor(async () => (await page.locator('[data-tree="deployment/web"] .tree-count').textContent()) === "4/4", "web 4/4", 30000);
+await page.locator('[data-tree="hpa/web"]').click();
+await waitFor(async () => (await page.locator(".insp-body .hpa-meter .mono").textContent())?.includes("50%"), "HPA 사용률 50% 로 안정", 40000);
+const hpaText = (await page.locator(".insp-body").textContent()) ?? "";
+check(hpaText.includes("Pod 별 사용") && hpaText.includes("replicas 1 → 4"), "HPA 개요에 Pod 별 사용과 최근 판단", "Inspector HpaOverview");
+await page.screenshot({ path: `${OUT}/23i-hpa.png` });
+await page.locator('[data-tree="deployment/web"]').click();
+check((await page.locator(".insp-body").textContent())?.includes("가 replicas 를 관리합니다"), "Deployment 개요에 HPA 가 관리한다는 안내 (드리프트 경고 대신)", "Inspector HpaNote");
+check(!(await page.locator(".insp-body").textContent())?.includes("라이브가 매니페스트와 다릅니다"), "HPA 가 바꾼 replicas 는 드리프트 경고가 아니다", "Inspector DeploymentOverview drift filter");
 
 // 16) 패널 크기: 인스펙터 폭·서랍 높이 끌기, 접기·펴기, 저장
 console.log("16) 패널 크기");

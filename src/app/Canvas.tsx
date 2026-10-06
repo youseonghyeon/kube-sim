@@ -233,6 +233,7 @@ function IngressBox({ i, selected }: { i: IngressView; selected: boolean }) {
 function ServiceBox({ s, selected }: { s: ServiceView; selected: boolean }) {
   const p = s.svc.spec.ports[0];
   const total = s.ready.length + s.notReady.length;
+  const rps = sim.cluster.load.get(s.name);
   return (
     <button
       class={`svc${selected ? " sel" : ""}${s.ready.length ? "" : " empty"}`}
@@ -256,6 +257,11 @@ function ServiceBox({ s, selected }: { s: ServiceView; selected: boolean }) {
         </span>
       )}
       {s.svc.spec.type === "LoadBalancer" && !s.lbIP && <span class="svc-lb mono">LB &lt;pending&gt;</span>}
+      {rps !== undefined && (
+        <span class="svc-load mono" title="바깥에서 들어오는 CPU 부하 — ready Pod 가 나눠 받습니다">
+          초당 {rps} 요청{s.ready.length ? ` · Pod 마다 ${Math.round((rps / s.ready.length) * 10) / 10}` : " · 받을 Pod 없음"}
+        </span>
+      )}
       <span class={`svc-eps${s.ready.length ? "" : " none"}`}>{total ? `엔드포인트 ready ${s.ready.length}${s.notReady.length ? ` · not ready ${s.notReady.length}` : ""}` : "엔드포인트 없음 (셀렉터에 맞는 Pod 없음)"}</span>
     </button>
   );

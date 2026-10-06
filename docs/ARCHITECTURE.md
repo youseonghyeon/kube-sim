@@ -123,9 +123,15 @@
 - 명령 한 줄(`commands.ts`): `curl …` = 클러스터 밖에서, `argocd …`·`git …` = 그 CLI 흉내, 나머지 = kubectl. 출력 형식은 테스트로 고정한다.
 - 화면은 `view.ts` 가 뽑은 모양(같은 버전이면 캔버스·목록이 함께 씀)을 그리고, 캔버스는 실제 시간 약 0.1초마다만 다시 그린다(이름표·카운트다운).
 
+### 3-5. HPA (5e, 2026-10-06, `controllers/hpa.ts`)
+- 부하: `Cluster.setLoad(service, rps)` — 바깥 도구(hey·k6) 흉내. ready 엔드포인트가 똑같이 나눠 받고, kubelet 의 CPU 원함 = 이미지 cpuM + Pod rps × workMs(요청 하나의 CPU ms). 나눔은 `loadVersion`(부하·엔드포인트 변화)으로 캐시.
+- 컨트롤러: 15초 배경 타이머. 대상 Pod 중 requests.cpu 가 없는 컨테이너가 하나라도 있으면 FailedGetResourceMetric(`<unknown>`). Ready 이고 사용량이 있는 Pod 로 util = floor(합 × 100 / requests 합). 목표와 10% 안쪽이면 그대로. Ready 아닌 Pod 는 늘릴 때 0%·줄일 때 100% 로 다시 계산. 늘리기는 max(두 배, +4) 까지, 줄이기는 지난 300초 추천의 최댓값, 마지막에 min~max 로 자르고 ScalingLimited. 같은 판단은 트레이스에 한 번만.
+- apply 3-way: 매니페스트에 replicas 가 없으면 라이브 값을 지키고, 지난번에 있었다가 지우면 기본값 1(실제 kubectl 과 같음). Argo CD 는 Git 에 적은 필드만 비교하므로 replicas 를 빼면 HPA 와 싸우지 않는다.
+- 화면: Service 개요의 CPU 부하 단추(0·10·40·100·200/s), 캔버스 Service 상자의 '초당 N 요청', HPA 개요(사용률 막대·Pod 별 사용·조건·최근 판단), HPA 가 맡은 Deployment 는 replicas 드리프트 경고 대신 HPA 안내.
+
 ## 열린 결정
 - 가비지 컬렉션 foreground 를 따로 보여 줄지
 - 노드 간 Pod 트래픽을 패킷 단위(VXLAN 캡슐화)로 그릴지 — 지금은 문구로만
 - kube-proxy IPVS·nftables 모드 비교
 - conntrack(같은 연결은 같은 대상)·headless Service
-- 5단계(운영) 남은 후보: HPA(실사용 모양이 생겼으니 metrics 를 그대로 쓸 수 있다). 5d 뒤: pvc-protection(Terminating PVC), Longhorn 같은 복제 스토리지로 노드 장애를 넘기는 것 5a 뒤: kubelet node-pressure eviction(Evicted Pod)을 보여 줄지
+- 5e 뒤: HPA behavior(사용자 정책)·메모리 메트릭·VPA. 5d 뒤: pvc-protection(Terminating PVC), Longhorn 같은 복제 스토리지로 노드 장애를 넘기는 것 5a 뒤: kubelet node-pressure eviction(Evicted Pod)을 보여 줄지

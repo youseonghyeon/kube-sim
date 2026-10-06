@@ -1,17 +1,18 @@
 // 오른쪽 인스펙터: 고른 오브젝트의 개요·설정·describe·YAML. 아무것도 안 골랐으면 예제의 "해 볼 것".
 import { useSignal } from "@preact/signals";
 import { useEffect, useMemo, useRef } from "preact/hooks";
-import { controllerOf, isNodeReady, limitOf, NODE_LEASE_NS, qosClass, type Application, type ConfigMap, type NetworkPolicy, type PersistentVolume, type PersistentVolumeClaim, type Secret, type StatefulSet, type Deployment, type Ingress, type KObject, type Node, type Pod, type ReplicaSet, type Service } from "../core/api/types";
-import type { DeploymentManifest, Manifest } from "../core/cluster";
+import { controllerOf, isNodeReady, limitOf, NODE_LEASE_NS, qosClass, type Application, type ConfigMap, type NetworkPolicy, type PersistentVolume, type PersistentVolumeClaim, type Secret, type StatefulSet, type Deployment, type HorizontalPodAutoscaler, type Ingress, type KObject, type Node, type Pod, type ReplicaSet, type Service } from "../core/api/types";
+import type { DeploymentManifest, HpaManifest, Manifest } from "../core/cluster";
 import { eventSource, hpaTargets, nodeStatusText, podRestartsText, podStatusText, rolloutStatusLine, runKubectl } from "../core/kubectl";
 import { fmtAge, fmtCpu, fmtMem, parseCpu, parseMem } from "../core/units";
 import { IMAGE_NAMES, IMAGES } from "../core/workloads";
 import { NODE_MONITOR_GRACE_MS } from "../core/controllers/nodelifecycle";
+import { HPA, SCALE_DOWN_WINDOW_MS } from "../core/controllers/hpa";
 import { exampleById, resolveCommand, type TryAction } from "../model/examples";
 import { appGet } from "../core/gitops/cli";
 import { deploymentHash, HASH_LABEL, revisionOf } from "../core/controllers/deployment";
 import { currentView, sim, simTime, simVersion } from "../model/sim";
-import { addManifest, clusterDef, drawerOpen, drawerTab, exampleId, findManifest, updateConfigManifest, updateIngressManifest, updateNetpolManifest, updateStsManifest, INSPECTOR_MIN, INSPECTOR_WIDE, inspectorOpen, inspectorWidth, setInspectorWidth, toggleInspector, toggleInspectorWide, removeManifest, selection, updateManifest, updateNodeDef, updateServiceManifest } from "../model/store";
+import { addManifest, clusterDef, drawerOpen, drawerTab, exampleId, findManifest, updateConfigManifest, updateHpaManifest, updateIngressManifest, updateNetpolManifest, updateStsManifest, INSPECTOR_MIN, INSPECTOR_WIDE, inspectorOpen, inspectorWidth, setInspectorWidth, toggleInspector, toggleInspectorWide, removeManifest, selection, updateManifest, updateNodeDef, updateServiceManifest } from "../model/store";
 import { toneOf } from "../model/view";
 import { toYaml } from "../core/yaml";
 import { flattenRules, hostError, ingressNginxManifests, pathError, setRules, type RuleRow } from "../model/ingressForm";
@@ -109,7 +110,7 @@ function InspectorPanel() {
     obj?.kind === "Node" ||
     (obj?.kind === "Service" && !!findManifest("Service", obj.metadata.name)) ||
     (obj?.kind === "Ingress" && !!findManifest("Ingress", obj.metadata.name)) ||
-    ((obj?.kind === "ConfigMap" || obj?.kind === "Secret" || obj?.kind === "NetworkPolicy" || obj?.kind === "StatefulSet") && !!findManifest(obj.kind, obj.metadata.name));
+    ((obj?.kind === "ConfigMap" || obj?.kind === "Secret" || obj?.kind === "NetworkPolicy" || obj?.kind === "StatefulSet" || obj?.kind === "HorizontalPodAutoscaler") && !!findManifest(obj.kind, obj.metadata.name));
   const hasIptables = obj?.kind === "Node";
   useEffect(() => {
     if ((tab.value === "settings" && !hasSettings) || (tab.value === "iptables" && !hasIptables)) tab.value = "overview";
@@ -168,6 +169,7 @@ function InspectorPanel() {
         {tab.value === "settings" && (obj.kind === "ConfigMap" || obj.kind === "Secret") && <ConfigSettings kind={obj.kind} name={obj.metadata.name} />}
         {tab.value === "settings" && obj.kind === "NetworkPolicy" && <NetpolSettings name={obj.metadata.name} />}
         {tab.value === "settings" && obj.kind === "StatefulSet" && <StsSettings name={obj.metadata.name} />}
+        {tab.value === "settings" && obj.kind === "HorizontalPodAutoscaler" && <HpaSettings name={obj.metadata.name} />}
         {tab.value === "iptables" && obj.kind === "Node" && <IptablesView node={obj.metadata.name} />}
         {tab.value === "describe" && (
           <pre class="term">{obj.kind === "Application" ? appGet(sim.cluster, obj) : runKubectl(sim.cluster, `describe ${obj.kind.toLowerCase()} ${obj.metadata.name}`).output}</pre>
@@ -236,6 +238,8 @@ function Overview({ obj }: { obj: KObject }) {
       return <PvcOverview pvc={obj} />;
     case "PersistentVolume":
       return <PvOverview pv={obj} />;
+    case "HorizontalPodAutoscaler":
+      return <HpaOverview h={obj} />;
     case "PodDisruptionBudget":
       return (
         <>
@@ -478,7 +482,8 @@ function UsageBar({ label, use, want, request, limit, fmt }: { label: string; us
 function DeploymentOverview({ d }: { d: Deployment }) {
   const c = sim.cluster;
   const rss = c.api.list("ReplicaSet", "default").filter((r) => controllerOf(r.metadata)?.uid === d.metadata.uid);
-  const drift = sim.drift(d.metadata.name);
+  const scaler = hpaOf("Deployment", d.metadata.name);
+  const drift = sim.drift(d.metadata.name).filter((x) => !(scaler && x.startsWith("replicas:")));
   const inManifest = !!findManifest("Deployment", d.metadata.name);
   const st = rolloutStatusLine(d);
   const hash = deploymentHash(d);
@@ -487,6 +492,7 @@ function DeploymentOverview({ d }: { d: Deployment }) {
   return (
     <>
       {inManifest && drift.length > 0 && <DriftNote name={d.metadata.name} drift={drift} />}
+      {scaler && <HpaNote h={scaler} manifestReplicas={findManifest("Deployment", d.metadata.name)?.spec.replicas} />}
       <div class={`callout${st.text.startsWith("error") ? " bad" : st.done ? "" : " warn"}`}>
         <div class="small muted">kubectl rollout status</div>
         <div class="mono small">{st.text}</div>
@@ -678,7 +684,7 @@ function DeploymentSettings({ d }: { d: Deployment }) {
   return (
     <>
       <p class="note">여기서 바꾸면 매니페스트를 고쳐 <span class="mono">kubectl apply</span> 한 것과 같습니다. 선언을 바꾸면 컨트롤러가 맞춥니다.</p>
-      <Field label="replicas" hint="원하는 Pod 수">
+      <Field label="replicas" hint={hpaOf("Deployment", name) ? `HPA ${hpaOf("Deployment", name)!.metadata.name} 가 관리 중 — 바꾸면 apply 가 이 값으로 덮고, 15초 안에 HPA 가 다시 고칩니다` : "원하는 Pod 수"}>
         <div class="stepper">
           <button class="btn sm" disabled={m.spec.replicas <= 0} onClick={() => updateManifest(name, (x) => (x.spec.replicas = Math.max(0, x.spec.replicas - 1)))} aria-label="replicas 줄이기">
             −
@@ -918,7 +924,7 @@ function ExamplePanel() {
               <li key={i} class="try">
                 <div class="try-title">{t.title}</div>
                 {t.action && <TryActionRow action={t.action} />}
-                {t.action?.type === "apply" && (
+                {(t.action?.type === "apply" || t.action?.type === "git-commit") && (
                   <details class="try-yaml">
                     <summary>YAML 보기</summary>
                     <pre class="term small-term">{toYaml(t.action.manifest)}</pre>
@@ -950,6 +956,8 @@ function actionLabel(a: TryAction): string {
   if (a.type === "prestop") return `${a.deployment} 에 preStop sleep ${a.seconds}초 넣기 (apply)`;
   if (a.type === "ci-bump") return `CI: 새 이미지 빌드 → Git 의 ${a.file.split("/").pop()} 태그 커밋`;
   if (a.type === "git-rm") return `Git 에서 ${a.file.split("/").pop()} 지우고 커밋`;
+  if (a.type === "load") return a.rps ? `Service ${a.service} 로 초당 ${a.rps} 요청 (부하)` : `Service ${a.service} 부하 멈추기`;
+  if (a.type === "git-commit") return `git commit -m "${a.message}" (${a.file.split("/").pop()})`;
   if (a.type === "apply") return `kubectl apply -f ${a.manifest.metadata.name}.yaml  (${a.manifest.kind})`;
   if (a.type === "helm-upgrade") return `helm upgrade — ${Object.entries(a.data).map(([k, v]) => `${k}=${v}`).join(", ")}${a.checksum ? " (checksum/config 주석 있음)" : " (checksum 주석 없음)"}`;
   return `(클러스터 밖에서) curl ${a.node}:<${a.service} 의 NodePort>`;
@@ -1072,6 +1080,7 @@ function ServiceOverview({ svc }: { svc: Service }) {
           </button>
         )}
       </div>
+      <ServiceLoad svc={svc} ready={eps.filter((e) => e.conditions.ready).length} />
       {svc.spec.type === "NodePort" && p?.nodePort && (
         <>
           <h3>바깥에서 NodePort 로</h3>
@@ -1094,6 +1103,28 @@ function ServiceOverview({ svc }: { svc: Service }) {
       )}
       <h3>이벤트</h3>
       <Events uid={svc.metadata.uid} />
+    </>
+  );
+}
+
+const LOAD_STEPS = [0, 10, 40, 100, 200];
+
+/** 바깥(hey·k6 같은 도구)에서 초당 N 요청 — ready Pod 가 나눠 받고 요청마다 앱 CPU 를 쓴다 (HPA 실험) */
+function ServiceLoad({ svc, ready }: { svc: Service; ready: number }) {
+  const name = svc.metadata.name;
+  const rps = sim.cluster.load.get(name) ?? 0;
+  return (
+    <>
+      <h3>CPU 부하 (초당 요청)</h3>
+      <p class="muted small">바깥에서 초당 N 요청을 계속 보냅니다. ready Pod 가 나눠 받고 요청마다 앱이 CPU 를 씁니다 — HPA 실험용. 위 '부하 보내기'(curl 하나씩 성공·실패 세기)와는 다릅니다.</p>
+      <div class="actions" role="group" aria-label="CPU 부하">
+        {LOAD_STEPS.map((r) => (
+          <button key={r} class={`btn sm${rps === r ? " on" : ""}`} aria-pressed={rps === r} onClick={() => sim.setLoad(name, r)}>
+            {r ? `${r}/s` : "끄기"}
+          </button>
+        ))}
+      </div>
+      {rps > 0 && <p class="small">{ready ? `ready Pod ${ready}개가 초당 ${Math.round((rps / ready) * 10) / 10} 요청씩 받습니다. Pod 를 고르면 CPU 사용이 보입니다.` : "ready Pod 가 없어 아무도 받지 못합니다."}</p>}
     </>
   );
 }
@@ -1688,6 +1719,165 @@ function StsSettings({ name }: { name: string }) {
   );
 }
 
+/** 이 대상(Deployment·StatefulSet)을 맡은 HPA */
+function hpaOf(kind: "Deployment" | "StatefulSet", name: string): HorizontalPodAutoscaler | undefined {
+  return sim.cluster.api.peekList("HorizontalPodAutoscaler", "default").find((h) => h.spec.scaleTargetRef.kind === kind && h.spec.scaleTargetRef.name === name);
+}
+
+function HpaNote({ h, manifestReplicas }: { h: HorizontalPodAutoscaler; manifestReplicas?: number }) {
+  return (
+    <div class="callout">
+      <div class="small">
+        <button class="link mono" onClick={() => (selection.value = { kind: "HorizontalPodAutoscaler", namespace: "default", name: h.metadata.name })}>
+          HPA {h.metadata.name}
+        </button>{" "}
+        가 replicas 를 관리합니다 ({h.spec.minReplicas ?? 1}~{h.spec.maxReplicas}, 지금 {hpaTargets(h)}).
+        {manifestReplicas !== undefined && ` 매니페스트의 replicas(${manifestReplicas})는 apply 할 때만 잠깐 덮어쓰고 HPA 가 다시 고칩니다 — 실무에서는 HPA 를 쓰면 매니페스트에서 replicas 를 뺍니다.`}
+      </div>
+    </div>
+  );
+}
+
+function HpaOverview({ h }: { h: HorizontalPodAutoscaler }) {
+  const c = sim.cluster;
+  const ref = h.spec.scaleTargetRef;
+  const target = c.api.get(ref.kind, ref.name, "default");
+  const goal = h.spec.metrics[0]?.resource.target.averageUtilization ?? 80;
+  const util = h.status.currentMetrics?.[0]?.resource.current.averageUtilization;
+  const min = h.spec.minReplicas ?? 1;
+  const pods = target ? c.api.list("Pod", "default").filter((p) => controllerOf(p.metadata) && p.metadata.deletionTimestamp === undefined && Object.entries(target.spec.selector.matchLabels).every(([k, v]) => p.metadata.labels[k] === v)) : [];
+  const scale = Math.max(goal * 2, util ?? 0) * 1.1;
+  const pct = (n: number) => `${Math.min(100, (n / scale) * 100)}%`;
+  const decisions = c.trace.events.filter((e) => e.actor === HPA && e.ref?.name === h.metadata.name).slice(-6).reverse();
+  const stabilized = h.status.conditions.find((x) => x.type === "AbleToScale")?.reason === "ScaleDownStabilized";
+  return (
+    <>
+      <div class="callout">
+        <div class="small">
+          15초마다 Pod 의 CPU 사용량(metrics-server)을 requests 로 나눠 평균 사용률을 내고, 원하는 수 = ceil(지금 수 × 사용률 / 목표). 목표와 10% 안쪽이면 그대로, 늘릴 때는 한 번에 두 배 또는 +4 까지, 줄일 때는 지난 5분 추천 중 가장 큰 것을 따릅니다(출렁임 방지).
+        </div>
+      </div>
+      <Rows
+        rows={[
+          ["대상", target ? <Link kind={ref.kind} name={ref.name} /> : <span class="warn-text">{`${ref.kind} ${ref.name} 없음`}</span>],
+          ["replicas", `지금 ${h.status.currentReplicas} → 원하는 ${h.status.desiredReplicas} (min ${min} · max ${h.spec.maxReplicas})`],
+          ["마지막 조정", h.status.lastScaleTime !== undefined ? `${fmtAge(c.now - h.status.lastScaleTime)} 전` : <span class="muted">없음</span>],
+        ]}
+      />
+      <div class="usage-row hpa-meter">
+        <div class="usage-head">
+          <span class="usage-label">CPU 사용률 (requests 대비 평균)</span>
+          <span class="mono small">
+            {util === undefined ? "<unknown>" : `${util}%`} / 목표 {goal}%
+          </span>
+        </div>
+        <div class="usage-bar">
+          {util !== undefined && <span class={`usage-fill${util > goal * (1 + 0.1) ? " hot" : ""}`} style={{ width: pct(util) }} />}
+          <span class="usage-tick req" style={{ left: pct(goal) }} title={`목표 ${goal}%`} />
+        </div>
+      </div>
+      {util === undefined && <p class="note">사용률을 못 냅니다 — 아래 조건·이벤트를 보세요. 대개 컨테이너에 requests.cpu 가 없거나 Ready 인 Pod 가 없어서입니다.</p>}
+      {stabilized && <p class="note">줄이기 안정화 중: 사용률은 낮지만 지난 {SCALE_DOWN_WINDOW_MS / 60_000}분 안의 더 큰 추천을 따라 아직 줄이지 않습니다.</p>}
+      <h3>Pod 별 사용 (metrics-server)</h3>
+      <ul class="list">
+        {pods.map((p) => {
+          const m = c.podMetrics(p);
+          const req = p.spec.containers.reduce((n, x) => n + x.resources.requests.cpu, 0);
+          return (
+            <li key={p.metadata.uid}>
+              <Link kind="Pod" name={p.metadata.name} />
+              <span class="mono small muted">{m ? `${fmtCpu(m.cpu)} / ${req ? fmtCpu(req) : "requests 없음"}${req ? ` = ${Math.floor((m.cpu * 100) / req)}%` : ""}` : podStatusText(p)}</span>
+            </li>
+          );
+        })}
+        {!pods.length && <li class="muted small">Pod 없음</li>}
+      </ul>
+      <h3>조건</h3>
+      <ul class="list">
+        {h.status.conditions.map((x) => (
+          <li key={x.type} title={x.message}>
+            <span class="mono small">{x.type}</span>
+            <span class={`small ${(x.type === "ScalingLimited" ? x.status === "True" : x.status !== "True") ? "warn-text" : ""}`}>
+              {x.status} · {x.reason}
+            </span>
+          </li>
+        ))}
+        {!h.status.conditions.length && <li class="muted small">아직 계산 전 (15초마다)</li>}
+      </ul>
+      <h3>최근 판단</h3>
+      <ul class="list hpa-log">
+        {decisions.map((e) => (
+          <li key={e.seq}>
+            <span class="mono small">{e.msg.slice(h.metadata.name.length + 2)}</span>
+            <span class="muted small">{fmtAge(c.now - e.t)} 전</span>
+          </li>
+        ))}
+        {!decisions.length && <li class="muted small">아직 없음</li>}
+      </ul>
+      <div class="actions">
+        <button class="btn sm" onClick={() => runAndShow("kubectl get hpa")}>
+          kubectl get hpa
+        </button>
+        <button class="btn sm" onClick={() => runAndShow(`kubectl describe hpa ${h.metadata.name}`)}>
+          describe
+        </button>
+      </div>
+      <h3>이벤트</h3>
+      <Events uid={h.metadata.uid} />
+    </>
+  );
+}
+
+function HpaSettings({ name }: { name: string }) {
+  const m = findManifest("HorizontalPodAutoscaler", name);
+  if (!m) return <p class="note">이 HPA 는 매니페스트에 없습니다 (kubectl autoscale 로 만듦).</p>;
+  const min = m.spec.minReplicas ?? 1;
+  const max = m.spec.maxReplicas;
+  const goal = m.spec.metrics[0]!.resource.target.averageUtilization;
+  const step = (label: string, v: number, lo: number, hi: number, set: (x: HpaManifest, n: number) => void) => (
+    <div class="stepper">
+      <button class="btn sm" disabled={v <= lo} onClick={() => updateHpaManifest(name, (x) => set(x, v - 1))} aria-label={`${label} 줄이기`}>
+        −
+      </button>
+      <span class="mono stepper-num">{v}</span>
+      <button class="btn sm" disabled={v >= hi} onClick={() => updateHpaManifest(name, (x) => set(x, v + 1))} aria-label={`${label} 늘리기`}>
+        +
+      </button>
+    </div>
+  );
+  return (
+    <>
+      <p class="note">여기서 바꾸면 매니페스트를 고쳐 kubectl apply 한 것과 같습니다. 다음 15초 확인 때 반영됩니다.</p>
+      <Field label="minReplicas" hint="부하가 없어도 이만큼은 둡니다">
+        {step("minReplicas", min, 1, max, (x, n) => (x.spec.minReplicas = n))}
+      </Field>
+      <Field label="maxReplicas" hint="부하가 커도 이 이상은 늘리지 않습니다 (ScalingLimited)">
+        {step("maxReplicas", max, min, 20, (x, n) => (x.spec.maxReplicas = n))}
+      </Field>
+      <Field label="CPU 목표 (%)" hint="requests 대비 평균 사용률. 낮을수록 일찍·많이 늘립니다">
+        <TextInput
+          value={String(goal)}
+          validate={(v) => (/^\d+$/.test(v) && Number(v) >= 1 && Number(v) <= 500 ? undefined : "1~500 사이 정수")}
+          onCommit={(v) => updateHpaManifest(name, (x) => (x.spec.metrics[0]!.resource.target.averageUtilization = Number(v)))}
+        />
+      </Field>
+      <div class="actions">
+        <button
+          class="btn danger"
+          onClick={() => {
+            removeManifest("HorizontalPodAutoscaler", name);
+            selection.value = null;
+          }}
+          title="replicas 는 지금 값 그대로 남습니다"
+        >
+          <Icon name="trash" size={14} />
+          HPA 지우기 (replicas 는 그대로)
+        </button>
+      </div>
+    </>
+  );
+}
+
 function PvcOverview({ pvc }: { pvc: PersistentVolumeClaim }) {
   const c = sim.cluster;
   const pv = pvc.spec.volumeName ? c.api.get("PersistentVolume", pvc.spec.volumeName) : undefined;
@@ -2123,16 +2313,28 @@ function GitPanel({ url }: { url: string }) {
               </div>
               {m?.kind === "Deployment" && (
                 <>
-                  <Field label="replicas">
-                    <div class="stepper">
-                      <button class="btn sm" onClick={() => edit((x) => ((x[path] as DeploymentManifest).spec.replicas = Math.max(0, m.spec.replicas - 1)))}>
-                        −
-                      </button>
-                      <span class="mono stepper-num">{m.spec.replicas}</span>
-                      <button class="btn sm" onClick={() => edit((x) => ((x[path] as DeploymentManifest).spec.replicas = Math.min(30, m.spec.replicas + 1)))}>
-                        +
-                      </button>
-                    </div>
+                  <Field label="replicas" hint={m.spec.replicas === undefined ? "비움 — Argo CD 가 replicas 를 비교하지 않아 HPA·kubectl scale 값이 그대로 남습니다" : undefined}>
+                    {m.spec.replicas === undefined ? (
+                      <div class="stepper">
+                        <span class="muted small">비움 (HPA 에 맡김)</span>
+                        <button class="btn sm" onClick={() => edit((x) => ((x[path] as DeploymentManifest).spec.replicas = 1))}>
+                          적기
+                        </button>
+                      </div>
+                    ) : (
+                      <div class="stepper">
+                        <button class="btn sm" onClick={() => edit((x) => ((x[path] as DeploymentManifest).spec.replicas = Math.max(0, m.spec.replicas - 1)))}>
+                          −
+                        </button>
+                        <span class="mono stepper-num">{m.spec.replicas}</span>
+                        <button class="btn sm" onClick={() => edit((x) => ((x[path] as DeploymentManifest).spec.replicas = Math.min(30, m.spec.replicas + 1)))}>
+                          +
+                        </button>
+                        <button class="btn sm ghost" title="Git 에서 replicas 를 빼면 HPA 가 고친 값과 싸우지 않습니다" onClick={() => edit((x) => delete (x[path] as { spec: { replicas?: number } }).spec.replicas)}>
+                          비우기
+                        </button>
+                      </div>
+                    )}
                   </Field>
                   <Field label="image">
                     <TextInput value={m.spec.template.spec.containers[0]!.image} onCommit={(v) => edit((x) => ((x[path] as DeploymentManifest).spec.template.spec.containers[0]!.image = v))} />

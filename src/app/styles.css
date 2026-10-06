@@ -175,6 +175,11 @@ pre {
   padding: 0 8px;
   font-size: 12px;
 }
+.btn.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
 .btn.danger {
   color: var(--bad);
 }
@@ -863,6 +868,10 @@ pre {
   font-size: 11px;
   color: var(--ink-2);
 }
+.svc-load {
+  color: var(--wait);
+  font-size: 11px;
+}
 .svc-eps {
   font-size: 11px;
   color: var(--ok);
@@ -1501,6 +1510,20 @@ body.resizing-row * {
   justify-content: space-between;
   gap: 8px;
   font-size: 12px;
+}
+.hpa-meter {
+  margin: 10px 0 6px;
+}
+/* HPA 판단 한 줄이 길다 — 시각은 오른쪽에 붙이고 문장은 줄바꿈 */
+.hpa-log li {
+  align-items: baseline;
+}
+.hpa-log li > .mono {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.hpa-log li > .muted {
+  flex: none;
 }
 .events {
   padding: 0;

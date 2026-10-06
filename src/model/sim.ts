@@ -154,7 +154,11 @@ class SimController {
       });
     } else if (a.type === "ci-bump") this.ciBump(a.repo, a.file);
     else if (a.type === "git-rm") this.gitRemove(a.repo, a.file);
-    else if (a.type === "apply") {
+    else if (a.type === "load") this.setLoad(a.service, a.rps);
+    else if (a.type === "git-commit") {
+      const head = c.git.get(a.repo)?.head;
+      if (head) this.gitCommit(a.repo, { ...structuredClone(head.files), [a.file]: structuredClone(a.manifest) }, a.message);
+    } else if (a.type === "apply") {
       c.trace.add("user", "user", `kubectl apply -f ${a.manifest.metadata.name}.yaml (${a.manifest.kind})`, { kind: a.manifest.kind, namespace: "default", name: a.manifest.metadata.name });
       // 매니페스트가 그대로여도 다시 적용 (kubectl delete 로 라이브만 지운 뒤 같은 apply 를 다시 누른 경우)
       this.syncer.forget(a.manifest.kind, a.manifest.metadata.name);
@@ -188,6 +192,15 @@ class SimController {
       return head.files[a.file] ? undefined : `Git 에 ${a.file} 이(가) 없습니다${a.type === "git-rm" ? " (이미 지움)" : ""}`;
     }
     if (a.type === "helm-upgrade") return helmUpgradeBlocked(clusterDef.peek(), a);
+    if (a.type === "load") {
+      if (!c.api.get("Service", a.service, "default")) return `Service ${a.service} 가 없습니다`;
+      return (c.load.get(a.service) ?? 0) === a.rps ? (a.rps ? "이미 그 부하입니다" : "부하가 없습니다") : undefined;
+    }
+    if (a.type === "git-commit") {
+      const head = c.git.get(a.repo)?.head;
+      if (!head) return "Git 저장소가 없습니다";
+      return stableJson(head.files[a.file]) === stableJson(a.manifest) ? "이미 커밋했습니다" : undefined;
+    }
     if (a.type === "apply") {
       const cur = clusterDef.peek().manifests.find((m) => m.kind === a.manifest.kind && m.metadata.name === a.manifest.metadata.name);
       const live = c.api.get(a.manifest.kind, a.manifest.metadata.name, a.manifest.kind === "Application" ? "argocd" : "default");
@@ -227,6 +240,12 @@ class SimController {
     if (!from) return;
     const p = this.cluster.api.get("Service", svc, "default")?.spec.ports[0];
     this.cluster.startTraffic(from, `http://${svc}${p && p.port !== 80 ? `:${p.port}` : ""}`, 100);
+    this.bump();
+  }
+
+  /** Service 에 초당 요청 부하 (HPA 실험) */
+  setLoad(svc: string, rps: number): void {
+    this.cluster.setLoad(svc, rps);
     this.bump();
   }
 

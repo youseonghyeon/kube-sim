@@ -1,5 +1,6 @@
 // 왼쪽: 오브젝트 나무 (Deployment → ReplicaSet → Pod 수) 와 노드 목록. 고르면 인스펙터에 보인다.
-import { configMap, deployment, networkPolicy, service, statefulSet } from "../core/cluster";
+import { configMap, deployment, hpa, networkPolicy, service, statefulSet } from "../core/cluster";
+import { hpaTargets } from "../core/kubectl";
 import type { ClusterView } from "../model/view";
 import { currentView, sim } from "../model/sim";
 import { addManifest, addNodeDef, clusterDef, removeNodeDef, selection, uniqueDeploymentName } from "../model/store";
@@ -13,6 +14,8 @@ export function Sidebar() {
   const ings = sim.cluster.api.list("Ingress", "default");
   const apps = sim.cluster.api.list("Application", "argocd");
   const netpols = sim.cluster.api.list("NetworkPolicy", "default");
+  const hpas = sim.cluster.api.list("HorizontalPodAutoscaler", "default");
+  const unscaled = view.deployments.find((d) => !hpas.some((h) => h.spec.scaleTargetRef.kind === "Deployment" && h.spec.scaleTargetRef.name === d.name));
   const configs = [...sim.cluster.api.list("ConfigMap", "default"), ...sim.cluster.api.list("Secret", "default")];
   const sel = selection.value;
   const isSel = (kind: string, name: string) => sel?.kind === kind && sel.name === name;
@@ -151,6 +154,35 @@ export function Sidebar() {
           </button>
         ))}
         {!view.services.length && <div class="side-empty">없음. + 또는 kubectl expose</div>}
+      </div>
+      <div class="side-section">
+        <div class="side-head">
+          <span>HPA</span>
+          <button
+            class="icon-btn sm"
+            title={unscaled ? `HPA 추가 — Deployment ${unscaled.name} 를 CPU 50% 목표로 1~10개 (kubectl autoscale 과 같음). requests.cpu 가 없으면 사용률을 못 냅니다` : "HPA 추가 — HPA 가 없는 Deployment 가 먼저 있어야 합니다"}
+            aria-label="HPA 추가"
+            disabled={!unscaled}
+            onClick={() => {
+              if (!unscaled) return;
+              const name = uniqueDeploymentName(unscaled.name, "HorizontalPodAutoscaler");
+              addManifest(hpa(name, { target: unscaled.name, min: 1, max: 10, cpuPercent: 50 }));
+              selection.value = { kind: "HorizontalPodAutoscaler", namespace: "default", name };
+            }}
+          >
+            <Icon name="plus" size={15} />
+          </button>
+        </div>
+        {hpas.map((h) => (
+          <button key={h.metadata.uid} class={`tree-row${isSel("HorizontalPodAutoscaler", h.metadata.name) ? " sel" : ""}`} data-tree={`hpa/${h.metadata.name}`} onClick={() => (selection.value = { kind: "HorizontalPodAutoscaler", namespace: "default", name: h.metadata.name })}>
+            <span class="tree-name">{h.metadata.name}</span>
+            <span class="tree-kind mono">{hpaTargets(h).replace(/^cpu: /, "")}</span>
+            <span class={`tree-count ${h.status.currentMetrics ? "ok" : "wait"}`} title="지금 replicas">
+              {h.status.currentReplicas}
+            </span>
+          </button>
+        ))}
+        {!hpas.length && <div class="side-empty">없음. + 또는 kubectl autoscale</div>}
       </div>
       <div class="side-section">
         <div class="side-head">

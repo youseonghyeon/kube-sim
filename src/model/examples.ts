@@ -1,5 +1,5 @@
 // 예제: 노드 + 매니페스트 + "해 볼 것"(학습 포인트를 직접 확인하는 행동).
-import { application, configMap, deployment, ingress, networkPolicy, pdb, secret, service, statefulSet, type Manifest } from "../core/cluster";
+import { application, configMap, deployment, hpa, ingress, networkPolicy, pdb, secret, service, statefulSet, type DeploymentManifest, type Manifest } from "../core/cluster";
 
 const NET_SIM_REPO = "https://github.com/youseonghyeon/net-sim.git";
 import type { Pod } from "../core/api/types";
@@ -33,7 +33,11 @@ export interface TryStep {
     /** helm upgrade 흉내: values 의 설정으로 ConfigMap 을 바꾸고, checksum 이면 Pod 템플릿의 checksum/config 주석도 (설정 해시) */
     | { type: "helm-upgrade"; configMap: string; deployment: string; data: Record<string, string>; checksum: boolean }
     /** kubectl apply -f: 매니페스트를 더하거나 같은 이름의 것을 바꾼다 (카드에 YAML 이 보인다) */
-    | { type: "apply"; manifest: Manifest };
+    | { type: "apply"; manifest: Manifest }
+    /** Service 에 초당 요청 부하를 건다 (0 이면 멈춤) — hey·k6 같은 바깥 도구 흉내 */
+    | { type: "load"; service: string; rps: number }
+    /** Git 의 파일 하나를 이 매니페스트로 바꿔 커밋 (사람이 고쳐 push 한 것) */
+    | { type: "git-commit"; repo: string; file: string; manifest: Manifest; message: string };
   /** 무엇을 보게 되나 (학습 포인트) */
   expect: string;
   /** 실패하는 것이 학습 포인트인 명령 (예: ClusterIP 로 ping) */
@@ -51,6 +55,16 @@ export interface Example {
 }
 
 const node = (name: string, cpu = 2000, memory = 4096): NodeDef => ({ name, cpu, memory });
+
+const HPA_REPO = "https://github.com/example/php-apache.git";
+/** HPA 실습 앱 (쿠버네티스 공식 HPA 예제의 php-apache) */
+const phpApache = (cpu = 200) => deployment("web", { replicas: 1, image: "example/php-apache:1.0", cpu, memory: 64, port: 80 });
+/** replicas 를 뺀 매니페스트 — apply·Argo CD 가 라이브 replicas 를 건드리지 않는다 (HPA 가 맡을 때) */
+function withoutReplicas(m: DeploymentManifest): DeploymentManifest {
+  const out = structuredClone(m);
+  delete (out.spec as { replicas?: number }).replicas;
+  return out;
+}
 
 export const EXAMPLES: Example[] = [
   {
@@ -969,6 +983,72 @@ export const EXAMPLES: Example[] = [
       { title: "다시 쓰기", command: "kubectl exec {pod:client} -- curl http://kv:8080", expect: "visits=1 — 처음부터입니다. DB 처럼 데이터를 남겨야 하면 PVC(와 보통 StatefulSet)가 필요합니다." },
     ],
   },
+  {
+    id: "hpa-basics",
+    title: "HPA: 부하에 따라 늘고 줄기",
+    summary: "공식 HPA 예제(php-apache)처럼 CPU 50% 목표로 1~10개를 오갑니다. 15초마다 'Pod CPU 사용 ÷ requests' 평균을 보고 원하는 수 = ceil(지금 수 × 사용률/목표). 늘리는 건 빠르고, 줄이는 건 5분 기다립니다.",
+    build: () => ({
+      nodes: [node("worker-1", 4000), node("worker-2", 4000)],
+      manifests: [phpApache(), service("web", { selector: { app: "web" }, port: 80 }), hpa("web", { min: 1, max: 10, cpuPercent: 50 })],
+    }),
+    tries: [
+      { title: "HPA 보기", command: "kubectl get hpa", expect: "TARGETS cpu: 0%/50% — 가만히 있는 php-apache 는 CPU 1m 이라 requests 200m 의 0%. REPLICAS 1 (minReplicas)." },
+      { title: "초당 40 요청", action: { type: "load", service: "web", rps: 40 }, expect: "요청 하나에 CPU 10ms → 400m 쯤 = 200%. 15초 안에 ceil(1 × 200%/50%) = 4 로 늘립니다 (로그의 horizontal-pod-autoscaler 줄). Service 상자에 '초당 40 요청'." },
+      { title: "다 뜬 뒤", command: "kubectl get hpa", expect: "새 Pod 가 Ready 가 되면 4개가 10 요청씩 나눠 받아 Pod 마다 101m = 50% — 목표와 맞아 그대로입니다. 뜨는 동안은 Ready 아닌 Pod 를 0% 로 쳐서 더 늘리지 않습니다." },
+      { title: "초당 160 요청", action: { type: "load", service: "web", rps: 160 }, expect: "4개 × 200% → 원하는 16 이지만 한 번에 두 배(8)까지만, 다음 15초에 maxReplicas 10 에서 멈춥니다. Pod 마다 80% 로 목표보다 높게 남습니다." },
+      { title: "왜 10 에서 멈췄나", command: "kubectl describe hpa web", expect: "ScalingLimited True TooManyReplicas — the desired replica count is more than the maximum replica count. 이벤트에 SuccessfulRescale New size: 4 → 8 → 10." },
+      { title: "부하 끄기", action: { type: "load", service: "web", rps: 0 }, expect: "사용률이 0% 가 돼도 바로 줄이지 않습니다 — 지난 5분 추천 중 가장 큰 것(10)을 따릅니다 (ScaleDownStabilized). 상단 '+1분' 이나 10× 로 기다려 보세요." },
+      { title: "5분 뒤", command: "kubectl get hpa", expect: "5분이 지나면 한 번에 minReplicas 1 로 줄어듭니다 (New size: 1; reason: All metrics below target). 줄이는 쪽만 느린 것은 출렁임(flapping)을 막으려는 기본값입니다." },
+    ],
+  },
+  {
+    id: "hpa-no-requests",
+    title: "HPA 가 <unknown> 이면 (requests 없음)",
+    summary: "HPA 의 사용률은 'requests 대비 %' 입니다. 컨테이너에 requests.cpu 가 없으면 나눌 수가 없어 TARGETS 가 <unknown> 이 되고, 부하가 와도 늘리지 않습니다. 흔한 첫 실수입니다.",
+    build: () => ({
+      nodes: [node("worker-1", 4000), node("worker-2", 4000)],
+      manifests: [phpApache(0), service("web", { selector: { app: "web" }, port: 80 }), hpa("web", { min: 1, max: 10, cpuPercent: 50 })],
+    }),
+    tries: [
+      { title: "HPA 보기", command: "kubectl get hpa", expect: "TARGETS cpu: <unknown>/50%." },
+      { title: "초당 40 요청", action: { type: "load", service: "web", rps: 40 }, expect: "Pod 는 CPU 를 400m 쯤 쓰지만 HPA 는 늘리지 않습니다." },
+      { title: "왜", command: "kubectl describe hpa web", expect: "ScalingActive False FailedGetResourceMetric — failed to get cpu utilization: missing request for cpu in container web of Pod web-…" },
+      { title: "requests 주기", action: { type: "apply", manifest: phpApache(200) }, expect: "requests.cpu 200m 을 넣어 apply → 템플릿이 바뀌어 새 Pod 로 롤링. 새 Pod 가 Ready 가 되면 다음 15초에 사용률이 나오고 늘어납니다." },
+      { title: "다시 보기", command: "kubectl get hpa", expect: "cpu: …%/50% 로 숫자가 나오고 REPLICAS 가 늘어 있습니다." },
+    ],
+  },
+  {
+    id: "hpa-gitops",
+    title: "HPA + Argo CD: replicas 를 두고 싸움",
+    summary: "Git 의 Deployment 에 replicas: 1 이 적혀 있고 selfHeal 이 켜져 있으면, HPA 가 늘린 replicas 를 Argo CD 가 OutOfSync 로 보고 1 로 되돌립니다 — 둘이 번갈아 고칩니다. 고치는 법은 Git 에서 replicas 를 빼는 것(HPA 에 맡김)입니다.",
+    build: () => ({
+      nodes: [node("worker-1", 4000), node("worker-2", 4000)],
+      git: [
+        {
+          url: HPA_REPO,
+          message: "deploy: php-apache + hpa",
+          files: {
+            "deploy/deployment.yaml": phpApache(),
+            "deploy/service.yaml": service("web", { selector: { app: "web" }, port: 80 }),
+            "deploy/hpa.yaml": hpa("web", { min: 1, max: 10, cpuPercent: 50 }),
+          },
+        },
+      ],
+      manifests: [application("web", { repoURL: HPA_REPO, path: "deploy", automated: { prune: true, selfHeal: true } })],
+    }),
+    tries: [
+      { title: "앱 상태", command: "argocd app get web", expect: "Deployment·Service·HPA 셋이 Synced · Healthy." },
+      { title: "초당 40 요청", action: { type: "load", service: "web", rps: 40 }, expect: "HPA 가 replicas 를 4 로 → Argo CD 가 Git(1)과 달라 OutOfSync → selfHeal 이 1 로 → 다음 15초에 HPA 가 다시 4 로… 로그에서 둘이 번갈아 나옵니다." },
+      { title: "싸움의 흔적", command: "kubectl describe hpa web", expect: "SuccessfulRescale New size: 4 가 ×N 으로 쌓입니다. Pod 가 생겼다 지워지기를 되풀이합니다." },
+      {
+        title: "Git 에서 replicas 빼기",
+        action: { type: "git-commit", repo: HPA_REPO, file: "deploy/deployment.yaml", manifest: withoutReplicas(phpApache()), message: "let hpa own replicas" },
+        expect: "Deployment 매니페스트에서 replicas 줄을 지워 커밋합니다. Argo CD 는 Git 에 적힌 필드만 비교하므로 이제 replicas 는 보지 않습니다. (Git 상자 → 파일 편집의 '비우기' 와 같음)",
+      },
+      { title: "Refresh", command: "argocd app get web --refresh", expect: "새 리비전으로 sync — replicas 를 지운 것이라 한 번은 기본값 1 이 되지만, 그 뒤로는 HPA 가 늘린 값을 Argo CD 가 건드리지 않아 Synced 로 남습니다." },
+      { title: "확인", command: "argocd app diff web", expect: "차이가 없습니다 — HPA 가 정한 replicas 는 Git 과 비교하지 않습니다." },
+    ],
+  },
 ];
 
 
@@ -987,6 +1067,7 @@ export const EXAMPLE_GROUPS: { label: string; ids: string[] }[] = [
   { label: "설정", ids: ["config-env", "config-checksum", "config-missing"] },
   { label: "네트워크 정책", ids: ["netpol-basics", "netpol-egress", "netpol-ingress"] },
   { label: "상태 있는 앱", ids: ["sts-basics", "sts-node-down", "deployment-db"] },
+  { label: "자동 확장", ids: ["hpa-basics", "hpa-no-requests", "hpa-gitops"] },
   { label: "GitOps", ids: ["gitops"] },
 ];
 

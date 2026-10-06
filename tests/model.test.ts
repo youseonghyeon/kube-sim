@@ -64,6 +64,16 @@ describe("예제", () => {
           s.cluster.runFor(5_000);
           continue;
         }
+        if (t.action?.type === "load") {
+          s.cluster.setLoad(t.action.service, t.action.rps);
+          s.cluster.runFor(60_000);
+          continue;
+        }
+        if (t.action?.type === "git-commit") {
+          const head = s.cluster.git.get(t.action.repo)!.head!;
+          s.cluster.gitCommit(t.action.repo, { ...structuredClone(head.files), [t.action.file]: structuredClone(t.action.manifest) }, t.action.message);
+          continue;
+        }
         if (!t.command) continue;
         const cmd = resolveCommand(s.cluster.api.list("Pod"), t.command)!;
         // curl 로 시작하면 클러스터 밖에서 (화면의 kubectl 창과 같음)

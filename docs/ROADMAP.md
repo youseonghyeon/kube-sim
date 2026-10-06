@@ -63,7 +63,7 @@
 - 메모: 사용자의 실제 구성(Tailscale funnel → Ingress → Service)을 예제로 만들 수 있다
 
 ## 5. 운영 (후보 — 시작할 때 고른다)
-- 후보: requests/limits 와 OOMKilled·CPU throttling(5a ✅), ConfigMap/Secret 변경과 재시작(5b ✅), NetworkPolicy(5c ✅), StatefulSet + PVC(5d ✅), HPA(메트릭 흉내로 replicas 조정)
+- 후보: requests/limits 와 OOMKilled·CPU throttling(5a ✅), ConfigMap/Secret 변경과 재시작(5b ✅), NetworkPolicy(5c ✅), StatefulSet + PVC(5d ✅), HPA(5e ✅)
 
 ### 5a. requests/limits · OOMKilled · CPU throttling ✅ 2026-10-06 (사용자 선택)
 - 된 것: `resources.limits`(requests > limits 거절, limits 만 적으면 requests = limits), QoS 클래스, 이미지별 메모리(램프·누수)·CPU(수요·요청당 일) 모양, cgroup OOM·노드 OOM(oom_score·SystemOOM 이벤트), CPU 나눠 받기(requests 비율)·throttling → 응답 시간·probe timeout, `kubectl top pods|nodes`·`set resources --limits`·describe 의 Limits/QoS/OOMKilled·describe node 의 Limits·overcommit, 인스펙터(limits 편집·Pod 자원 막대·OOMKilled 이유), 노드 칸의 요청·사용, Pod 칩 배지(mem %·throttled), 예제 묶음 "자원" 3개
@@ -119,7 +119,7 @@
 - 만들 것: PVC·PV·StorageClass(local-path) 오브젝트와 프로비저너, Pod 의 persistentVolumeClaim volume, 스케줄러의 볼륨 필터, kubelet 의 마운트(PVC 가 Bound 될 때까지 기다림), 방문 수를 볼륨에 적는 앱, StatefulSet 컨트롤러, headless Service DNS, `kubectl get/describe sts·pvc·pv·sc`·`scale sts`·`rollout restart|status sts`·`delete pvc`, 화면(목록·노드 칸의 디스크·인스펙터), 예제 묶음 "상태 있는 앱"
 - 완료 기준: 예제의 "해 볼 것" 이 위 학습 포인트를 kubectl 출력·로그·앱 응답(방문 수)으로 보여 주고, 컨트롤러·스케줄러 동작이 트레이스 테스트로 고정된다. 네 가지 검증 통과
 
-### 5e. HPA (2026-10-06 시작, 사용자 승인 — 5단계 마지막 후보)
+### 5e. HPA ✅ 2026-10-06
 - 왜: HPA 를 붙이면 "왜 안 늘어나지(`<unknown>`)", "부하가 끝났는데 왜 안 줄지", "Argo CD 가 replicas 를 되돌린다" 를 겪는다. 사용자의 Argo CD(selfHeal) 구성과 바로 닿는다.
 - 배우는 것
   - HPA 는 CPU 사용량을 **requests 대비 %** 로 본다 — requests 가 없으면 `<unknown>` (FailedGetResourceMetric: missing request for cpu). limits 가 아니다
@@ -129,6 +129,8 @@
   - HPA 가 Deployment 의 replicas 를 고친다 → kubectl scale 이나 **Git 의 replicas(Argo CD selfHeal)** 와 싸운다. Git 매니페스트에서 replicas 를 빼야 한다
 - 만들 것: Service 에 거는 부하(초당 요청, ready Pod 가 나눠 받음) → Pod CPU 사용, HPA 오브젝트·컨트롤러(15초 배경 주기·안정화 창·늘리기 정책·조건), `kubectl get/describe/delete hpa`·`autoscale`, apply 가 replicas 를 비운 매니페스트에서 라이브 값을 지킴(3-way), 화면(목록·인스펙터·Service 의 부하 조절·캔버스 표시), 예제 묶음 "자동 확장"
 - 완료 기준: 예제의 "해 볼 것" 이 위 학습 포인트를 kubectl 출력·로그로 보여 주고, 계산·시간이 트레이스 테스트로 고정된다. 네 가지 검증 통과
+- 된 것: 위 전부 + 예제 hpa-basics(40/s → 4 → 160/s → 8 → max 10 → 끄면 5분 뒤 1)·hpa-no-requests·hpa-gitops(Git replicas 와 싸움 → Git 에서 replicas 빼기), Git 편집기의 replicas '비우기', 해 볼 것 동작 `load`·`git-commit` (`tests/hpa.test.ts`, `tests/hpa-examples.test.ts`)
+- 축소판: CPU Resource Utilization 메트릭만(메모리·custom·external 없음), behavior 사용자 설정 없음(기본값만), cpu initialization period 를 Ready 여부로만, metrics-server 지연 없음(사용량을 바로 읽음), 부하는 Service 단위 초당 요청(연결·지연 없음)
 
 ## 6. GitOps (ArgoCD 식) ✅ 2026-10-02
 - 된 것: Git 저장소(커밋 이력, 경로별 매니페스트), Argo CD application-controller(3분 폴링·Refresh, Git 에 적은 필드 기준 비교 → Synced/OutOfSync, 리소스 Health, 자동 sync 는 새 리비전마다 한 번, selfHeal 5초, prune, 이력), `argocd app list/get/diff/sync/history/set`·`git log` 흉내, `kubectl get applications -n argocd`, 캔버스 GitOps 칸(Git → Application, '아직 모름' 표시·폴링 카운트다운), Application 인스펙터(정책 토글·리소스·차이), Git 인스펙터(작업 사본 편집 → 커밋), 예제 '내 배포 파이프라인'(CI 태그 커밋 → 폴링 → 자동 sync → 롤아웃)

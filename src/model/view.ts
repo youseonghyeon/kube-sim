@@ -399,7 +399,7 @@ export const CONTROL_PLANE = [
     id: "controller-manager",
     title: "kube-controller-manager",
     role: "원하는 상태와 지금 상태를 맞추는 컨트롤러들",
-    actors: ["deployment-controller", "replicaset-controller", "endpointslice-controller", "garbage-collector", "pod-garbage-collector", "node-lifecycle-controller", "taint-eviction-controller"],
+    actors: ["deployment-controller", "replicaset-controller", "statefulset-controller", "endpointslice-controller", "disruption-controller", "horizontal-pod-autoscaler", "garbage-collector", "pod-garbage-collector", "node-lifecycle-controller", "taint-eviction-controller"],
   },
   { id: "coredns", title: "CoreDNS", role: "Service 이름 → ClusterIP (kube-dns 10.96.0.10). 실제로는 kube-system 의 Pod — 축소판", actors: ["coredns"] },
 ] as const;

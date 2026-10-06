@@ -97,6 +97,16 @@
 | scale down 했는데 PVC 가 남음 | StatefulSet 의 PVC 는 지우지 않는다(Retain) | 필요 없으면 `kubectl delete pvc` (데이터도 지워짐) |
 | headless Service 로 curl 하니 연결 거부 | headless 는 DNAT 가 없어 Service 포트가 아니라 Pod 포트로 간다 | Pod 의 포트(예: 8080)로 접속 |
 
+## HPA (5e)
+
+| 증상 / 출력 | 원인 | 고치는 법 |
+|---|---|---|
+| `kubectl get hpa` 의 TARGETS 가 `<unknown>/50%`, FailedGetResourceMetric `missing request for cpu` | 사용률은 requests 대비 % — 컨테이너에 requests.cpu 가 없다 | Deployment 의 컨테이너에 `resources.requests.cpu` 를 적는다 |
+| 부하가 끝났는데 replicas 가 안 줄어듦 (AbleToScale ScaleDownStabilized) | 줄일 때는 지난 5분 추천 중 가장 큰 것을 따른다 | 정상 — 5분 기다린다 (`behavior.scaleDown.stabilizationWindowSeconds` 로 조절) |
+| 사용률이 높은데 더 안 늘어남 (ScalingLimited TooManyReplicas) | maxReplicas 에 닿았다 | maxReplicas 를 올리거나 앱·requests 를 본다 |
+| HPA 가 늘린 replicas 가 곧 원래대로, Pod 가 생겼다 지워지기를 되풀이 | Git(또는 kubectl apply 하는 매니페스트)에 replicas 가 있어 Argo CD selfHeal 이 되돌린다 | 매니페스트에서 replicas 를 뺀다 (HPA 에 맡김) |
+| kubectl scale 로 바꾼 replicas 가 15초 안에 되돌아감 | HPA 가 replicas 를 관리한다 | HPA 의 min/max 를 바꾼다 |
+
 ## GitOps (6단계)
 
 | 증상 / 출력 | 원인 | 고치는 법 |
