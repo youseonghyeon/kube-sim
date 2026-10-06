@@ -438,6 +438,8 @@ function resourceDefaults(o: KObject): void {
   });
 }
 
+const CIDR_RE = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d|[12]\d|3[0-2])$/;
+
 /** ConfigMap·Secret 의 키 규칙 (파일 이름이 되므로 / 같은 것은 안 된다) */
 export const CONFIG_KEY_RE = /^[-._a-zA-Z0-9]+$/;
 
@@ -448,6 +450,17 @@ export const CONFIG_KEY_RE = /^[-._a-zA-Z0-9]+$/;
 function secretData(o: KObject): void {
   if (o.kind === "Ingress" && !o.spec.rules?.length && !o.spec.defaultBackend)
     throw new ApiError("Invalid", `Ingress.networking.k8s.io "${o.metadata.name}" is invalid: spec: Invalid value: "": either \`defaultBackend\` or \`rules\` must be specified`);
+  if (o.kind === "NetworkPolicy") {
+    // policyTypes 를 비우면: Ingress 는 늘, egress 규칙이 있으면 Egress 도 (실제 기본값)
+    if (!o.spec.policyTypes?.length) o.spec.policyTypes = o.spec.egress?.length ? ["Ingress", "Egress"] : ["Ingress"];
+    const peers = [...(o.spec.ingress ?? []).flatMap((r) => r.from ?? []), ...(o.spec.egress ?? []).flatMap((r) => r.to ?? [])];
+    for (const p of peers) {
+      const cidrs = p.ipBlock ? [p.ipBlock.cidr, ...(p.ipBlock.except ?? [])] : [];
+      for (const cidr of cidrs) if (!CIDR_RE.test(cidr)) throw new ApiError("Invalid", `NetworkPolicy.networking.k8s.io "${o.metadata.name}" is invalid: ipBlock.cidr: Invalid value: "${cidr}": must be a valid CIDR value, (e.g. 10.9.8.0/24 or 2001:db8::/64)`);
+      if (p.ipBlock && (p.podSelector || p.namespaceSelector)) throw new ApiError("Invalid", `NetworkPolicy.networking.k8s.io "${o.metadata.name}" is invalid: may not specify more than 1 peer type (ipBlock 은 podSelector·namespaceSelector 와 같은 항목에 쓸 수 없습니다)`);
+    }
+    return;
+  }
   if (o.kind !== "ConfigMap" && o.kind !== "Secret") return;
   if (o.kind === "ConfigMap") o.data ??= {};
   else {
@@ -515,6 +528,7 @@ function emptyStatus(kind: Kind): unknown {
     case "EndpointSlice":
     case "ConfigMap":
     case "Secret":
+    case "NetworkPolicy":
       return {};
   }
 }

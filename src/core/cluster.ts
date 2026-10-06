@@ -1,7 +1,7 @@
 // 클러스터 한 벌: 시계 + 트레이스 + API 서버 + 컨트롤 플레인(스케줄러·컨트롤러) + 노드마다 kubelet.
 // 바깥(모델·kubectl·UI)은 여기 메서드로만 클러스터를 바꾼다.
 import { ApiServer, WATCH_DELAY_MS, type Draft } from "./api/server";
-import type { Application, Deployment, Ingress, Pod, PodDisruptionBudget, PodSpec, Probe, Service, ServiceType, EnvFromSource, EnvVar } from "./api/types";
+import type { Application, Deployment, Ingress, Pod, PodDisruptionBudget, PodSpec, Probe, Service, ServiceType, EnvFromSource, EnvVar, NetworkPolicy } from "./api/types";
 import { Clock } from "./clock";
 import type { ComponentContext } from "./controllers/base";
 import { DeploymentController } from "./controllers/deployment";
@@ -74,7 +74,14 @@ export interface SecretManifest {
   data?: Record<string, string>;
 }
 
-export type Manifest = DeploymentManifest | ServiceManifest | PdbManifest | IngressManifest | ApplicationManifest | ConfigMapManifest | SecretManifest;
+export interface NetworkPolicyManifest {
+  apiVersion: "networking.k8s.io/v1";
+  kind: "NetworkPolicy";
+  metadata: { name: string; namespace?: string; labels?: Record<string, string>; annotations?: Record<string, string> };
+  spec: NetworkPolicy["spec"];
+}
+
+export type Manifest = DeploymentManifest | ServiceManifest | PdbManifest | IngressManifest | ApplicationManifest | ConfigMapManifest | SecretManifest | NetworkPolicyManifest;
 
 export interface ClusterOptions {
   seed?: number;
@@ -394,6 +401,11 @@ export function ingress(
       ...(opts.tls ? { tls: [{ hosts: opts.tls }] } : {}),
     },
   };
+}
+
+/** NetworkPolicy 매니페스트 (podSelector 는 app=… 하나, 비우면 모든 Pod) */
+export function networkPolicy(name: string, spec: NetworkPolicy["spec"]): NetworkPolicyManifest {
+  return { apiVersion: "networking.k8s.io/v1", kind: "NetworkPolicy", metadata: { name }, spec: structuredClone(spec) };
 }
 
 export function configMap(name: string, data: Record<string, string>): ConfigMapManifest {

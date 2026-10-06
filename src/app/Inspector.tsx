@@ -194,6 +194,7 @@ function StatusBadge({ obj }: { obj: KObject }) {
     );
   if (obj.kind === "PodDisruptionBudget") return <span class={`badge t-${obj.status.disruptionsAllowed > 0 ? "ok" : "wait"}`}>{`허용 ${obj.status.disruptionsAllowed}`}</span>;
   if (obj.kind === "ConfigMap" || obj.kind === "Secret") return <span class="badge">{`키 ${Object.keys(obj.data).length}`}</span>;
+  if (obj.kind === "NetworkPolicy") return <span class="badge">{(obj.spec.policyTypes ?? ["Ingress"]).join(" · ")}</span>;
   const ready = obj.status.readyReplicas;
   return <span class={`badge t-${ready === obj.spec.replicas ? "ok" : "wait"}`}>{`${ready}/${obj.spec.replicas} Ready`}</span>;
 }

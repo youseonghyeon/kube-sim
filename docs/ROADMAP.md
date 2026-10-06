@@ -92,6 +92,17 @@
 - 만들 것: ConfigMap·Secret 오브젝트(Argo CD·apply 포함), 컨테이너 `env`·`envFrom`·`volumeMounts`(subPath)·`volumes`, kubelet 의 시작 시 해석·없을 때 오류와 재시도·volume 갱신 지연, 설정을 읽어 보여 주는 앱 이미지, `kubectl create configmap|secret`·`patch configmap|secret`·`get -o yaml`·`exec -- env|cat`, `base64 -d`, 화면(목록·인스펙터 편집·Pod 의 설정 출처), 예제 묶음 "설정"
 - 완료 기준: 예제의 "해 볼 것" 이 위 학습 포인트를 kubectl 출력·로그로 보여 주고 코어 동작이 트레이스 테스트로 고정된다. 네 가지 검증 통과
 
+### 5c. NetworkPolicy (2026-10-06 시작, 사용자 승인 — 5b 다음 후보)
+- 왜: 홈 클러스터(k3s)는 flannel 위에 kube-router 가 NetworkPolicy 를 실제로 건다. 정책 하나 넣었더니 "갑자기 아무것도 안 되는" 일(시간 초과, DNS 실패)의 이유를 추측하지 않고 보게 한다.
+- 배우는 것
+  - 기본은 모두 허용. Pod 를 고르는 정책이 **하나라도** 생기면 그 방향(ingress·egress)은 기본 차단으로 바뀌고, 정책들의 허용은 **더해진다**(합집합) — allow 정책만 남겨도 여전히 격리
+  - 막힌 것은 거부(RST)가 아니라 **버림(DROP)** → curl 은 연결 시간 초과
+  - egress 를 막으면 **DNS(UDP 53) 부터** 막힌다 → `Could not resolve host`. kube-dns 로 가는 egress 를 따로 허용해야 한다
+  - 정책은 DNAT **뒤**의 Pod IP·포트로 판단 — Service 포트(80)가 아니라 targetPort(8080)를 써야 한다
+  - Ingress 컨트롤러 뒤의 Pod 는 클라이언트가 아니라 컨트롤러 Pod 에서 온 트래픽으로 본다. Pod 가 도는 노드에서 오는 트래픽(probe 등)은 늘 허용
+- 만들 것: NetworkPolicy 오브젝트(podSelector · policyTypes · ingress/egress 규칙 — podSelector·namespaceSelector·ipBlock·ports), 요청 경로의 검사(egress → ingress, DNS 포함, 막히면 DROP), `kubectl get/describe/delete networkpolicy`, 화면(목록 +·인스펙터 개요와 규칙 편집·Pod 의 격리 표시·칩 배지), 예제 묶음 "네트워크 정책"
+- 완료 기준: 예제의 "해 볼 것" 이 위 학습 포인트를 curl 결과·단계·로그로 보여 주고, 판단 규칙이 테스트로 고정된다. 네 가지 검증 통과
+
 ## 6. GitOps (ArgoCD 식) ✅ 2026-10-02
 - 된 것: Git 저장소(커밋 이력, 경로별 매니페스트), Argo CD application-controller(3분 폴링·Refresh, Git 에 적은 필드 기준 비교 → Synced/OutOfSync, 리소스 Health, 자동 sync 는 새 리비전마다 한 번, selfHeal 5초, prune, 이력), `argocd app list/get/diff/sync/history/set`·`git log` 흉내, `kubectl get applications -n argocd`, 캔버스 GitOps 칸(Git → Application, '아직 모름' 표시·폴링 카운트다운), Application 인스펙터(정책 토글·리소스·차이), Git 인스펙터(작업 사본 편집 → 커밋), 예제 '내 배포 파이프라인'(CI 태그 커밋 → 폴링 → 자동 sync → 롤아웃)
 - 축소판: Argo CD 는 Pod 없는 부가 기능, Helm 렌더링 결과를 Git 에 있다고 봄, 대상 네임스페이스 default, sync 즉시 완료, 훅·sync wave·finalizer·webhook 없음

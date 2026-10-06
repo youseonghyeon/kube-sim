@@ -9,6 +9,7 @@ import type { Cluster } from "../cluster";
 import { imageSpec } from "../workloads";
 import { funnelOn, ingressAddress, lbIP, matchIngress, proxyName, readyEndpoints } from "./ingress";
 import type { SepRule, SvcRule } from "./kubeproxy";
+import { check, COREDNS, type Verdict } from "./netpol";
 
 export const CLUSTER_DOMAIN = "cluster.local";
 export const DNS_SERVICE_IP = "10.96.0.10";
@@ -117,6 +118,20 @@ export function simulateFromPod(c: Cluster, from: Pod, tool: Tool, target: strin
   if (!t) return { ok: false, steps, output: `${tool}: 주소를 읽지 못했습니다: ${target}` };
   let ip = t.host;
   if (!IP_RE.test(t.host)) {
+    // 이름을 풀려면 먼저 CoreDNS(kube-system, UDP 53)로 질의가 나가야 한다 — egress 정책이 막으면 여기서 끝
+    const dnsV = check(c, { pod: from, ip: from.status.podIP ?? "" }, { labels: { ...COREDNS.labels }, ns: COREDNS.ns, ip: COREDNS.ip }, 53, "UDP");
+    if (!dnsV.allowed) {
+      steps.push({
+        kind: "fail",
+        actor: `kube-router@${srcNode}`,
+        text: `${from.metadata.name} 의 egress 가 NetworkPolicy ${dnsV.policies.join(", ")} 로 격리됨 — CoreDNS(${DNS_SERVICE_IP} → kube-system 의 k8s-app=kube-dns, UDP 53)로 가는 허용 규칙이 없음 → DNS 질의 DROP (이름을 못 풀어 연결도 못 함)`,
+        at: { pod: from.metadata.name },
+      });
+      const failure = { kind: "dns" as const, host: t.host };
+      if (tool === "nslookup") return { ok: false, steps, failure, output: ";; connection timed out; no servers could be reached" };
+      if (tool === "ping") return { ok: false, steps, failure, output: `ping: bad address '${t.host}'` };
+      return { ok: false, steps, failure, output: `curl: (6) Could not resolve host: ${t.host}` };
+    }
     const a = resolve(c, t.host, from.metadata.namespace ?? "default");
     if (!a.ip) {
       steps.push({ kind: "dns", actor: "coredns", text: `${a.tried.join(" → ")} 모두 NXDOMAIN (resolv.conf 의 search 도메인을 차례로 붙여 물어봄)`, at: { dns: true } });
@@ -147,6 +162,11 @@ function send(c: Cluster, src: Source, req: Req, ip: string, port: number, steps
     if (!c.nodePowered(nn)) {
       steps.push({ kind: "fail", actor: src.pod ?? src.node, text: `${nn} 가 꺼져 있어 답이 없음` });
       return timedOut(req, steps, ip);
+    }
+    const fromPod = src.pod ? c.api.peekList("Pod").find((p) => p.metadata.name === src.pod) : undefined;
+    if (fromPod) {
+      const v = check(c, { pod: fromPod, ip: src.ip }, { ip }, port, req.tool === "ping" ? "ICMP" : "TCP");
+      if (!v.allowed) return dropped(req, steps, v, src.node, fromPod.metadata.name, ip, ip, port);
     }
     if (req.tool === "ping") {
       steps.push({ kind: "response", actor: nn, text: `노드 ${nn} 가 ICMP echo 에 답함`, at: { node: nn } });
@@ -268,6 +288,17 @@ function deliverToIp(c: Cluster, src: Source, req: Req, ip: string, port: number
     steps.push({ kind: "fail", actor: `cni0@${dst}`, text: `${ip} 를 가진 Pod 가 없음 (이미 사라진 Pod 의 IP) → 응답 없음` });
     return req.tool === "ping" ? timedOut(req, steps, ip) : refused(req, steps, ip, 3);
   }
+  // NetworkPolicy: 보내는 Pod 의 egress, 받는 Pod 의 ingress (DNAT 뒤의 Pod IP·포트로 판단). 막히면 버림 → 시간 초과
+  const fromPod = src.pod ? c.api.peekList("Pod").find((p) => p.metadata.name === src.pod) : undefined;
+  const v = check(c, { pod: fromPod, ip: src.ip }, { pod, ip }, port, req.tool === "ping" ? "ICMP" : "TCP");
+  if (!v.allowed) return dropped(req, steps, v, v.blockedAt === "egress" ? src.node : dst, v.blockedAt === "egress" ? src.pod! : pod.metadata.name, src.pod ? `${src.pod} (${src.ip})` : src.ip, ip, port);
+  if (v.allowedBy.egress || v.allowedBy.ingress)
+    steps.push({
+      kind: "route",
+      actor: `kube-router@${dst}`,
+      text: `NetworkPolicy 통과 — ${[v.allowedBy.egress ? `${src.pod} 의 egress 를 ${v.allowedBy.egress} 가 허용` : "", v.allowedBy.ingress ? `${pod.metadata.name} 의 ingress 를 ${v.allowedBy.ingress} 가 허용` : ""].filter(Boolean).join(" · ")} (포트 ${port})`,
+      at: { pod: pod.metadata.name },
+    });
   const app = c.kubelets.get(dst)?.appState(pod.metadata.uid);
   if (req.tool === "ping") {
     if (!app?.running && !pod.status.podIP) return timeout();
@@ -480,6 +511,19 @@ function viaFunnel(c: Cluster, req: Req, clientIp: string, steps: NetStep[]): Ne
     at: { pod: proxy.metadata.name, node: proxy.spec.nodeName },
   });
   return deliverToIp(c, { node: proxy.spec.nodeName!, ip: clientIp }, { ...req, port: 443 }, proxy.status.podIP!, 443, steps);
+}
+
+/** NetworkPolicy 로 버려짐: RST 가 아니라 DROP 이라 보내는 쪽은 시간 초과까지 기다린다 */
+function dropped(req: Req, steps: NetStep[], v: Verdict, node: string, who: string, fromText: string, ip: string, port?: number): NetResult {
+  const dir = v.blockedAt === "egress" ? "egress(나가는 쪽)" : "ingress(들어오는 쪽)";
+  steps.push({
+    kind: "fail",
+    actor: `kube-router@${node}`,
+    text: `${who} 의 ${dir} 가 NetworkPolicy ${v.policies.join(", ")} 로 격리됨 — ${v.blockedAt === "egress" ? `${ip}${port ? `:${port}` : ""}` : fromText}${req.tool === "ping" ? " (ICMP)" : port ? ` · 포트 ${port}` : ""} 에 맞는 허용 규칙이 없음 → DROP (거부가 아니라 버림 → 시간 초과)`,
+    at: { pod: v.blockedAt === "ingress" ? who : undefined, node },
+  });
+  if (req.tool === "ping") return { ok: false, steps, failure: { kind: "timeout", host: req.host, ip }, output: pingOut(req.host, ip, 0) };
+  return timedOut(req, steps, ip);
 }
 
 function refused(req: Req, steps: NetStep[], ip: string, ms: number): NetResult {

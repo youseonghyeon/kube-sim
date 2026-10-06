@@ -1,8 +1,9 @@
 // kubectl 흉내: 문자열 명령 → API 호출 + 실제와 같은 모양의 출력. 코어 API 위의 얇은 층이다.
 // 축소판: default 네임스페이스만, 자주 쓰는 하위 명령·플래그만.
 import { ApiError } from "./api/server";
-import { controllerOf, isNodeReady, NODE_LEASE_NS, podRequests, qosClass, SERVICE_NAME_LABEL, type Deployment, type IngressPath, type KEvent, type Kind, type Node, type Pod, type ServiceType } from "./api/types";
+import { controllerOf, isNodeReady, NODE_LEASE_NS, podRequests, qosClass, SERVICE_NAME_LABEL, type Deployment, type IngressPath, type KEvent, type Kind, type Node, type Pod, type ServiceType, type NetworkPolicy, type NetworkPolicyPeer, type NetworkPolicyPort } from "./api/types";
 import { configMap, deployment, ingress, pdb, secret, service, type Cluster } from "./cluster";
+import { selectorText } from "./net/netpol";
 import type { DrainJob } from "./drain";
 import type { NetResult } from "./net/request";
 import { deploymentHash, HASH_LABEL, revisionOf } from "./controllers/deployment";
@@ -28,6 +29,9 @@ export const KUBE_VERSION = "v1.31.0";
 type Res = Kind | "Event" | "Endpoints" | "all";
 
 const RESOURCE_ALIASES: Record<string, Res> = {
+  netpol: "NetworkPolicy",
+  networkpolicy: "NetworkPolicy",
+  networkpolicies: "NetworkPolicy",
   cm: "ConfigMap",
   configmap: "ConfigMap",
   configmaps: "ConfigMap",
@@ -82,6 +86,7 @@ const KIND_PREFIX: Record<Kind, string> = {
   Application: "application.argoproj.io",
   ConfigMap: "configmap",
   Secret: "secret",
+  NetworkPolicy: "networkpolicy.networking.k8s.io",
 };
 const KIND_PLURAL: Record<Kind, string> = {
   Pod: "pods",
@@ -96,6 +101,7 @@ const KIND_PLURAL: Record<Kind, string> = {
   Application: "applications.argoproj.io",
   ConfigMap: "configmaps",
   Secret: "secrets",
+  NetworkPolicy: "networkpolicies.networking.k8s.io",
 };
 
 export const KUBECTL_HELP = [
@@ -121,6 +127,7 @@ export const KUBECTL_HELP = [
   "  curl http://<호스트·LoadBalancer IP·노드IP:NodePort>   (kubectl 없이 — 클러스터 밖에서 보냄)",
   "  kubectl get leases -n kube-node-lease   (kubelet heartbeat)",
   "  kubectl get <종류> <이름> -o yaml",
+  "  kubectl get networkpolicy · describe networkpolicy <이름> · delete networkpolicy <이름>   (만들기는 화면·예제에서)",
   "  kubectl create configmap <이름> --from-literal=KEY=값 …  ·  kubectl create secret generic <이름> --from-literal=KEY=값 …",
   "  kubectl patch configmap <이름> -p '{\"data\":{\"KEY\":\"새 값\"}}'   (secret 은 stringData 로 평문을, data 로 base64 를)",
   "  kubectl exec <pod> -- env | cat <파일> | ls <디렉터리>   (컨테이너가 본 설정)",
@@ -323,6 +330,10 @@ function get(c: Cluster, pos: string[], flags: Map<string, string>): string {
       const cms = pick(c, "ConfigMap", c.api.list("ConfigMap", "default"), names);
       return cms.length ? table(["NAME", "DATA", "AGE"], cms.map((m) => [m.metadata.name, String(Object.keys(m.data).length), fmtAge(c.now - m.metadata.creationTimestamp)])) : "No resources found in default namespace.";
     }
+    case "NetworkPolicy": {
+      const nps = pick(c, "NetworkPolicy", c.api.list("NetworkPolicy", "default"), names);
+      return nps.length ? table(["NAME", "POD-SELECTOR", "AGE"], nps.map((n) => [n.metadata.name, selectorText(n.spec.podSelector), fmtAge(c.now - n.metadata.creationTimestamp)])) : "No resources found in default namespace.";
+    }
     case "Secret": {
       const ss = pick(c, "Secret", c.api.list("Secret", "default"), names);
       return ss.length ? table(["NAME", "TYPE", "DATA", "AGE"], ss.map((m) => [m.metadata.name, m.type, String(Object.keys(m.data).length), fmtAge(c.now - m.metadata.creationTimestamp)])) : "No resources found in default namespace.";
@@ -501,12 +512,14 @@ function getEvents(c: Cluster): string {
 
 function describe(c: Cluster, pos: string[]): string {
   const { kind, names } = resourceArgs(pos);
-  const k = needWorkload(kind, ["Pod", "Deployment", "ReplicaSet", "Node", "Service", "Ingress", "ConfigMap", "Secret"], "describe");
+  const k = needWorkload(kind, ["Pod", "Deployment", "ReplicaSet", "Node", "Service", "Ingress", "ConfigMap", "Secret", "NetworkPolicy"], "describe");
   const name = names[0];
   if (!name) throw new KubectlError(`error: 이름을 함께 쓰세요. 예: kubectl describe ${k.toLowerCase()} <이름>`);
   const o = c.api.get(k, name, "default");
   if (!o) throw new ApiError("NotFound", `${KIND_PLURAL[k]} "${name}" not found`);
   switch (o.kind) {
+    case "NetworkPolicy":
+      return describeNetpol(c, o);
     case "ConfigMap":
       // 실제 출력처럼 키마다 "KEY:\n----\n값"
       return (
@@ -673,6 +686,42 @@ function describePod(c: Cluster, p: Pod): string {
   out += `\nNode-Selectors:   ${p.spec.nodeSelector ? labelsText(p.spec.nodeSelector) : "<none>"}`;
   out += `\nTolerations:      ${tols.join("\n                  ") || "<none>"}`;
   return out + eventsBlock(c, p.metadata.uid);
+}
+
+/** kubectl describe networkpolicy — 실제 출력 모양 (허용 규칙을 방향별로) */
+function describeNetpol(c: Cluster, o: NetworkPolicy): string {
+  const peers = (list: NetworkPolicyPeer[] | undefined, label: string) => {
+    if (!list?.length) return [`    ${label}: <any> (traffic not restricted by ${label === "From" ? "source" : "destination"})`];
+    return [
+      `    ${label}:`,
+      ...list.flatMap((p) =>
+        p.ipBlock
+          ? [`      IPBlock:`, `        CIDR: ${p.ipBlock.cidr}`, `        Except: ${(p.ipBlock.except ?? []).join(", ")}`]
+          : [...(p.namespaceSelector ? [`      NamespaceSelector: ${selectorText(p.namespaceSelector)}`] : []), ...(p.podSelector ? [`      PodSelector: ${selectorText(p.podSelector)}`] : [])],
+      ),
+    ];
+  };
+  const ports = (ps: NetworkPolicyPort[] | undefined) => (ps?.length ? ps.map((p) => `    To Port: ${p.port ?? "<any>"}/${p.protocol ?? "TCP"}`) : ["    To Port: <any> (traffic allowed to all ports)"]);
+  const types = o.spec.policyTypes ?? ["Ingress"];
+  const block = (dir: "ingress" | "egress") => {
+    const on = types.includes(dir === "ingress" ? "Ingress" : "Egress");
+    if (!on) return [`  Not affecting ${dir} traffic`];
+    const rules = (dir === "ingress" ? o.spec.ingress : o.spec.egress) ?? [];
+    if (!rules.length) return [`  Allowing ${dir} traffic:`, `    <none> (Selected pods are isolated for ${dir} connectivity)`];
+    return [
+      `  Allowing ${dir} traffic:`,
+      ...rules.flatMap((r, i) => [...(i ? ["    ----------"] : []), ...ports(r.ports), ...peers("from" in r ? r.from : (r as { to?: NetworkPolicyPeer[] }).to, dir === "ingress" ? "From" : "To")]),
+    ];
+  };
+  const sel = Object.keys(o.spec.podSelector.matchLabels ?? {}).length ? selectorText(o.spec.podSelector) : "<none> (Allowing the specific traffic to all pods in this namespace)";
+  return [
+    kv([["Name", o.metadata.name], ["Namespace", "default"], ["Created on", fmtClock(o.metadata.creationTimestamp)], ["Labels", labelsText(o.metadata.labels)], ["Annotations", "<none>"]]),
+    "Spec:",
+    `  PodSelector:     ${sel}`,
+    ...block("ingress"),
+    ...block("egress"),
+    `  Policy Types: ${types.join(", ")}`,
+  ].join("\n");
 }
 
 /** describe node 의 Limits 칸: limits 가 없는 컨테이너는 0 으로 센다 (실제 출력과 같음) */
@@ -963,7 +1012,7 @@ function setCmd(c: Cluster, pos: string[], flags: Map<string, string>, line: str
 
 function del(c: Cluster, pos: string[], flags: Map<string, string>, line: string): KubectlResult {
   const { kind, names } = resourceArgs(pos);
-  const k = needWorkload(kind, ["Pod", "Deployment", "ReplicaSet", "Service", "PodDisruptionBudget", "Ingress", "ConfigMap", "Secret"], "delete");
+  const k = needWorkload(kind, ["Pod", "Deployment", "ReplicaSet", "Service", "PodDisruptionBudget", "Ingress", "ConfigMap", "Secret", "NetworkPolicy"], "delete");
   if (!names.length) throw new KubectlError(`error: 지울 이름이 필요합니다. 예: kubectl delete ${k.toLowerCase()} <이름>`);
   for (const n of names) if (!c.api.get(k, n, "default")) throw new ApiError("NotFound", `${KIND_PLURAL[k]} "${n}" not found`);
   userTrace(c, line);

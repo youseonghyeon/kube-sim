@@ -106,18 +106,17 @@ export function manifestKey(m: Manifest): string {
   return `${m.kind}/${m.metadata.name}`;
 }
 
+const RESOURCE_NAME: Record<Manifest["kind"], string> = {
+  Deployment: "deployment.apps",
+  Service: "service",
+  Ingress: "ingress.networking.k8s.io",
+  Application: "application.argoproj.io",
+  NetworkPolicy: "networkpolicy.networking.k8s.io",
+  ConfigMap: "configmap",
+  Secret: "secret",
+  PodDisruptionBudget: "poddisruptionbudget.policy",
+};
+
 function resourceName(kind: Manifest["kind"]): string {
-  return kind === "Deployment"
-    ? "deployment.apps"
-    : kind === "Service"
-      ? "service"
-      : kind === "Ingress"
-        ? "ingress.networking.k8s.io"
-        : kind === "Application"
-          ? "application.argoproj.io"
-          : kind === "ConfigMap"
-            ? "configmap"
-            : kind === "Secret"
-              ? "secret"
-              : "poddisruptionbudget.policy";
+  return RESOURCE_NAME[kind];
 }

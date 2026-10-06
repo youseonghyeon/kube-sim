@@ -358,7 +358,40 @@ export interface Secret {
   status: Record<string, never>;
 }
 
-export type KObject = Pod | ReplicaSet | Deployment | Node | Lease | Service | EndpointSlice | PodDisruptionBudget | Ingress | Application | ConfigMap | Secret;
+/** NetworkPolicy 의 셀렉터: 비우면({}) 모두 */
+export interface Selector {
+  matchLabels?: Record<string, string>;
+}
+
+/** 상대: 같은 네임스페이스의 Pod(podSelector), 네임스페이스(namespaceSelector — 둘 다면 그 네임스페이스의 그 Pod), 또는 IP 대역 */
+export interface NetworkPolicyPeer {
+  podSelector?: Selector;
+  namespaceSelector?: Selector;
+  ipBlock?: { cidr: string; except?: string[] };
+}
+
+/** 포트를 비우면 그 프로토콜의 모든 포트, ports 자체를 비우면 모든 프로토콜·포트 */
+export interface NetworkPolicyPort {
+  protocol?: "TCP" | "UDP";
+  port?: number;
+}
+
+/** 고른 Pod 의 방향(ingress·egress)을 격리하고, 규칙에 맞는 것만 허용한다. 여러 정책의 허용은 더해진다 */
+export interface NetworkPolicy {
+  apiVersion: "networking.k8s.io/v1";
+  kind: "NetworkPolicy";
+  metadata: ObjectMeta;
+  spec: {
+    podSelector: Selector;
+    /** 비우면 API 서버가 Ingress (+ egress 규칙이 있으면 Egress) 로 채운다 */
+    policyTypes?: ("Ingress" | "Egress")[];
+    ingress?: { from?: NetworkPolicyPeer[]; ports?: NetworkPolicyPort[] }[];
+    egress?: { to?: NetworkPolicyPeer[]; ports?: NetworkPolicyPort[] }[];
+  };
+  status: Record<string, never>;
+}
+
+export type KObject = Pod | ReplicaSet | Deployment | Node | Lease | Service | EndpointSlice | PodDisruptionBudget | Ingress | Application | ConfigMap | Secret | NetworkPolicy;
 export type Kind = KObject["kind"];
 
 export type ObjectOf<K extends Kind> = Extract<KObject, { kind: K }>;
