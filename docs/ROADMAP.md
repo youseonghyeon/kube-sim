@@ -79,6 +79,17 @@
 - 예제: "메모리 limit 을 넘으면 (OOMKilled)", "limits 없는 메모리 누수와 이웃 Pod (노드 OOM)", "CPU limit 은 느리게 할 뿐 (throttling)"
 - 완료 기준: 예제마다 "해 볼 것" 이 위 학습 포인트를 화면·kubectl 출력으로 보여 주고, 코어 동작이 트레이스 테스트로 고정된다. 네 가지 검증 통과
 
+### 5b. ConfigMap/Secret 과 재시작 (2026-10-06 시작, 사용자 승인 — 5a 다음 후보)
+- 왜: Helm values 를 바꿔 ArgoCD 가 ConfigMap 을 sync 해도 Pod 는 옛 설정으로 계속 돈다. "Synced 인데 왜 반영이 안 되지" 를 추측하지 않고 보게 한다.
+- 배우는 것
+  - env(`envFrom`·`valueFrom`)는 **컨테이너가 시작할 때 한 번** 읽는다 — ConfigMap 을 바꿔도 돌고 있는 Pod 는 그대로, 새 Pod(재시작·롤아웃)만 새 값
+  - volume 으로 마운트한 ConfigMap 은 kubelet 이 **잠시 뒤(1분 안팎) 파일을 바꿔 준다** — 하지만 앱이 파일을 다시 읽어야 반영된다. `subPath` 마운트는 영영 안 바뀐다
+  - ConfigMap 이 바뀌어도 Deployment 템플릿은 그대로라 **롤아웃이 일어나지 않는다** → `kubectl rollout restart`, 또는 Helm 의 `checksum/config` 주석(템플릿 해시가 바뀌어 롤링 업데이트)
+  - 없는 ConfigMap·Secret·키를 가리키면: env 는 `CreateContainerConfigError`, volume 은 `ContainerCreating` + `FailedMount` — 만들어 주면 kubelet 이 다시 시도해 뜬다
+  - Secret 은 암호화가 아니라 base64 (`stringData` 로 쓰면 API 서버가 `data` 로 바꿔 저장)
+- 만들 것: ConfigMap·Secret 오브젝트(Argo CD·apply 포함), 컨테이너 `env`·`envFrom`·`volumeMounts`(subPath)·`volumes`, kubelet 의 시작 시 해석·없을 때 오류와 재시도·volume 갱신 지연, 설정을 읽어 보여 주는 앱 이미지, `kubectl create configmap|secret`·`patch configmap|secret`·`get -o yaml`·`exec -- env|cat`, `base64 -d`, 화면(목록·인스펙터 편집·Pod 의 설정 출처), 예제 묶음 "설정"
+- 완료 기준: 예제의 "해 볼 것" 이 위 학습 포인트를 kubectl 출력·로그로 보여 주고 코어 동작이 트레이스 테스트로 고정된다. 네 가지 검증 통과
+
 ## 6. GitOps (ArgoCD 식) ✅ 2026-10-02
 - 된 것: Git 저장소(커밋 이력, 경로별 매니페스트), Argo CD application-controller(3분 폴링·Refresh, Git 에 적은 필드 기준 비교 → Synced/OutOfSync, 리소스 Health, 자동 sync 는 새 리비전마다 한 번, selfHeal 5초, prune, 이력), `argocd app list/get/diff/sync/history/set`·`git log` 흉내, `kubectl get applications -n argocd`, 캔버스 GitOps 칸(Git → Application, '아직 모름' 표시·폴링 카운트다운), Application 인스펙터(정책 토글·리소스·차이), Git 인스펙터(작업 사본 편집 → 커밋), 예제 '내 배포 파이프라인'(CI 태그 커밋 → 폴링 → 자동 sync → 롤아웃)
 - 축소판: Argo CD 는 Pod 없는 부가 기능, Helm 렌더링 결과를 Git 에 있다고 봄, 대상 네임스페이스 default, sync 즉시 완료, 훅·sync wave·finalizer·webhook 없음

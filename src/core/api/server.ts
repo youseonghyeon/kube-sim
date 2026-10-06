@@ -2,6 +2,7 @@
 // 모든 컴포넌트(컨트롤러·스케줄러·kubelet)는 서로 직접 부르지 않고 여기에 쓰고, watch 로 깨어난다.
 import type { Clock } from "../clock";
 import { stableJson } from "../rng";
+import { b64encode } from "../base64";
 import { fmtCpu, fmtMem } from "../units";
 import type { Trace } from "../trace";
 import { CLUSTER_SCOPED, type Container, type Deployment, type KEvent, type KObject, type Kind, type ObjectMeta, type ObjectOf, type Pod, type PodDisruptionBudget, type Service } from "./types";
@@ -127,6 +128,7 @@ export class ApiServer {
     };
     if (obj.kind === "Deployment") defaultDeployment(obj as Deployment);
     resourceDefaults(obj);
+    secretData(obj);
     if (!obj.status) obj.status = emptyStatus(kind) as ObjectOf<K>["status"];
     if (obj.kind === "Pod") addDefaultTolerations(obj as Pod);
     if (obj.kind === "Service") this.allocateServiceAddresses(obj as Service);
@@ -160,6 +162,7 @@ export class ApiServer {
     if (next.kind === "Service") this.allocateServiceAddresses(next as Service, cur as Service);
     if (next.kind === "Deployment") defaultDeployment(next as Deployment);
     resourceDefaults(next);
+    secretData(next);
     if (stableJson(next) === stableJson(cur)) return clone(cur);
     const specChanged = stableJson(next.spec) !== stableJson(cur.spec);
     if (specChanged && obj.kind !== "Lease") next.metadata.generation = cur.metadata.generation + 1;
@@ -435,6 +438,16 @@ function resourceDefaults(o: KObject): void {
   });
 }
 
+/** Secret 의 stringData(평문)는 저장하지 않고 data(base64)에 합친다 — 실제 API 서버와 같음 (같은 키면 stringData 가 이김) */
+function secretData(o: KObject): void {
+  if (o.kind === "ConfigMap") o.data ??= {};
+  if (o.kind !== "Secret") return;
+  o.type ??= "Opaque";
+  o.data = { ...(o.data ?? {}) };
+  for (const [k, v] of Object.entries(o.stringData ?? {})) o.data[k] = b64encode(v);
+  delete o.stringData;
+}
+
 /** limits 만 적고 requests 를 비우면(0) requests = limits — API 서버가 Pod 에만 채우는 기본값 (템플릿에는 채우지 않으므로 Argo CD·드리프트 비교는 보정이 필요 없다) */
 function defaultContainerResources(c: Container): void {
   const r = c.resources.requests;
@@ -487,6 +500,8 @@ function emptyStatus(kind: Kind): unknown {
     case "Lease":
     case "Service":
     case "EndpointSlice":
+    case "ConfigMap":
+    case "Secret":
       return {};
   }
 }

@@ -1,7 +1,7 @@
 // 클러스터 한 벌: 시계 + 트레이스 + API 서버 + 컨트롤 플레인(스케줄러·컨트롤러) + 노드마다 kubelet.
 // 바깥(모델·kubectl·UI)은 여기 메서드로만 클러스터를 바꾼다.
 import { ApiServer, WATCH_DELAY_MS, type Draft } from "./api/server";
-import type { Application, Deployment, Ingress, Pod, PodDisruptionBudget, PodSpec, Probe, Service, ServiceType } from "./api/types";
+import type { Application, Deployment, Ingress, Pod, PodDisruptionBudget, PodSpec, Probe, Service, ServiceType, EnvFromSource, EnvVar } from "./api/types";
 import { Clock } from "./clock";
 import type { ComponentContext } from "./controllers/base";
 import { DeploymentController } from "./controllers/deployment";
@@ -10,7 +10,7 @@ import { DrainJob } from "./drain";
 import { EndpointSliceController } from "./controllers/endpointslice";
 import { NodeLifecycleController, TaintEvictionController } from "./controllers/nodelifecycle";
 import { ReplicaSetController } from "./controllers/replicaset";
-import { Kubelet, type CpuState, type NodeDef } from "./kubelet";
+import { Kubelet, type ContainerConfig, type CpuState, type NodeDef } from "./kubelet";
 import { ARGO, ArgoCD } from "./gitops/argocd";
 import { GitRepo, type Commit } from "./gitops/git";
 import { IngressNginxStatus, MetalLB, TailscaleOperator } from "./net/ingress";
@@ -57,7 +57,24 @@ export interface ApplicationManifest {
   spec: Application["spec"];
 }
 
-export type Manifest = DeploymentManifest | ServiceManifest | PdbManifest | IngressManifest | ApplicationManifest;
+export interface ConfigMapManifest {
+  apiVersion: "v1";
+  kind: "ConfigMap";
+  metadata: { name: string; namespace?: string; labels?: Record<string, string>; annotations?: Record<string, string> };
+  data: Record<string, string>;
+}
+
+/** Secret 매니페스트는 평문 stringData 로 적는다 (API 서버가 base64 data 로 바꿔 저장) */
+export interface SecretManifest {
+  apiVersion: "v1";
+  kind: "Secret";
+  metadata: { name: string; namespace?: string; labels?: Record<string, string>; annotations?: Record<string, string> };
+  type?: "Opaque";
+  stringData?: Record<string, string>;
+  data?: Record<string, string>;
+}
+
+export type Manifest = DeploymentManifest | ServiceManifest | PdbManifest | IngressManifest | ApplicationManifest | ConfigMapManifest | SecretManifest;
 
 export interface ClusterOptions {
   seed?: number;
@@ -211,6 +228,11 @@ export class Cluster {
     return u && k ? { ...u, cpuState: k.cpuState(p.metadata.uid) } : undefined;
   }
 
+  /** 컨테이너가 본 설정 (kubectl exec -- env · cat). 컨테이너가 돌지 않으면 undefined */
+  containerConfig(p: Pod): ContainerConfig | undefined {
+    return p.spec.nodeName ? this.kubelets.get(p.spec.nodeName)?.containerConfig(p.metadata.uid) : undefined;
+  }
+
   podSick(podName: string): boolean {
     const p = this.api.peekList("Pod").find((x) => x.metadata.name === podName);
     if (!p?.spec.nodeName) return false;
@@ -258,13 +280,23 @@ export class Cluster {
         apiVersion: m.apiVersion,
         kind: m.kind,
         metadata: { ...m.metadata, namespace: ns, annotations: { ...((m.metadata as { annotations?: Record<string, string> }).annotations ?? {}), [LAST_APPLIED]: stableJson(m) } },
-        spec: structuredClone(m.spec),
+        // ConfigMap·Secret 은 spec 이 아니라 data(·stringData·type)를 가진다
+        ...(m.kind === "ConfigMap" || m.kind === "Secret" ? structuredClone({ data: m.data, ...(m.kind === "Secret" ? { type: m.type, stringData: m.stringData } : {}) }) : { spec: structuredClone(m.spec) }),
       };
       this.api.create(draft as unknown as Draft<typeof m.kind>, actor);
       return "created";
     }
     const rv = cur.metadata.resourceVersion;
     const next = this.api.patch(m.kind, m.metadata.name, ns, actor, (o) => {
+      if ((o.kind === "ConfigMap" && m.kind === "ConfigMap") || (o.kind === "Secret" && m.kind === "Secret")) {
+        // 매니페스트에 적은 키가 전부 (지운 키는 사라진다). Secret 은 stringData 를 API 서버가 data 로 바꾼다
+        o.data = structuredClone(m.data ?? {});
+        if (o.kind === "Secret" && m.kind === "Secret" && m.stringData) o.stringData = { ...m.stringData };
+        o.metadata.labels = { ...(m.metadata.labels ?? {}) };
+        o.metadata.annotations = { ...(o.metadata.annotations ?? {}), [LAST_APPLIED]: stableJson(m) };
+        return;
+      }
+      if (m.kind === "ConfigMap" || m.kind === "Secret") return;
       const spec = structuredClone(m.spec);
       const prevApplied = parseApplied(o.metadata.annotations?.[LAST_APPLIED]);
       if (o.kind === "Deployment" && m.kind === "Deployment") {
@@ -354,6 +386,14 @@ export function ingress(
   };
 }
 
+export function configMap(name: string, data: Record<string, string>): ConfigMapManifest {
+  return { apiVersion: "v1", kind: "ConfigMap", metadata: { name }, data: { ...data } };
+}
+
+export function secret(name: string, stringData: Record<string, string>): SecretManifest {
+  return { apiVersion: "v1", kind: "Secret", metadata: { name }, type: "Opaque", stringData: { ...stringData } };
+}
+
 /** 예제에서 쓰는 PodDisruptionBudget */
 export function pdb(name: string, selector: Record<string, string>, opts: { minAvailable?: number | string; maxUnavailable?: number | string }): PdbManifest {
   return { apiVersion: "policy/v1", kind: "PodDisruptionBudget", metadata: { name }, spec: { selector: { matchLabels: { ...selector } }, ...opts } };
@@ -394,6 +434,12 @@ export function deployment(
     preStop?: number;
     /** resources.limits (없으면 상한 없음) */
     limits?: { cpu?: number; memory?: number };
+    env?: EnvVar[];
+    envFrom?: EnvFromSource[];
+    /** ConfigMap·Secret 을 파일로: volume 과 volumeMount 를 한 번에 */
+    mounts?: { name: string; configMap?: string; secret?: string; mountPath: string; subPath?: string }[];
+    /** Pod 템플릿 주석 (Helm 의 checksum/config 같은 것) */
+    podAnnotations?: Record<string, string>;
   },
 ): DeploymentManifest {
   const labels = opts.labels ?? { app: name };
@@ -407,8 +453,14 @@ export function deployment(
         ...(opts.readiness ? { readinessProbe: opts.readiness } : {}),
         ...(opts.liveness ? { livenessProbe: opts.liveness } : {}),
         ...(opts.preStop ? { lifecycle: { preStop: { sleep: { seconds: opts.preStop } } } } : {}),
+        ...(opts.env ? { env: structuredClone(opts.env) } : {}),
+        ...(opts.envFrom ? { envFrom: structuredClone(opts.envFrom) } : {}),
+        ...(opts.mounts?.length ? { volumeMounts: opts.mounts.map((m) => ({ name: m.name, mountPath: m.mountPath, ...(m.subPath ? { subPath: m.subPath } : {}) })) } : {}),
       },
     ],
+    ...(opts.mounts?.length
+      ? { volumes: [...new Map(opts.mounts.map((m) => [m.name, m.configMap ? { name: m.name, configMap: { name: m.configMap } } : { name: m.name, secret: { secretName: m.secret! } }])).values()] }
+      : {}),
     restartPolicy: "Always",
     terminationGracePeriodSeconds: 30,
   };
@@ -417,6 +469,6 @@ export function deployment(
     apiVersion: "apps/v1",
     kind: "Deployment",
     metadata: { name, labels: { ...labels } },
-    spec: { replicas: opts.replicas, selector: { matchLabels: { ...labels } }, template: { metadata: { labels: { ...labels } }, spec } },
+    spec: { replicas: opts.replicas, selector: { matchLabels: { ...labels } }, template: { metadata: { labels: { ...labels }, ...(opts.podAnnotations ? { annotations: { ...opts.podAnnotations } } : {}) }, spec } },
   };
 }

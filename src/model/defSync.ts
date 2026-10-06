@@ -108,5 +108,9 @@ function resourceName(kind: Manifest["kind"]): string {
         ? "ingress.networking.k8s.io"
         : kind === "Application"
           ? "application.argoproj.io"
-          : "poddisruptionbudget.policy";
+          : kind === "ConfigMap"
+            ? "configmap"
+            : kind === "Secret"
+              ? "secret"
+              : "poddisruptionbudget.policy";
 }

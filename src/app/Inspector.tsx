@@ -13,7 +13,7 @@ import { deploymentHash, HASH_LABEL, revisionOf } from "../core/controllers/depl
 import { sim, simTime, simVersion } from "../model/sim";
 import { addManifest, clusterDef, drawerOpen, drawerTab, exampleId, findManifest, updateIngressManifest, INSPECTOR_MIN, INSPECTOR_WIDE, inspectorOpen, inspectorWidth, setInspectorWidth, toggleInspector, toggleInspectorWide, removeManifest, selection, updateManifest, updateNodeDef, updateServiceManifest } from "../model/store";
 import { toneOf } from "../model/view";
-import { toYaml } from "../model/yaml";
+import { toYaml } from "../core/yaml";
 import { flattenRules, hostError, ingressNginxManifests, pathError, setRules, type RuleRow } from "../model/ingressForm";
 import { NGINX_SERVICE } from "../core/net/ingress";
 import { Icon } from "./Icons";
@@ -186,6 +186,7 @@ function StatusBadge({ obj }: { obj: KObject }) {
       </>
     );
   if (obj.kind === "PodDisruptionBudget") return <span class={`badge t-${obj.status.disruptionsAllowed > 0 ? "ok" : "wait"}`}>{`허용 ${obj.status.disruptionsAllowed}`}</span>;
+  if (obj.kind === "ConfigMap" || obj.kind === "Secret") return <span class="badge">{`키 ${Object.keys(obj.data).length}`}</span>;
   const ready = obj.status.readyReplicas;
   return <span class={`badge t-${ready === obj.spec.replicas ? "ok" : "wait"}`}>{`${ready}/${obj.spec.replicas} Ready`}</span>;
 }

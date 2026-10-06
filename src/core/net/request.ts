@@ -313,7 +313,7 @@ function deliverToIp(c: Cluster, src: Source, req: Req, ip: string, port: number
     text: `${pod.metadata.name} (${ip}:${port}) 의 앱이 HTTP 200 으로 응답 (${ms}ms${slowWhy}) — 앱이 본 출발지 IP 는 ${src.ip}${src.xff ? `, X-Forwarded-For: ${src.xff}` : ""}`,
     at: { pod: pod.metadata.name },
   });
-  const body = spec.role === "echo" ? `Hostname: ${pod.metadata.name}\nIP: ${ip}\nRemoteAddr: ${src.ip}:${40000 + c.netRng.int(20000)}\nGET ${req.path} HTTP/1.1\nHost: ${req.httpHost}${src.xff ? `\nX-Forwarded-For: ${src.xff}` : ""}` : spec.body;
+  const body = spec.role === "config" ? configBody(c, pod) : spec.role === "echo" ? `Hostname: ${pod.metadata.name}\nIP: ${ip}\nRemoteAddr: ${src.ip}:${40000 + c.netRng.int(20000)}\nGET ${req.path} HTTP/1.1\nHost: ${req.httpHost}${src.xff ? `\nX-Forwarded-For: ${src.xff}` : ""}` : spec.body;
   return { ok: true, steps, httpStatus: 200, latencyMs: app.latencyMs, output: `${body}\n${seen}`, servedBy: pod.metadata.name, seenSource: src.ip, forwardedFor: src.xff };
 }
 
@@ -490,6 +490,15 @@ function timedOut(req: Req, steps: NetStep[], ip: string): NetResult {
   const failure = { kind: "timeout" as const, host: req.host, ip };
   if (req.tool === "ping") return { ok: false, steps, failure, output: pingOut(req.host, ip, 0) };
   return { ok: false, steps, failure, output: `curl: (28) Failed to connect to ${req.host} port ${req.port} after 130000 ms: Connection timed out` };
+}
+
+/** 설정 앱: env(시작할 때 읽음)와 마운트된 파일(요청마다 다시 읽음)을 그대로 */
+function configBody(c: Cluster, pod: Pod): string {
+  const v = c.containerConfig(pod);
+  if (!v) return "(설정 없음)";
+  const env = v.env.map(([k, val]) => `env  ${k}=${val}`);
+  const files = [...v.files].map(([path, val]) => `file ${path} = ${val}`);
+  return [...env, ...files].join("\n") || "(env·파일 없음)";
 }
 
 function inCidr(ip: string, cidr: string): boolean {

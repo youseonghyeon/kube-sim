@@ -3,7 +3,7 @@ import { describe, expect, test } from "vitest";
 import { runKubectl } from "../src/core/kubectl";
 import { DefSync } from "../src/model/defSync";
 import { EXAMPLES, resolveCommand } from "../src/model/examples";
-import { toYaml } from "../src/model/yaml";
+import { toYaml } from "../src/core/yaml";
 import { cluster, pods, web } from "./helpers";
 
 describe("review: 모델·화면 결함", () => {

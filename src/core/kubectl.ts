@@ -2,12 +2,14 @@
 // 축소판: default 네임스페이스만, 자주 쓰는 하위 명령·플래그만.
 import { ApiError } from "./api/server";
 import { controllerOf, isNodeReady, NODE_LEASE_NS, podRequests, qosClass, SERVICE_NAME_LABEL, type Deployment, type IngressPath, type KEvent, type Kind, type Node, type Pod, type ServiceType } from "./api/types";
-import { deployment, ingress, pdb, service, type Cluster } from "./cluster";
+import { configMap, deployment, ingress, pdb, secret, service, type Cluster } from "./cluster";
 import type { DrainJob } from "./drain";
 import type { NetResult } from "./net/request";
 import { deploymentHash, HASH_LABEL, revisionOf } from "./controllers/deployment";
 import { nodeUsage } from "./scheduler";
 import { fmtAge, fmtClock, fmtCpu, fmtMem, parseCpu, parseMem } from "./units";
+import { b64decode } from "./base64";
+import { toYaml } from "./yaml";
 
 export interface KubectlResult {
   ok: boolean;
@@ -25,6 +27,11 @@ export const KUBE_VERSION = "v1.31.0";
 type Res = Kind | "Event" | "Endpoints" | "all";
 
 const RESOURCE_ALIASES: Record<string, Res> = {
+  cm: "ConfigMap",
+  configmap: "ConfigMap",
+  configmaps: "ConfigMap",
+  secret: "Secret",
+  secrets: "Secret",
   svc: "Service",
   service: "Service",
   services: "Service",
@@ -72,6 +79,8 @@ const KIND_PREFIX: Record<Kind, string> = {
   PodDisruptionBudget: "poddisruptionbudget.policy",
   Ingress: "ingress.networking.k8s.io",
   Application: "application.argoproj.io",
+  ConfigMap: "configmap",
+  Secret: "secret",
 };
 const KIND_PLURAL: Record<Kind, string> = {
   Pod: "pods",
@@ -84,6 +93,8 @@ const KIND_PLURAL: Record<Kind, string> = {
   PodDisruptionBudget: "poddisruptionbudgets.policy",
   Ingress: "ingresses.networking.k8s.io",
   Application: "applications.argoproj.io",
+  ConfigMap: "configmaps",
+  Secret: "secrets",
 };
 
 export const KUBECTL_HELP = [
@@ -108,6 +119,11 @@ export const KUBECTL_HELP = [
   "  kubectl patch svc <이름> -p '{\"spec\":{\"externalTrafficPolicy\":\"Local\"}}'   (type·externalTrafficPolicy 만)",
   "  curl http://<호스트·LoadBalancer IP·노드IP:NodePort>   (kubectl 없이 — 클러스터 밖에서 보냄)",
   "  kubectl get leases -n kube-node-lease   (kubelet heartbeat)",
+  "  kubectl get <종류> <이름> -o yaml",
+  "  kubectl create configmap <이름> --from-literal=KEY=값 …  ·  kubectl create secret generic <이름> --from-literal=KEY=값 …",
+  "  kubectl patch configmap <이름> -p '{\"data\":{\"KEY\":\"새 값\"}}'   (secret 은 stringData 로 평문을, data 로 base64 를)",
+  "  kubectl exec <pod> -- env | cat <파일> | ls <디렉터리>   (컨테이너가 본 설정)",
+  "  echo <base64> | base64 -d",
 ].join("\n");
 
 export function runKubectl(cluster: Cluster, line: string): KubectlResult {
@@ -231,7 +247,8 @@ function needWorkload(kind: Res, allowed: Kind[], verb: string): Kind {
 function get(c: Cluster, pos: string[], flags: Map<string, string>): string {
   const { kind, names } = resourceArgs(pos);
   const wide = flags.get("o") === "wide";
-  if (flags.has("o") && !wide) throw new KubectlError(`error: 출력 형식 "${flags.get("o")}" 는 아직 없습니다 (wide 만). YAML 은 인스펙터의 YAML 탭에서 보세요`);
+  if (flags.get("o") === "yaml") return getYaml(c, kind, names);
+  if (flags.has("o") && !wide) throw new KubectlError(`error: 출력 형식 "${flags.get("o")}" 는 아직 없습니다 (wide · yaml 만)`);
   if (kind === "all") {
     const parts = [getPods(c, [], false, true), getServices(c, [], true), getDeploys(c, [], true), getRs(c, [], true)].filter(Boolean);
     return parts.join("\n\n") || "No resources found in default namespace.";
@@ -266,7 +283,29 @@ function get(c: Cluster, pos: string[], flags: Map<string, string>): string {
     case "Lease":
       if (flags.get("n") !== NODE_LEASE_NS) return "No resources found in default namespace. (노드 Lease 는 -n kube-node-lease)";
       return getLeases(c, names) || `No resources found in ${NODE_LEASE_NS} namespace.`;
+    case "ConfigMap": {
+      const cms = pick(c, "ConfigMap", c.api.list("ConfigMap", "default"), names);
+      return cms.length ? table(["NAME", "DATA", "AGE"], cms.map((m) => [m.metadata.name, String(Object.keys(m.data).length), fmtAge(c.now - m.metadata.creationTimestamp)])) : "No resources found in default namespace.";
+    }
+    case "Secret": {
+      const ss = pick(c, "Secret", c.api.list("Secret", "default"), names);
+      return ss.length ? table(["NAME", "TYPE", "DATA", "AGE"], ss.map((m) => [m.metadata.name, m.type, String(Object.keys(m.data).length), fmtAge(c.now - m.metadata.creationTimestamp)])) : "No resources found in default namespace.";
+    }
   }
+}
+
+/** kubectl get <종류> <이름> -o yaml — 저장된 그대로 (Secret 의 data 는 base64) */
+function getYaml(c: Cluster, kind: Res, names: string[]): string {
+  if (kind === "Event" || kind === "Endpoints" || kind === "all") throw new KubectlError(`error: -o yaml 은 오브젝트 하나에만 됩니다. 예: kubectl get configmap app-config -o yaml`);
+  if (!names.length) throw new KubectlError(`error: 이름을 함께 쓰세요. 예: kubectl get ${kind.toLowerCase()} <이름> -o yaml`);
+  const ns = kind === "Application" ? "argocd" : kind === "Lease" ? NODE_LEASE_NS : "default";
+  return names
+    .map((n) => {
+      const o = c.api.get(kind, n, ns);
+      if (!o) throw new ApiError("NotFound", `${KIND_PLURAL[kind]} "${n}" not found`);
+      return toYaml(o);
+    })
+    .join("\n---\n");
 }
 
 function pick<T extends { metadata: { name: string } }>(c: Cluster, kind: Kind, items: T[], names: string[]): T[] {
@@ -426,12 +465,29 @@ function getEvents(c: Cluster): string {
 
 function describe(c: Cluster, pos: string[]): string {
   const { kind, names } = resourceArgs(pos);
-  const k = needWorkload(kind, ["Pod", "Deployment", "ReplicaSet", "Node", "Service", "Ingress"], "describe");
+  const k = needWorkload(kind, ["Pod", "Deployment", "ReplicaSet", "Node", "Service", "Ingress", "ConfigMap", "Secret"], "describe");
   const name = names[0];
   if (!name) throw new KubectlError(`error: 이름을 함께 쓰세요. 예: kubectl describe ${k.toLowerCase()} <이름>`);
   const o = c.api.get(k, name, "default");
   if (!o) throw new ApiError("NotFound", `${KIND_PLURAL[k]} "${name}" not found`);
   switch (o.kind) {
+    case "ConfigMap":
+      // 실제 출력처럼 키마다 "KEY:\n----\n값"
+      return (
+        kv([["Name", o.metadata.name], ["Namespace", "default"], ["Labels", labelsText(o.metadata.labels)], ["Annotations", "<none>"]]) +
+        "\n\nData\n====\n" +
+        Object.entries(o.data).map(([key, v]) => `${key}:\n----\n${v}\n`).join("\n") +
+        "\nBinaryData\n====\n" +
+        eventsBlock(c, o.metadata.uid)
+      );
+    case "Secret":
+      // 실제 출력은 값을 보이지 않고 바이트 수만 (그래도 get -o yaml 의 base64 를 풀면 다 보인다)
+      return (
+        kv([["Name", o.metadata.name], ["Namespace", "default"], ["Labels", labelsText(o.metadata.labels)], ["Annotations", "<none>"]]) +
+        `\n\nType:  ${o.type}\n\nData\n====\n` +
+        Object.entries(o.data).map(([key, v]) => `${key}:  ${new TextEncoder().encode(b64decode(v) ?? "").length} bytes`).join("\n") +
+        eventsBlock(c, o.metadata.uid)
+      );
     case "Pod":
       return describePod(c, o);
     case "Node":
@@ -744,6 +800,11 @@ export function eventSource(source: string): string {
 
 function create(c: Cluster, pos: string[], flags: Map<string, string>, line: string, raw: string[] = []): KubectlResult {
   if (pos[0] === "ingress" || pos[0] === "ing") return createIngress(c, pos[1], raw, line);
+  if (pos[0] === "configmap" || pos[0] === "cm") return createConfig(c, "ConfigMap", pos[1], raw, line);
+  if (pos[0] === "secret") {
+    if (pos[1] !== "generic") throw new KubectlError(`error: kubectl create secret generic <이름> --from-literal=KEY=값 처럼 쓰세요 (generic 만 — 축소판)`);
+    return createConfig(c, "Secret", pos[2], raw, line);
+  }
   if (pos[0] === "pdb" || pos[0] === "poddisruptionbudget") {
     const name = pos[1];
     const sel = flags.get("selector");
@@ -773,6 +834,24 @@ function create(c: Cluster, pos: string[], flags: Map<string, string>, line: str
   userTrace(c, line);
   c.apply(deployment(name, { replicas, image, cpu: 100, memory: 128 }), "kubectl");
   return ok(`deployment.apps/${name} created`, true);
+}
+
+/** kubectl create configmap|secret generic <이름> --from-literal=KEY=값 (여러 번) */
+function createConfig(c: Cluster, kind: "ConfigMap" | "Secret", name: string | undefined, args: string[], line: string): KubectlResult {
+  const cmd = kind === "ConfigMap" ? "configmap" : "secret generic";
+  if (!name || name.startsWith("-")) throw new KubectlError(`error: 이름이 필요합니다. 예: kubectl create ${cmd} app-config --from-literal=GREETING=hello`);
+  const data: Record<string, string> = {};
+  for (const a of args) {
+    const lit = /^--from-literal=(.*)$/.exec(a)?.[1];
+    if (lit === undefined) continue;
+    const eq = lit.indexOf("=");
+    if (eq <= 0) throw new KubectlError(`error: --from-literal 은 KEY=값 이어야 합니다 (받은 값 "${lit}")`);
+    data[lit.slice(0, eq)] = lit.slice(eq + 1);
+  }
+  if (c.api.get(kind, name, "default")) throw new ApiError("AlreadyExists", `${KIND_PLURAL[kind]} "${name}" already exists`);
+  userTrace(c, line);
+  c.apply(kind === "ConfigMap" ? configMap(name, data) : secret(name, data), "kubectl");
+  return ok(`${KIND_PREFIX[kind]}/${name} created`, true);
 }
 
 function scale(c: Cluster, pos: string[], flags: Map<string, string>, line: string): KubectlResult {
@@ -839,7 +918,7 @@ function setCmd(c: Cluster, pos: string[], flags: Map<string, string>, line: str
 
 function del(c: Cluster, pos: string[], flags: Map<string, string>, line: string): KubectlResult {
   const { kind, names } = resourceArgs(pos);
-  const k = needWorkload(kind, ["Pod", "Deployment", "ReplicaSet", "Service", "PodDisruptionBudget", "Ingress"], "delete");
+  const k = needWorkload(kind, ["Pod", "Deployment", "ReplicaSet", "Service", "PodDisruptionBudget", "Ingress", "ConfigMap", "Secret"], "delete");
   if (!names.length) throw new KubectlError(`error: 지울 이름이 필요합니다. 예: kubectl delete ${k.toLowerCase()} <이름>`);
   for (const n of names) if (!c.api.get(k, n, "default")) throw new ApiError("NotFound", `${KIND_PLURAL[k]} "${n}" not found`);
   userTrace(c, line);
@@ -879,9 +958,39 @@ function cordon(c: Cluster, cmd: "cordon" | "uncordon", pos: string[], line: str
 }
 
 /** kubectl patch svc <이름> -p '<JSON merge patch>' — Service 의 spec.type · spec.externalTrafficPolicy 만 (축소판) */
+/** kubectl patch configmap|secret <이름> -p '{"data":{...}}' — data 의 키를 합친다 (null 이면 지움). secret 은 stringData(평문)도 받는다 */
+function patchConfig(c: Cluster, kind: "ConfigMap" | "Secret", name: string | undefined, flags: Map<string, string>, line: string): KubectlResult {
+  if (!name) throw new KubectlError(`error: 이름이 필요합니다. 예: kubectl patch ${KIND_PREFIX[kind]} app-config -p '{"data":{"GREETING":"hi"}}'`);
+  const raw = flags.get("p") ?? flags.get("patch");
+  if (!raw) throw new KubectlError("error: must specify -p to patch");
+  let body: { data?: Record<string, string | null>; stringData?: Record<string, string> };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    throw new KubectlError(`error: unable to parse "${raw}": 올바른 JSON 이 아닙니다 (작은따옴표로 감싸세요)`);
+  }
+  for (const key of Object.keys(body)) if (key !== "data" && (kind === "ConfigMap" || key !== "stringData")) throw new KubectlError(`error: patch 는 ${kind === "ConfigMap" ? "data" : "data · stringData"} 만 됩니다 (축소판). 받은 키 "${key}"`);
+  const cur = c.api.get(kind, name, "default");
+  if (!cur) throw new ApiError("NotFound", `${KIND_PLURAL[kind]} "${name}" not found`);
+  if (kind === "Secret")
+    for (const [k, v] of Object.entries(body.data ?? {}))
+      if (v !== null && b64decode(v) === undefined) throw new ApiError("Invalid", `Secret "${name}" is invalid: data[${k}]: Invalid value: "${v}": illegal base64 data (평문은 stringData 로 주세요)`);
+  userTrace(c, line);
+  const rv = cur.metadata.resourceVersion;
+  const out = c.api.patch(kind, name, "default", "kubectl", (o) => {
+    for (const [k, v] of Object.entries(body.data ?? {})) {
+      if (v === null) delete o.data[k];
+      else o.data[k] = v;
+    }
+    if (o.kind === "Secret" && body.stringData) o.stringData = { ...body.stringData };
+  });
+  return ok(`${KIND_PREFIX[kind]}/${name} ${out && out.metadata.resourceVersion !== rv ? "patched" : "patched (no change)"}`, true);
+}
+
 function patchCmd(c: Cluster, pos: string[], flags: Map<string, string>, line: string): KubectlResult {
   const { kind, names } = resourceArgs(pos);
-  needWorkload(kind, ["Service"], "patch");
+  needWorkload(kind, ["Service", "ConfigMap", "Secret"], "patch");
+  if (kind === "ConfigMap" || kind === "Secret") return patchConfig(c, kind, names[0], flags, line);
   const name = names[0];
   if (!name) throw new KubectlError("error: 이름이 필요합니다. 예: kubectl patch svc web -p '{\"spec\":{\"externalTrafficPolicy\":\"Local\"}}'");
   const raw = flags.get("p") ?? flags.get("patch");
@@ -1044,14 +1153,40 @@ function exec(c: Cluster, pos: string[], inner: string[]): KubectlResult {
   const cs = p.status.containerStatuses[0];
   if (!cs || !("running" in cs.state)) return fail(`error: unable to upgrade connection: container not found ("${ct.name}")`);
   const [tool0, ...rest] = inner;
+  if (tool0 === "env" || tool0 === "printenv" || tool0 === "cat" || tool0 === "ls") return execConfig(c, p, tool0, rest);
   const target = firstOperand(tool0 ?? "", rest);
   const tool = tool0 === "wget" ? "curl" : tool0;
   if (tool !== "curl" && tool !== "ping" && tool !== "nslookup")
-    return fail(`OCI runtime exec failed: exec failed: unable to start container process: exec: "${tool0}": executable file not found in $PATH: unknown\n(이 시뮬레이터의 컨테이너에는 curl·wget·ping·nslookup 만 있습니다 — 축소판)`);
+    return fail(`OCI runtime exec failed: exec failed: unable to start container process: exec: "${tool0}": executable file not found in $PATH: unknown\n(이 시뮬레이터의 컨테이너에는 curl·wget·ping·nslookup·env·cat·ls 만 있습니다 — 축소판)`);
   if (!target) return fail(`${tool}: 대상이 필요합니다. 예: kubectl exec ${podName} -- ${tool} ${tool === "curl" ? "http://web" : "web"}`);
   c.trace.add("user", "user", `kubectl exec ${podName} -- ${inner.join(" ")}`, { kind: "Pod", namespace: "default", name: podName });
   const r = c.requestFromPod(podName, tool, target);
   return { ok: r.ok, output: tool0 === "wget" ? wgetOutput(r) : r.output, mutated: true, net: r };
+}
+
+/** 컨테이너가 본 설정: env 는 시작할 때 읽은 그대로, 파일은 kubelet 이 마지막으로 맞춰 둔 내용 */
+function execConfig(c: Cluster, p: Pod, tool: string, args: string[]): KubectlResult {
+  const view = c.containerConfig(p);
+  if (!view) return fail(`error: unable to upgrade connection: container not found ("${p.spec.containers[0]!.name}")`);
+  if (tool === "env" || tool === "printenv") {
+    const all: [string, string][] = [["PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"], ["HOSTNAME", p.metadata.name], ...view.env, ["KUBERNETES_SERVICE_HOST", "10.96.0.1"], ["KUBERNETES_SERVICE_PORT", "443"], ["HOME", "/root"]];
+    if (tool === "printenv" && args[0]) {
+      const hit = all.filter(([k]) => k === args[0]);
+      return hit.length ? ok(hit.map(([, v]) => v).join("\n")) : { ok: false, output: "", mutated: false };
+    }
+    return ok(all.map(([k, v]) => `${k}=${v}`).join("\n"));
+  }
+  const path = args.find((a) => !a.startsWith("-"));
+  if (!path) return fail(`${tool}: 경로가 필요합니다. 예: kubectl exec ${p.metadata.name} -- ${tool} ${tool === "ls" ? "/etc/config" : "/etc/config/GREETING"}`);
+  const clean = path.replace(/\/+$/, "");
+  if (tool === "cat") {
+    const f = view.files.get(clean);
+    if (f !== undefined) return ok(f);
+    return fail(view.dirs.has(clean) ? `cat: read error: Is a directory` : `cat: can't open '${path}': No such file or directory`);
+  }
+  if (view.dirs.has(clean)) return ok([...view.files.keys()].filter((f) => f.startsWith(`${clean}/`)).map((f) => f.slice(clean.length + 1)).sort().join("\n"));
+  if (view.files.has(clean)) return ok(path);
+  return fail(`ls: ${path}: No such file or directory`);
 }
 
 /** 값을 받는 옵션 (그 뒤 인자는 대상이 아니다) */

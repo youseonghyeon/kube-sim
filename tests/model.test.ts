@@ -110,7 +110,7 @@ describe("정의 → 클러스터 동기화", () => {
 
 describe("YAML", () => {
   test("중첩·배열·문자열 따옴표", async () => {
-    const { toYaml } = await import("../src/model/yaml");
+    const { toYaml } = await import("../src/core/yaml");
     expect(toYaml({ kind: "Pod", metadata: { name: "a", labels: { app: "web" } }, spec: { containers: [{ name: "c", image: "nginx:1.27" }] }, n: 3, e: [] })).toBe(
       ["kind: Pod", "metadata:", "  name: a", "  labels:", "    app: web", "spec:", "  containers:", "  - name: c", "    image: nginx:1.27", "n: 3", "e: []"].join("\n"),
     );
@@ -118,7 +118,7 @@ describe("YAML", () => {
 });
 
 test("YAML: 숫자로 읽히는 문자열만 따옴표 (실제 kubectl -o yaml 처럼 cpu: \"1\", cpu: 250m)", async () => {
-  const { toYaml } = await import("../src/model/yaml");
+  const { toYaml } = await import("../src/core/yaml");
   expect(toYaml({ requests: { cpu: 1000, memory: 1024 } })).toBe('requests:\n  cpu: "1"\n  memory: 1Gi');
   expect(toYaml({ v: "1.5", w: "nginx:1.27", x: "True" })).toBe('v: "1.5"\nw: nginx:1.27\nx: "True"');
 });

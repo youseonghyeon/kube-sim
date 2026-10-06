@@ -7,6 +7,7 @@
 // 축소판: Argo CD 는 Pod 없는 부가 기능, 대상 네임스페이스는 default 하나, 비교는 "Git 에 적은 필드가 라이브와 같은가"(기본값으로 채워진 필드는 무시),
 //         sync 는 즉시 끝남, 훅·sync wave·리소스 finalizer 없음.
 import { refOf } from "../api/server";
+import { b64encode } from "../base64";
 import type { Application, HealthStatus, KObject, SyncStatus } from "../api/types";
 import type { TimerHandle } from "../clock";
 import type { Manifest } from "../cluster";
@@ -23,7 +24,7 @@ export const POLL_MS = 180_000;
 /** 드리프트를 보고 self-heal 하기까지 (실제 기본 selfHealTimeoutSeconds 5) */
 export const SELF_HEAL_MS = 5_000;
 
-const TRACKED = ["Deployment", "Service", "Ingress", "PodDisruptionBudget"] as const;
+const TRACKED = ["Deployment", "Service", "Ingress", "PodDisruptionBudget", "ConfigMap", "Secret"] as const;
 type TrackedKind = (typeof TRACKED)[number];
 
 export interface ResourceDiff {
@@ -311,7 +312,13 @@ export function diffFields(m: Manifest, live: KObject): string[] {
     }
     if (want !== have) out.push(`${path}: Git ${short(want)} · 라이브 ${short(have)}`);
   };
-  walk(m.spec, (live as { spec?: unknown }).spec, "spec");
+  if (m.kind === "ConfigMap" || m.kind === "Secret") {
+    // 키 집합까지 같아야 한다 (Git 에서 지운 키가 라이브에 남아 있으면 다름). Secret 은 Git 의 stringData 를 base64 로 바꿔 비교
+    const want: Record<string, string> = { ...(m.data ?? {}) };
+    if (m.kind === "Secret") for (const [k, v] of Object.entries(m.stringData ?? {})) want[k] = b64encode(v);
+    const have = (live as { data?: Record<string, string> }).data ?? {};
+    for (const k of new Set([...Object.keys(want), ...Object.keys(have)])) if (want[k] !== have[k]) out.push(`data.${k}: Git ${short(m.kind === "Secret" ? (want[k] === undefined ? undefined : "(값)") : want[k])} · 라이브 ${short(m.kind === "Secret" ? (have[k] === undefined ? undefined : "(값)") : have[k])}`);
+  } else walk(m.spec, (live as { spec?: unknown }).spec, "spec");
   walk(m.metadata.labels ?? {}, live.metadata.labels, "metadata.labels");
   const ann = (m.metadata as { annotations?: Record<string, string> }).annotations;
   if (ann) walk(ann, live.metadata.annotations ?? {}, "metadata.annotations");

@@ -39,9 +39,39 @@ export interface Probe {
   timeoutSeconds?: number;
 }
 
+/** 환경 변수: 값을 바로 쓰거나 ConfigMap·Secret 의 한 키에서 (컨테이너가 시작할 때 한 번 읽는다) */
+export interface EnvVar {
+  name: string;
+  value?: string;
+  valueFrom?: { configMapKeyRef?: { name: string; key: string }; secretKeyRef?: { name: string; key: string } };
+}
+
+/** ConfigMap·Secret 의 모든 키를 환경 변수로 */
+export interface EnvFromSource {
+  configMapRef?: { name: string };
+  secretRef?: { name: string };
+}
+
+/** Pod 의 volume 을 컨테이너 안 경로에. subPath 면 키 하나를 파일 하나로 (그 파일은 나중에 갱신되지 않는다) */
+export interface VolumeMount {
+  name: string;
+  mountPath: string;
+  subPath?: string;
+}
+
+/** ConfigMap·Secret 을 파일로 (키마다 파일 하나). kubelet 이 바뀐 내용을 잠시 뒤 파일에 반영한다 */
+export interface Volume {
+  name: string;
+  configMap?: { name: string };
+  secret?: { secretName: string };
+}
+
 export interface Container {
   name: string;
   image: string;
+  env?: EnvVar[];
+  envFrom?: EnvFromSource[];
+  volumeMounts?: VolumeMount[];
   /** requests: 스케줄러가 보는 예약 (0 = 적지 않음). limits: cgroup 이 거는 상한 (없으면 상한 없음) */
   resources: { requests: Resources; limits?: Partial<Resources> };
   ports?: { containerPort: number; protocol?: "TCP" }[];
@@ -67,6 +97,7 @@ export interface PodSpec {
   restartPolicy: "Always";
   terminationGracePeriodSeconds: number;
   tolerations?: Toleration[];
+  volumes?: Volume[];
 }
 
 export type ContainerState =
@@ -305,7 +336,29 @@ export interface Application {
   };
 }
 
-export type KObject = Pod | ReplicaSet | Deployment | Node | Lease | Service | EndpointSlice | PodDisruptionBudget | Ingress | Application;
+/** 설정 값 묶음 (평문). 컨테이너가 env·파일로 읽는다 */
+export interface ConfigMap {
+  apiVersion: "v1";
+  kind: "ConfigMap";
+  metadata: ObjectMeta;
+  data: Record<string, string>;
+  spec?: undefined;
+  status: Record<string, never>;
+}
+
+/** ConfigMap 과 같지만 값이 base64 (암호화 아님). 쓸 때 stringData 로 평문을 주면 API 서버가 data 로 바꿔 저장한다 */
+export interface Secret {
+  apiVersion: "v1";
+  kind: "Secret";
+  metadata: ObjectMeta;
+  type: "Opaque";
+  data: Record<string, string>;
+  stringData?: Record<string, string>;
+  spec?: undefined;
+  status: Record<string, never>;
+}
+
+export type KObject = Pod | ReplicaSet | Deployment | Node | Lease | Service | EndpointSlice | PodDisruptionBudget | Ingress | Application | ConfigMap | Secret;
 export type Kind = KObject["kind"];
 
 export type ObjectOf<K extends Kind> = Extract<KObject, { kind: K }>;

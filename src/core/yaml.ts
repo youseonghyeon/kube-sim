@@ -1,6 +1,6 @@
 // 오브젝트 → YAML 텍스트 (인스펙터의 YAML 탭). 읽기 전용 표시용이라 단순하게.
 // 코어는 cpu 를 millicore, memory 를 MiB 숫자로 다루지만, 화면의 YAML 은 실제 매니페스트처럼 250m · 128Mi 로 쓴다.
-import { fmtCpu, fmtMem } from "../core/units";
+import { fmtCpu, fmtMem } from "./units";
 
 const RESOURCE_KEYS = new Set(["requests", "limits", "capacity", "allocatable"]);
 
@@ -52,6 +52,6 @@ function render(v: unknown, indent: number): string {
 }
 
 function scalar(x: unknown): string {
-  if (typeof x === "string") return /^[\w./-][\w./:@-]*$/.test(x) && !/^(true|false|null|yes|no|on|off|y|n|~)$/i.test(x) && !/^[-+]?(\d+(\.\d*)?|\.\d+)([eE][-+]?\d+)?$/.test(x) ? x : JSON.stringify(x);
+  if (typeof x === "string") return /^[\w./-][\w./:@=+-]*$/.test(x) && !/^(true|false|null|yes|no|on|off|y|n|~)$/i.test(x) && !/^[-+]?(\d+(\.\d*)?|\.\d+)([eE][-+]?\d+)?$/.test(x) ? x : JSON.stringify(x);
   return String(x);
 }
