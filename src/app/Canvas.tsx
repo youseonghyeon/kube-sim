@@ -274,18 +274,17 @@ function ControlPlane({ now, windowMs }: { now: number; windowMs: number; versio
       <div class="cp-label">컨트롤 플레인</div>
       <div class="cp-row">
         {CONTROL_PLANE.map((comp) => {
-          const last = lastByActor(events, comp.actors, (k) => comp.id !== "kube-apiserver" && k.startsWith("api."));
+          // apiserver 상자: 10초마다 오는 Lease heartbeat 는 빼고 (노드 칸이 보여 준다) 의미 있는 쓰기를 남긴다
+          const last = lastByActor(events, comp.actors, (e) => (comp.id === "kube-apiserver" ? e.ref?.kind === "Lease" : e.kind.startsWith("api.")));
           const active = !!last && now - last.t <= windowMs;
           return (
             <div key={comp.id} class={`cp-comp${active ? " active" : ""}`} data-comp={comp.id}>
               <div class="cp-name mono">{comp.title}</div>
               <div class="cp-role">{comp.role}</div>
+              {last && comp.id === "controller-manager" && <div class="cp-actor">{last.actor}</div>}
               <div class="cp-last" title={last?.msg}>
                 {last ? (
-                  <>
-                    {comp.id === "controller-manager" && <span class="cp-actor">{last.actor}</span>}
-                    {last.msg}
-                  </>
+                  last.msg
                 ) : (
                   <span class="muted">아직 한 일 없음</span>
                 )}
@@ -299,7 +298,7 @@ function ControlPlane({ now, windowMs }: { now: number; windowMs: number; versio
 }
 
 function NodeCard({ n, now, flashes, focus, selected }: { n: NodeView; now: number; flashes: Map<string, string>; focus: Focus; selected: boolean }) {
-  const kubelet = lastByActor(sim.cluster.trace.events, [`kubelet@${n.name}`], (k) => k.startsWith("api."));
+  const kubelet = lastByActor(sim.cluster.trace.events, [`kubelet@${n.name}`], (e) => e.kind.startsWith("api."));
   const story = nodeStory(n, now);
   return (
     <div class={`node${selected ? " sel" : ""}${n.cordoned ? " cordoned" : ""}${n.powered ? "" : " off"}${n.ready ? "" : " notready"}`} data-node={n.name}>

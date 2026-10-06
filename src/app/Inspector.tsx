@@ -1044,7 +1044,7 @@ function ServiceOverview({ svc }: { svc: Service }) {
           ["ClusterIP", <span class="mono">{svc.spec.clusterIP}</span>],
           ["포트", <span class="mono">{svc.spec.ports.map((x) => `${x.port} → ${x.targetPort}${x.nodePort ? ` (NodePort ${x.nodePort})` : ""}`).join(", ")}</span>],
           ["selector", <span class="mono">{Object.entries(svc.spec.selector).map(([k, v]) => `${k}=${v}`).join(",") || "없음"}</span>],
-          ["DNS", <span class="mono small">{svc.metadata.name}.default.svc.cluster.local</span>],
+          ["DNS", <span class="mono small">{`${svc.metadata.name}.default.svc.cluster.local`.split(".").map((part, i) => (i ? <><wbr />.{part}</> : part))}</span>],
         ]}
       />
       {svc.spec.type !== "ClusterIP" && <ExternalAccess svc={svc} />}
@@ -1797,7 +1797,7 @@ function HpaOverview({ h }: { h: HorizontalPodAutoscaler }) {
         {h.status.conditions.map((x) => (
           <li key={x.type} title={x.message}>
             <span class="mono small">{x.type}</span>
-            <span class={`small ${(x.type === "ScalingLimited" ? x.status === "True" : x.status !== "True") ? "warn-text" : ""}`}>
+            <span class={`small ${(x.type === "ScalingLimited" ? x.reason === "TooManyReplicas" : x.status !== "True") ? "warn-text" : ""}`}>
               {x.status} · {x.reason}
             </span>
           </li>

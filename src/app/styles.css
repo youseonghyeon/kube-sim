@@ -417,6 +417,35 @@ pre {
   color: var(--ink-3);
   font-size: 12px;
 }
+/* 빈 섹션은 한 줄로 (제목 · 없음 안내 · +) — 노드 목록이 화면 밖으로 밀리지 않게. 안내 전문은 title */
+.side-section:has(> .side-empty) {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 8px;
+}
+.side-section:has(> .side-empty) > .side-head {
+  display: contents;
+}
+.side-section:has(> .side-empty) > .side-head > span {
+  padding-left: 14px;
+}
+.side-section:has(> .side-empty) > .side-head > .icon-btn {
+  order: 3;
+  margin-right: 8px;
+}
+.side-section:has(> .side-empty) + .side-section:has(> .side-empty) {
+  margin-top: 6px;
+  padding-top: 6px;
+}
+.side-section:has(> .side-empty) > .side-empty {
+  order: 2;
+  padding: 0;
+  overflow: hidden;
+  font-size: 11px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
 .tree-line {
   position: relative;
 }
@@ -564,7 +593,8 @@ pre {
 }
 .cp-row {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  /* 캔버스가 좁으면 2열 — 상자 제목(kube-controller-manager)이 쪼개지지 않게 */
+  grid-template-columns: repeat(auto-fit, minmax(176px, 1fr));
   gap: 10px;
 }
 .cp-comp {
@@ -596,11 +626,18 @@ pre {
   color: var(--ink-2);
   font-size: 12px;
 }
+/* controller-manager 안의 어느 컨트롤러가 했는지 — 이름이 길어 메시지와 줄을 나눈다 */
 .cp-actor {
-  margin-right: 6px;
+  margin-top: 6px;
+  overflow: hidden;
   color: var(--accent);
   font-family: var(--mono);
   font-size: 11px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.cp-actor + .cp-last {
+  margin-top: 2px;
 }
 
 /* 부하 발생기 */
@@ -1760,7 +1797,8 @@ body.resizing-row * {
   border-radius: 4px;
   background: var(--surface-2);
   font-size: 11px;
-  word-break: break-all;
+  /* 띄어쓰기에서 먼저 줄을 바꾸고, 긴 이름만 중간에서 */
+  overflow-wrap: anywhere;
 }
 .try-expect {
   color: var(--ink-2);
@@ -1967,6 +2005,9 @@ body.resizing-row * {
   display: grid;
   gap: 10px;
   margin: 4px 0 6px;
+}
+.usage-head .mono {
+  word-break: keep-all;
 }
 .usage-head {
   display: flex;

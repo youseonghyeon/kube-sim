@@ -404,10 +404,10 @@ export const CONTROL_PLANE = [
   { id: "coredns", title: "CoreDNS", role: "Service 이름 → ClusterIP (kube-dns 10.96.0.10). 실제로는 kube-system 의 Pod — 축소판", actors: ["coredns"] },
 ] as const;
 
-export function lastByActor(events: TraceEvent[], actors: readonly string[], skipKinds: (k: string) => boolean = () => false): TraceEvent | undefined {
+export function lastByActor(events: TraceEvent[], actors: readonly string[], skip: (e: TraceEvent) => boolean = () => false): TraceEvent | undefined {
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i]!;
-    if (actors.includes(e.actor) && !skipKinds(e.kind)) return e;
+    if (actors.includes(e.actor) && !skip(e)) return e;
   }
   return undefined;
 }

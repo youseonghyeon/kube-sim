@@ -77,7 +77,7 @@ export function Sidebar() {
             ))}
           </div>
         ))}
-        {!view.deployments.length && <div class="side-empty">없음. + 로 추가하거나 kubectl create deployment</div>}
+        {!view.deployments.length && <div class="side-empty" title="없음. + 로 추가하거나 kubectl create deployment">없음. + 로 추가하거나 kubectl create deployment</div>}
       </div>
       <div class="side-section">
         <div class="side-head">
@@ -122,7 +122,7 @@ export function Sidebar() {
             )}
           </div>
         ))}
-        {!view.statefulSets.length && <div class="side-empty">없음. + 로 DB 하나 띄우기</div>}
+        {!view.statefulSets.length && <div class="side-empty" title="없음. + 로 DB 하나 띄우기">없음. + 로 DB 하나 띄우기</div>}
       </div>
       <div class="side-section">
         <div class="side-head">
@@ -153,7 +153,7 @@ export function Sidebar() {
             <span class={`tree-count ${s.ready.length ? "ok" : "wait"}`}>{s.ready.length}</span>
           </button>
         ))}
-        {!view.services.length && <div class="side-empty">없음. + 또는 kubectl expose</div>}
+        {!view.services.length && <div class="side-empty" title="없음. + 또는 kubectl expose">없음. + 또는 kubectl expose</div>}
       </div>
       <div class="side-section">
         <div class="side-head">
@@ -182,7 +182,7 @@ export function Sidebar() {
             </span>
           </button>
         ))}
-        {!hpas.length && <div class="side-empty">없음. + 또는 kubectl autoscale</div>}
+        {!hpas.length && <div class="side-empty" title="없음. + 또는 kubectl autoscale">없음. + 또는 kubectl autoscale</div>}
       </div>
       <div class="side-section">
         <div class="side-head">
@@ -207,7 +207,7 @@ export function Sidebar() {
             <span class="tree-count">{Object.keys(o.data).length}</span>
           </button>
         ))}
-        {!configs.length && <div class="side-empty">없음. + 또는 kubectl create configmap</div>}
+        {!configs.length && <div class="side-empty" title="없음. + 또는 kubectl create configmap">없음. + 또는 kubectl create configmap</div>}
       </div>
       <div class="side-section">
         <div class="side-head">
@@ -233,7 +233,7 @@ export function Sidebar() {
             <span class="tree-kind mono">{Object.entries(n.spec.podSelector.matchLabels ?? {}).map(([k, v]) => `${k}=${v}`).join(",") || "모든 Pod"}</span>
           </button>
         ))}
-        {!netpols.length && <div class="side-empty">없음 — 모든 트래픽 허용. + 로 추가</div>}
+        {!netpols.length && <div class="side-empty" title="없음 — 모든 트래픽 허용. + 로 추가">없음 — 모든 트래픽 허용. + 로 추가</div>}
       </div>
       {apps.length > 0 && (
         <div class="side-section">
@@ -279,7 +279,7 @@ export function Sidebar() {
             <span class="tree-kind">{i.spec.ingressClassName}</span>
           </button>
         ))}
-        {!ings.length && <div class="side-empty">없음. + 또는 kubectl create ingress</div>}
+        {!ings.length && <div class="side-empty" title="없음. + 또는 kubectl create ingress">없음. + 또는 kubectl create ingress</div>}
       </div>
       {pdbs.length > 0 && (
         <div class="side-section">

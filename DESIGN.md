@@ -28,11 +28,14 @@
 - 인스펙터 폭: 기본 340px, 왼쪽 가장자리를 끌어 280~760px(캔버스가 360px 밑으로 줄지 않게), 두 번 누르거나 ↔ 단추로 보통(340)/넓게(560 — describe·YAML 이 가로 스크롤 없이), 오른쪽 끝까지 끌거나 ⌘\ 로 접으면 40px 레일. 머리 줄 오른쪽 위에 도구(↔·접기).
 - 서랍 높이: 기본 260px, 위쪽 가장자리를 끌어 120px ~ 상단바 바로 아래까지, 두 번 누르면 기본/끝까지, 아래 끝까지 끌면 접힘.
 - 폭·높이·접힘은 브라우저(localStorage)에 남는다. 끄는 동안 손잡이에 accent-soft.
+- 왼쪽 목록: 빈 섹션은 한 줄(제목 · "없음" 안내 줄임 · +)로 접는다 — 섹션이 많아져도 노드 목록이 첫 화면에 남게. 안내 전문은 title.
+- 줄바꿈: 명령·한글 문구는 띄어쓰기에서 먼저 바꾼다(`overflow-wrap: anywhere`·`word-break: keep-all`), `break-all` 은 쓰지 않는다. 도메인 이름은 점 뒤에서(`<wbr>`).
+- 토글 단추(같은 줄에서 하나를 고름, 예: CPU 부하 0·10·40/s)는 `.btn.on` — accent 테두리·accent-soft 바탕.
 패널은 그림자 없이 1px 선으로만 분리. 카드 없음.
 
 ## 캔버스 (확정 2026-10-02 — 사용자 확인 "좋은데")
 위에서 아래로 한 열. 필요한 줄만 보인다.
-- 컨트롤 플레인: 한 줄의 작은 상자 4개(kube-apiserver·kube-scheduler·kube-controller-manager·CoreDNS). 상자마다 최근에 한 일(`cp-last`)을 짧게 — 컨트롤 루프의 "결정" 이 여기와 Pod 칩의 이름표(예: `생성 · replicaset-controller`)로 보이고, 자세한 이유는 로그에.
+- 컨트롤 플레인: 한 줄의 작은 상자 4개(kube-apiserver·kube-scheduler·kube-controller-manager·CoreDNS — 캔버스가 좁으면 2열). 상자마다 최근에 한 일(`cp-last`)을 짧게 — controller-manager 는 어느 컨트롤러인지 한 줄 위에 따로, apiserver 는 10초마다의 Lease heartbeat 를 빼고 — 컨트롤 루프의 "결정" 이 여기와 Pod 칩의 이름표(예: `생성 · replicaset-controller`)로 보이고, 자세한 이유는 로그에.
 - GitOps 줄(Application 이 있을 때): Git 저장소 → Argo CD Application(Synced/OutOfSync·Healthy·리비전).
 - 바깥 줄(Ingress·LoadBalancer 가 있을 때): 바깥 클라이언트·인터넷 → Ingress(호스트·경로 → Service) 상자.
 - Service 줄: 노드 밖에 떠 있는 가상 상자(점선 테두리) — "어디에도 없는 주소". 이름·타입·ClusterIP(·NodePort·LB IP)·엔드포인트 ready 수. 고르면 엔드포인트 Pod 로 옅은 선(Overlay).
