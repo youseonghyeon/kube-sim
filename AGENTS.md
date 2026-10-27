@@ -74,7 +74,7 @@
 ## 배포 (net-sim 과 같은 방식, 2026-10-05)
 - `Dockerfile`: node:24-alpine 에서 `vite build` → `nginxinc/nginx-unprivileged`(8080, uid 101) 가 `dist/` 서빙. 설정은 `deploy/nginx.conf`(`/healthz`, `/assets/` 영구 캐시, 나머지는 `index.html` 폴백).
 - `.github/workflows/docker-image.yml`: main push → `npm run typecheck` + `npm test` 게이트 → `ghcr.io/youseonghyeon/kube-sim`(`<sha>`, `latest`) 푸시 → `deploy/values.yaml` 의 `image.tag` 를 봇 커밋으로 갱신.
-- `deploy/`: Helm 차트(Deployment — readOnlyRootFilesystem + `/tmp` emptyDir, `revisionHistoryLimit: 2`(옛 ReplicaSet 2개까지, 사용자 요청) / Service / Ingress — tailscale 클래스 + funnel → `https://kube-sim.<tailnet>.ts.net`). `argocd/application.yaml`: namespace `app`, automated prune/selfHeal. 시크릿 없음.
+- `deploy/`: Helm 차트(Deployment — readOnlyRootFilesystem + `/tmp` emptyDir, `revisionHistoryLimit: 2`(옛 ReplicaSet 2개까지, 사용자 요청) / Service. Ingress 없음 — 주소 `https://kube-sim.121-190-32-143.sslip.io` — 라우팅·TLS 는 서버 쪽 설정(저장소 밖), Tailscale 은 쓰지 않음, 2026-10-27). `argocd/application.yaml`: namespace `app`, automated prune/selfHeal. 시크릿 없음.
 - 차트를 고치면 `helm lint deploy && helm template kube-sim deploy` 로 렌더를 확인한다. 브라우저 스모크(`ui-check`)는 CI 에서 돌리지 않는다.
 
 ## 검증

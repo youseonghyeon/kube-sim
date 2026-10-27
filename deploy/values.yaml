@@ -13,11 +13,6 @@ revisionHistoryLimit: 2
 service:
   port: 8080
 
-ingress:
-  # https://<hostname>.<tailnet>.ts.net 으로 노출된다.
-  hostname: kube-sim
-  # true면 Tailscale Funnel로 공인 인터넷에 노출한다 (tailnet 정책에 funnel nodeAttr 필요).
-  funnel: true
 
 resources:
   requests:
